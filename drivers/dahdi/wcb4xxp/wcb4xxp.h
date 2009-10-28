@@ -6,7 +6,9 @@
 #ifndef _B4XX_H_
 #define _B4XX_H_
 
+#if !defined(__FreeBSD__)
 #include <linux/ioctl.h>
+#endif
 
 #define HFC_NR_FIFOS	32
 #define HFC_ZMIN	0x80			/* from datasheet */
@@ -432,11 +434,26 @@ struct b4xxp {
 	char *variety;
 	int chiprev;				/* revision of HFC-4S */
 
+#if defined(__FreeBSD__)
+	device_t dev;				/* device */
+	device_t pdev;				/* device */
+
+	struct resource *io_res;		/* resource for I/O range */
+	int io_rid;
+
+	struct resource *mem_res;		/* resource for memory range */
+	int mem_rid;
+
+	struct resource *irq_res;		/* resource for irq */
+	int irq_rid;
+	void *irq_handle;
+#else
 	struct pci_dev *pdev;			/* Pointer to PCI device */
 	struct device *dev;			/* kernel dev struct (from pdev->dev) */
 	void __iomem *addr;			/* I/O address (memory mapped) */
 	void __iomem *ioaddr;			/* I/O address (index based) */
 	int irq;				/* IRQ used by device */
+#endif
 
 	spinlock_t reglock;			/* lock for all register accesses */
 	spinlock_t seqlock;			/* lock for "sequence" accesses that must be ordered */
@@ -473,7 +490,9 @@ struct b4xxp {
 
 	/* Flags for our bottom half */
 	unsigned int shutdown;			/* 1=bottom half doesn't process anything, just returns */
+#if !defined(__FreeBSD__)
 	struct tasklet_struct b4xxp_tlet;
+#endif
 };
 
 /* CPLD access bits */
@@ -519,7 +538,14 @@ struct b4xxp {
 		zlen += (HFC_ZMAX - HFC_ZMIN) + 1;	\
 	}
 
+#if defined(__FreeBSD__)
+#define flush_pci()	(void) bus_space_read_1(	\
+	rman_get_bustag(b4->mem_res),			\
+	rman_get_bushandle(b4->mem_res),		\
+	R_STATUS)
+#else
 #define flush_pci()	(void)ioread8(b4->addr + R_STATUS)
+#endif
 
 #endif	/* __KERNEL__ */
 #endif	/* _B4XX_H_ */

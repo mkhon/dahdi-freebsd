@@ -26,6 +26,18 @@
  * this program for more details.
  */
 
+#if defined(__FreeBSD__)
+#include <sys/param.h>
+#include <sys/types.h>
+#include <sys/conf.h>
+#include <sys/ctype.h>
+#include <sys/libkern.h>
+#include <sys/module.h>
+
+#define module_printk(level, fmt, args...) printf(fmt, ## args)
+#define debug_printk(level, fmt, args...) if (debug >= level) printf("%s: " fmt, __FUNCTION__, ## args)
+
+#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -33,12 +45,13 @@
 #include <linux/ctype.h>
 #include <linux/moduleparam.h>
 
-#include <dahdi/kernel.h>
-
-static int debug;
-
 #define module_printk(level, fmt, args...) printk(level "%s: " fmt, THIS_MODULE->name, ## args)
 #define debug_printk(level, fmt, args...) if (debug >= level) printk("%s (%s): " fmt, THIS_MODULE->name, __FUNCTION__, ## args)
+
+static int debug;
+#endif /* !__FreeBSD__ */
+
+#include <dahdi/kernel.h>
 
 static int echo_can_create(struct dahdi_chan *chan, struct dahdi_echocanparams *ecp,
 			   struct dahdi_echocanparam *p, struct dahdi_echocan_state **ec);
@@ -134,6 +147,26 @@ static void __exit mod_exit(void)
 	dahdi_unregister_echocan_factory(&my_factory);
 }
 
+#if defined(__FreeBSD__)
+static int
+echocan_jpah_modevent(module_t mod __unused, int type, void *data __unused)
+{
+	switch (type) {
+	case MOD_LOAD:
+		return mod_init();
+	case MOD_UNLOAD:
+		mod_exit();
+		return 0;
+	default:
+		return EOPNOTSUPP;
+	}
+}
+
+DEV_MODULE(dahdi_echocan_jpah, echocan_jpah_modevent, NULL);
+MODULE_VERSION(dahdi_echocan_jpah, 1);
+MODULE_DEPEND(dahdi_echocan_jpah, dahdi, 1, 1, 1);
+
+#else /* !__FreeBSD__ */
 module_param(debug, int, S_IRUGO | S_IWUSR);
 
 MODULE_DESCRIPTION("DAHDI Jason Parker Audio Hoser");
@@ -142,3 +175,4 @@ MODULE_LICENSE("GPL v2");
 
 module_init(mod_init);
 module_exit(mod_exit);
+#endif /* !__FreeBSD__ */

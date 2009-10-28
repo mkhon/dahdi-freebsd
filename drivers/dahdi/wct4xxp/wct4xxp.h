@@ -22,7 +22,11 @@
  * this program for more details.
  */
 
+#if defined(__FreeBSD__)
+#include <sys/ioccom.h>
+#else
 #include <linux/ioctl.h>
+#endif
 
 #define FRMR_TTR_BASE 0x10
 #define FRMR_RTR_BASE 0x0c

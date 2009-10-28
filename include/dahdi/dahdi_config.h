@@ -20,12 +20,14 @@
 #define _DAHDI_CONFIG_H
 
 #ifdef __KERNEL__
+#if !defined(__FreeBSD__)
 #include <linux/version.h>
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,18)
 #include <linux/config.h>
 #else
 #include <linux/autoconf.h>
 #endif
+#endif /* !__FreeBSD__ */
 #endif
 
 /* DAHDI compile time options */

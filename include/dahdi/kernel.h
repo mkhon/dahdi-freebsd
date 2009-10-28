@@ -35,8 +35,24 @@
 
 #include <dahdi/user.h>
 #include <dahdi/fasthdlc.h>
-
 #include <dahdi/dahdi_config.h>
+
+#if defined(__FreeBSD__)
+#include <sys/param.h>
+#include <sys/kernel.h>
+#include <sys/selinfo.h>
+#include <sys/taskqueue.h>
+#include <sys/uio.h>
+
+#include <dahdi/compat/types.h>
+#include <dahdi/compat/list.h>
+#include <dahdi/compat/bsd.h>
+
+#define dahdi_pci_get_bus(dev)	pci_get_bus(dev)
+#define dahdi_pci_get_slot(dev)	pci_get_slot(dev)
+#define dahdi_pci_get_irq(dev)	pci_get_irq(dev)
+
+#else /* !__FreeBSD */
 #include <linux/version.h>
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,18)
 #include <linux/config.h>
@@ -90,6 +106,14 @@
 #define dev_set_name(dev, format, ...) \
 	snprintf((dev)->bus_id, BUS_ID_SIZE, format, ## __VA_ARGS__);
 #endif
+
+#define spin_lock_destroy(lock)
+#define _LIST_HEAD(n)	LIST_HEAD(n)
+
+#define dahdi_pci_get_bus(dev)	((dev)->bus->number)
+#define dahdi_pci_get_slot(dev)	(PCI_SLOT((dev)->devfn) + 1)
+#define dahdi_pci_get_irq(dev)	((dev)->irq)
+#endif /* !__FreeBSD__ */
 
 /*! Default chunk size for conferences and such -- static right now, might make
    variable sometime.  8 samples = 1 ms = most frequent service interval possible
@@ -375,8 +399,17 @@ struct dahdi_echocan_state {
 			/*! The echocan enabled its NLP automatically.
 			 */
 			u32 NLP_auto_enabled:1;
-		};
+		} bit;
 	} events;
+};
+
+struct pollinfo {
+#if defined(__FreeBSD__)
+	struct selinfo selinfo;
+	struct task task;
+#else
+	wait_queue_head_t wait_queue;
+#endif
 };
 
 struct dahdi_chan {
@@ -433,7 +466,11 @@ struct dahdi_chan {
 
 	/* Specified by driver, readable by DAHDI */
 	void *pvt;			/*!< Private channel data */
+#if defined(__FreeBSD__)
+	struct cdev *file;	/*!< Device structure */
+#else
 	struct file *file;	/*!< File structure */
+#endif
 	
 	
 	struct dahdi_span	*span;			/*!< Span we're a member of */
@@ -497,7 +534,7 @@ struct dahdi_chan {
 
 	/* I/O Mask */	
 	int		iomask;  /*! I/O Mux signal mask */
-	wait_queue_head_t sel;	/*! thingy for select stuff */
+	struct pollinfo	sel;	/*! thingy for select stuff */
 	
 	/* HDLC state machines */
 	struct fasthdlc_state txhdlc;
@@ -650,6 +687,9 @@ struct dahdi_hdlc {
 struct dahdi_chardev {
 	const char *name;
 	__u8 minor;
+#if defined(__FreeBSD__)
+	struct cdev *dev;
+#endif
 };
 
 int dahdi_register_chardev(struct dahdi_chardev *dev);
@@ -922,7 +962,12 @@ struct dahdi_transcoder {
 	int numchannels;
 	unsigned int srcfmts;
 	unsigned int dstfmts;
+#if defined(__FreeBSD__)
+	int (*write)(struct dahdi_transcoder_channel *channel, struct uio *uio, int ioflags);
+	int (*read)(struct dahdi_transcoder_channel *channel, struct uio *uio, int ioflags);
+#else
 	struct file_operations fops;
+#endif
 	int (*allocate)(struct dahdi_transcoder_channel *channel);
 	int (*release)(struct dahdi_transcoder_channel *channel);
 	/* Transcoder channels */
@@ -1048,7 +1093,9 @@ struct dahdi_tone *dahdi_mf_tone(const struct dahdi_chan *chan, char digit, int 
 void dahdi_ec_chunk(struct dahdi_chan *chan, unsigned char *rxchunk, const unsigned char *txchunk);
 void dahdi_ec_span(struct dahdi_span *span);
 
+#if !defined(__FreeBSD__)
 extern struct file_operations *dahdi_transcode_fops;
+#endif
 
 /* Don't use these directly -- they're not guaranteed to
    be there. */
@@ -1169,7 +1216,7 @@ static inline short dahdi_txtone_nextsample(struct dahdi_chan *ss)
 /*! Maximum audio mask */
 #define DAHDI_FORMAT_AUDIO_MASK	((1 << 16) - 1)
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,14)
+#if defined(__FreeBSD__) || LINUX_VERSION_CODE < KERNEL_VERSION(2,6,14)
 #define kzalloc(a, b) kcalloc(1, a, b)
 #endif
 

@@ -19,20 +19,33 @@
  * this program for more details.
  */
 
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/libkern.h>
+#include <sys/time.h>
+
+#include <dahdi/compat/bsd.h>
+#else
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/string.h>
 #include <linux/time.h>
 #include <linux/version.h>
+#endif /* !__FreeBSD__ */
 
 #include "vpm450m.h"
 #include "oct6100api/oct6100_api.h"
 
+#if defined(__FreeBSD__)
+#define vmalloc(size) kmalloc(size, 0)
+#define vfree(p) kfree(p)
+#else
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,18)
 #include <linux/config.h>
 #else
 #include <linux/autoconf.h>
 #endif
+#endif /* !__FreeBSD__ */
 
 /* API for Octasic access */
 UINT32 Oct6100UserGetTime(tPOCT6100_GET_TIME f_pTime)
@@ -42,7 +55,11 @@ UINT32 Oct6100UserGetTime(tPOCT6100_GET_TIME f_pTime)
 	unsigned long long total_usecs;
 	unsigned int mask = ~0;
 	
+#if defined(__FreeBSD__)
+	getmicrotime(&tv);
+#else
 	do_gettimeofday(&tv);
+#endif
 	total_usecs = (((unsigned long long)(tv.tv_sec)) * 1000000) + 
 				  (((unsigned long long)(tv.tv_usec)));
 	f_pTime->aulWallTimeUs[0] = (total_usecs & mask);
@@ -466,7 +483,11 @@ struct vpm450m *init_vpm450m(void *wc, int *isalaw, int numspans, const struct f
 	ChipOpen->pProcessContext = wc;
 
 	ChipOpen->pbyImageFile = firmware->data;
+#if defined(__FreeBSD__)
+	ChipOpen->ulImageSize = firmware->datasize;
+#else
 	ChipOpen->ulImageSize = firmware->size;
+#endif
 	ChipOpen->fEnableMemClkOut = TRUE;
 	ChipOpen->ulMemClkFreq = cOCT6100_MCLK_FREQ_133_MHZ;
 	ChipOpen->ulMaxChannels = vpm450m->numchans;

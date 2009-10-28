@@ -31,6 +31,18 @@
  * this program for more details.
  */
 
+#if defined(__FreeBSD__)
+#include <sys/param.h>
+#include <sys/types.h>
+#include <sys/conf.h>
+#include <sys/ctype.h>
+#include <sys/libkern.h>
+#include <sys/module.h>
+
+#define module_printk(level, fmt, args...) printf(fmt, ## args)
+#define debug_printk(level, fmt, args...) if (debug >= level) printf("%s: " fmt, __FUNCTION__, ## args)
+
+#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
@@ -39,13 +51,15 @@
 #include <linux/ctype.h>
 #include <linux/moduleparam.h>
 
-#include <dahdi/kernel.h>
-
-static int debug;
-static int aggressive;
-
 #define module_printk(level, fmt, args...) printk(level "%s: " fmt, THIS_MODULE->name, ## args)
 #define debug_printk(level, fmt, args...) if (debug >= level) printk("%s (%s): " fmt, THIS_MODULE->name, __FUNCTION__, ## args)
+
+static int debug;
+#endif /* !__FreeBSD__ */
+
+#include <dahdi/kernel.h>
+
+static int aggressive;
 
 #define ABS(a) abs(a!=-32768?a:-32767)
 
@@ -307,7 +321,7 @@ static inline short get_cc_s(echo_can_cb_s *cb, int pos)
 
 static inline void init_cc(struct ec_pvt *pvt, int N, int maxy, int maxu)
 {
-	void *ptr = pvt;
+	char *ptr = (char *) pvt;
 	unsigned long tmp;
 
 	/* Double-word align past end of state */
@@ -322,15 +336,15 @@ static inline void init_cc(struct ec_pvt *pvt, int N, int maxy, int maxu)
 	pvt->beta2_i = DEFAULT_BETA1_I;
   
 	/* Allocate coefficient memory */
-	pvt->a_i = ptr;
+	pvt->a_i = (int *) ptr;
 	ptr += (sizeof(int) * pvt->N_d);
-	pvt->a_s = ptr;
+	pvt->a_s = (short *) ptr;
 	ptr += (sizeof(short) * pvt->N_d);
 
 	/* Allocate backup memory */
-	pvt->b_i = ptr;
+	pvt->b_i = (int *) ptr;
 	ptr += (sizeof(int) * pvt->N_d);
-	pvt->c_i = ptr;
+	pvt->c_i = (int *) ptr;
 	ptr += (sizeof(int) * pvt->N_d);
 
 	/* Reset Y circular buffer (short version) */
@@ -387,7 +401,7 @@ static void echo_can_free(struct dahdi_chan *chan, struct dahdi_echocan_state *e
 }
 
 #ifdef DC_NORMALIZE
-short inline dc_removal(int *dc_estimate, short samp)
+static short inline dc_removal(int *dc_estimate, short samp)
 {
 	*dc_estimate += ((((int)samp << 15) - *dc_estimate) >> 9);
 	return samp - (*dc_estimate >> 15);
@@ -880,6 +894,26 @@ static void __exit mod_exit(void)
 	dahdi_unregister_echocan_factory(&my_factory);
 }
 
+#if defined(__FreeBSD__)
+static int
+echocan_mg2_modevent(module_t mod __unused, int type, void *data __unused)
+{
+	switch (type) {
+	case MOD_LOAD:
+		return mod_init();
+	case MOD_UNLOAD:
+		mod_exit();
+		return 0;
+	default:
+		return EOPNOTSUPP;
+	}
+}
+
+DEV_MODULE(dahdi_echocan_mg2, echocan_mg2_modevent, NULL);
+MODULE_VERSION(dahdi_echocan_mg2, 1);
+MODULE_DEPEND(dahdi_echocan_mg2, dahdi, 1, 1, 1);
+
+#else /* !__FreeBSD__ */
 module_param(debug, int, S_IRUGO | S_IWUSR);
 module_param(aggressive, int, S_IRUGO | S_IWUSR);
 
@@ -889,3 +923,4 @@ MODULE_LICENSE("GPL v2");
 
 module_init(mod_init);
 module_exit(mod_exit);
+#endif /* !__FreeBSD__ */

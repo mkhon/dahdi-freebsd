@@ -25,7 +25,11 @@
 #ifndef _WCTDM_H
 #define _WCTDM_H
 
+#if defined(__FreeBSD__)
+#include <sys/ioccom.h>
+#else
 #include <linux/ioctl.h>
+#endif
 
 #define NUM_REGS	  109
 #define NUM_INDIRECT_REGS 105

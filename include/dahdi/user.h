@@ -35,10 +35,14 @@
 #ifndef _DAHDI_USER_H
 #define _DAHDI_USER_H
 
+#if defined(__FreeBSD__)
+#include <dahdi/compat/types.h>
+#else
 #include <linux/types.h>
 #include <linux/ioctl.h>
+#endif /* !__FreeBSD__ */
 
-#ifndef ELAST
+#if !defined(__FreeBSD__) && !defined(ELAST)
 #define ELAST 500
 #endif
 
@@ -697,7 +701,11 @@ struct dahdi_tone_def_header {
 	struct dahdi_tone_def tones[0];
 };
 
+#if defined(__FreeBSD__)
+#define DAHDI_LOADZONE			_IOW(DAHDI_CODE, 25, struct dahdi_tone_def_header *)
+#else
 #define DAHDI_LOADZONE			_IOW(DAHDI_CODE, 25, struct dahdi_tone_def_header)
+#endif
 
 /*
  * Free a tone zone 
@@ -775,7 +783,11 @@ struct dahdi_echocanparams {
 	struct dahdi_echocanparam params[0];
 };
 
+#if defined(__FreeBSD__)
+#define DAHDI_ECHOCANCEL_PARAMS		_IOW(DAHDI_CODE, 30, struct dahdi_echocanparams *)
+#else
 #define DAHDI_ECHOCANCEL_PARAMS		_IOW(DAHDI_CODE, 33, struct dahdi_echocanparams)
+#endif
 
 /*
  * Return a channel's channel number

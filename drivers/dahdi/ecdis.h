@@ -29,7 +29,9 @@
 #include "biquad.h"
 
 #define FALSE 0
+#ifndef TRUE
 #define TRUE (!FALSE)
+#endif
 
 static inline void echo_can_disable_detector_init (echo_can_disable_detector_state_t *det)
 {

@@ -34,7 +34,34 @@
  * this program for more details.
  */
 
+#if defined(__FreeBSD__)
+#include <sys/param.h>
+#include <sys/bus.h>
+#include <sys/conf.h>
+#include <sys/ctype.h>
+#include <sys/kernel.h>
+#include <sys/fcntl.h>
+#include <sys/ioccom.h>
+#include <sys/libkern.h>
+#include <sys/malloc.h>
+#include <sys/module.h>
+#include <sys/poll.h>
+#include <net/ppp_defs.h>
+#include <sys/selinfo.h>
+#include <sys/syscallsubr.h>
 
+#include <machine/stdarg.h>
+
+#include "version.h"
+
+#define module_printk(level, fmt, args...) printf(fmt, ## args)
+
+#define FOP_READ_ARGS_DECL	struct file *file, struct uio *uio, size_t count
+#define FOP_READ_ARGS		file, uio, count
+#define FOP_WRITE_ARGS_DECL	struct file *file, struct uio *uio, size_t count
+#define FOP_WRITE_ARGS		file, uio, count
+
+#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -52,11 +79,19 @@
 
 #include <asm/atomic.h>
 
+#include <dahdi/version.h>
+
 #define module_printk(level, fmt, args...) printk(level "%s: " fmt, THIS_MODULE->name, ## args)
+
+#define FOP_READ_ARGS_DECL	struct file *file, char __user *usrbuf, size_t count, loff_t *ppos
+#define FOP_READ_ARGS		file, usrbuf, count, ppos
+#define FOP_WRITE_ARGS_DECL	struct file *file, const char __user *usrbuf, size_t count, loff_t *ppos
+#define FOP_WRITE_ARGS		file, usrbuf, count, ppos
+
+#endif /* !__FreeBSD__ */
 
 /* #define BUF_MUNGE */
 
-#include <dahdi/version.h>
 /* Grab fasthdlc with tables */
 #define FAST_HDLC_NEED_TABLES
 #include <dahdi/kernel.h>
@@ -92,9 +127,6 @@
 #define dev_to_ztchan(h) (((struct dahdi_hdlc *)(dev_to_hdlc(h)->priv))->chan)
 #define ztchan_to_dev(h) ((h)->hdlcnetdev->netdev)
 
-/* macro-oni for determining a unit (channel) number */
-#define	UNIT(file) MINOR(file->f_dentry->d_inode->i_rdev)
-
 /* names of tx level settings */
 static char *dahdi_txlevelnames[] = {
 "0 db (CSU)/0-133 feet (DSX-1)",
@@ -106,6 +138,377 @@ static char *dahdi_txlevelnames[] = {
 "-15db (CSU)",
 "-22.5db (CSU)"
 } ;
+
+#if defined(__FreeBSD__)
+#if 0
+static void rlprintf(int pps, const char *fmt, ...)
+{
+	va_list ap;
+	static struct timeval last_printf;
+	static int count;
+
+	if (ppsratecheck(&last_printf, &count, pps)) {
+		va_start(ap, fmt);
+		vprintf(fmt, ap);
+		va_end(ap);
+	}
+}
+
+#define DPRINTF(fmt, args...)	rlprintf(10, "%s: " fmt, __FUNCTION__, ##args)
+#endif
+
+MALLOC_DEFINE(M_DAHDI, "dahdi", "DAHDI interface data structures");
+
+/*
+ * FCS lookup table as calculated by genfcstab.
+ */
+static u_short fcstab[256] = {
+	0x0000,	0x1189,	0x2312,	0x329b,	0x4624,	0x57ad,	0x6536,	0x74bf,
+	0x8c48,	0x9dc1,	0xaf5a,	0xbed3,	0xca6c,	0xdbe5,	0xe97e,	0xf8f7,
+	0x1081,	0x0108,	0x3393,	0x221a,	0x56a5,	0x472c,	0x75b7,	0x643e,
+	0x9cc9,	0x8d40,	0xbfdb,	0xae52,	0xdaed,	0xcb64,	0xf9ff,	0xe876,
+	0x2102,	0x308b,	0x0210,	0x1399,	0x6726,	0x76af,	0x4434,	0x55bd,
+	0xad4a,	0xbcc3,	0x8e58,	0x9fd1,	0xeb6e,	0xfae7,	0xc87c,	0xd9f5,
+	0x3183,	0x200a,	0x1291,	0x0318,	0x77a7,	0x662e,	0x54b5,	0x453c,
+	0xbdcb,	0xac42,	0x9ed9,	0x8f50,	0xfbef,	0xea66,	0xd8fd,	0xc974,
+	0x4204,	0x538d,	0x6116,	0x709f,	0x0420,	0x15a9,	0x2732,	0x36bb,
+	0xce4c,	0xdfc5,	0xed5e,	0xfcd7,	0x8868,	0x99e1,	0xab7a,	0xbaf3,
+	0x5285,	0x430c,	0x7197,	0x601e,	0x14a1,	0x0528,	0x37b3,	0x263a,
+	0xdecd,	0xcf44,	0xfddf,	0xec56,	0x98e9,	0x8960,	0xbbfb,	0xaa72,
+	0x6306,	0x728f,	0x4014,	0x519d,	0x2522,	0x34ab,	0x0630,	0x17b9,
+	0xef4e,	0xfec7,	0xcc5c,	0xddd5,	0xa96a,	0xb8e3,	0x8a78,	0x9bf1,
+	0x7387,	0x620e,	0x5095,	0x411c,	0x35a3,	0x242a,	0x16b1,	0x0738,
+	0xffcf,	0xee46,	0xdcdd,	0xcd54,	0xb9eb,	0xa862,	0x9af9,	0x8b70,
+	0x8408,	0x9581,	0xa71a,	0xb693,	0xc22c,	0xd3a5,	0xe13e,	0xf0b7,
+	0x0840,	0x19c9,	0x2b52,	0x3adb,	0x4e64,	0x5fed,	0x6d76,	0x7cff,
+	0x9489,	0x8500,	0xb79b,	0xa612,	0xd2ad,	0xc324,	0xf1bf,	0xe036,
+	0x18c1,	0x0948,	0x3bd3,	0x2a5a,	0x5ee5,	0x4f6c,	0x7df7,	0x6c7e,
+	0xa50a,	0xb483,	0x8618,	0x9791,	0xe32e,	0xf2a7,	0xc03c,	0xd1b5,
+	0x2942,	0x38cb,	0x0a50,	0x1bd9,	0x6f66,	0x7eef,	0x4c74,	0x5dfd,
+	0xb58b,	0xa402,	0x9699,	0x8710,	0xf3af,	0xe226,	0xd0bd,	0xc134,
+	0x39c3,	0x284a,	0x1ad1,	0x0b58,	0x7fe7,	0x6e6e,	0x5cf5,	0x4d7c,
+	0xc60c,	0xd785,	0xe51e,	0xf497,	0x8028,	0x91a1,	0xa33a,	0xb2b3,
+	0x4a44,	0x5bcd,	0x6956,	0x78df,	0x0c60,	0x1de9,	0x2f72,	0x3efb,
+	0xd68d,	0xc704,	0xf59f,	0xe416,	0x90a9,	0x8120,	0xb3bb,	0xa232,
+	0x5ac5,	0x4b4c,	0x79d7,	0x685e,	0x1ce1,	0x0d68,	0x3ff3,	0x2e7a,
+	0xe70e,	0xf687,	0xc41c,	0xd595,	0xa12a,	0xb0a3,	0x8238,	0x93b1,
+	0x6b46,	0x7acf,	0x4854,	0x59dd,	0x2d62,	0x3ceb,	0x0e70,	0x1ff9,
+	0xf78f,	0xe606,	0xd49d,	0xc514,	0xb1ab,	0xa022,	0x92b9,	0x8330,
+	0x7bc7,	0x6a4e,	0x58d5,	0x495c,	0x3de3,	0x2c6a,	0x1ef1,	0x0f78
+};
+
+static int
+request_module(const char *fmt, ...)
+{
+	va_list ap;
+	char modname[128];
+	int fileid;
+
+	va_start(ap, fmt);
+	vsnprintf(modname, sizeof(modname), fmt, ap);
+	va_end(ap);
+
+	return kern_kldload(curthread, modname, &fileid);
+}
+
+/*
+ * Concatenate src on the end of dst.  At most strlen(dst)+n+1 bytes
+ * are written at dst (at most n+1 bytes being appended).  Return dst.
+ */
+static char *
+strncat(char * __restrict dst, const char * __restrict src, size_t n)
+{
+	if (n != 0) {
+		char *d = dst;
+		const char *s = src;
+
+		while (*d != 0)
+			d++;
+		do {
+			if ((*d = *s++) == 0)
+				break;
+			d++;
+		} while (--n != 0);
+		*d = 0;
+	}
+	return (dst);
+}
+
+static struct cdev *dev_ctl = NULL;
+
+static struct cdevsw dahdi_devsw;
+
+struct inode;
+
+struct file {
+	struct cdev *dev;
+	int f_flags;
+};
+
+struct vm_area_struct {
+	vm_offset_t offset;
+	vm_paddr_t *paddr;
+	int nprot;
+};
+
+struct poll_table_struct {
+	struct selinfo *selinfo;
+};
+
+#define UNIT(file)	dev2unit(file->dev)
+
+struct dahdi_fp {
+	int fflags;		/**< file flags */
+	void *private_data;	/**< private data */
+};
+
+static void
+dahdi_fp_free(void *fp)
+{
+	free(fp, M_DAHDI);
+}
+
+static int
+dahdi_get_fp(struct cdev *dev, struct dahdi_fp **pfp)
+{
+	int error = devfs_get_cdevpriv((void **) pfp);
+	if (error == ENOENT) {
+		*pfp = malloc(sizeof(struct dahdi_fp), M_DAHDI, M_NOWAIT | M_ZERO);
+		if (*pfp == NULL)
+			return -ENOMEM;
+
+		error = devfs_set_cdevpriv(*pfp, dahdi_fp_free);
+		if (error) {
+			dahdi_fp_free(*pfp);
+			return -ENXIO;
+		}
+	} else if (error) {
+		return (error);
+	}
+
+	return 0;
+}
+
+static int
+dahdi_get_flags(struct cdev *dev)
+{
+	int error;
+	struct dahdi_fp *fp;
+
+	error = devfs_get_cdevpriv((void **) &fp);
+	if (error || fp == NULL)
+		return 0;
+
+	return fp->fflags;
+}
+
+static void
+dahdi_set_flags(struct file *file, int fflags)
+{
+	int error;
+	struct dahdi_fp *fp;
+
+	error = dahdi_get_fp(file->dev, &fp);
+	if (error)
+		return;
+
+	fp->fflags = fflags;
+}
+
+static void *
+dahdi_get_private_data(struct file *file)
+{
+	int error;
+	struct dahdi_fp *fp;
+
+	error = devfs_get_cdevpriv((void **) &fp);
+	if (error || fp == NULL)
+		return NULL;
+
+	return fp->private_data;
+}
+
+static void
+dahdi_set_private_data(struct file *file, void *private_data)
+{
+	int error;
+	struct dahdi_fp *fp;
+
+	error = dahdi_get_fp(file->dev, &fp);
+	if (error)
+		return;
+
+	fp->private_data = private_data;
+}
+
+static void
+handle_selwakeup(void *context, int pending)
+{
+	struct selinfo *selinfo = context;
+	selwakeup(selinfo);
+}
+
+static void
+dahdi_poll_init(struct pollinfo *sel)
+{
+	TASK_INIT(&sel->task, 0, handle_selwakeup, &sel->selinfo);
+}
+
+static void
+dahdi_poll_wait(struct file *file, struct pollinfo *sel, struct poll_table_struct *wait_table)
+{
+	wait_table->selinfo = &sel->selinfo;
+}
+
+static void
+dahdi_poll_wakeup(struct pollinfo *sel)
+{
+	taskqueue_enqueue_fast(taskqueue_fast, &sel->task);
+}
+
+static void
+dahdi_poll_drain(struct pollinfo *sel)
+{
+	taskqueue_drain(taskqueue_fast, &sel->task);
+}
+
+/* sleep in user space until woken up. Equivilant of tsleep() in BSD */
+static int
+schluffen(wait_queue_head_t *q)
+{
+	int rc = tsleep(q, PZERO | PCATCH, "schluffen", 10);
+	switch (rc) {
+	case EINTR:
+	case ERESTART:
+		return rc;
+	}
+	return 0;
+}
+
+static int
+dahdi_fop_read(FOP_READ_ARGS_DECL, int off, void *buf, int iocount)
+{
+	return uiomove(buf, iocount, uio);
+}
+
+static int
+dahdi_fop_write(FOP_WRITE_ARGS_DECL, int off, void *buf, int iocount)
+{
+	return uiomove(buf, iocount, uio);
+}
+
+static int
+dahdi_copy_from_user(void *to, const void *from, int n)
+{
+	return copyin(from, to, n);
+}
+
+#define try_module_get(m)	(1)
+#define module_put(m)		((void) (&m))
+
+#else /* !__FreeBSD__ */
+/* macro-oni for determining a unit (channel) number */
+#define	UNIT(file) MINOR(file->f_dentry->d_inode->i_rdev)
+
+static int
+dahdi_get_flags(struct file *file)
+{
+	if (!file)
+		return 0;
+
+	return file->f_flags;
+}
+
+static void *
+dahdi_get_private_data(struct file *file)
+{
+	return file->private_data;
+}
+
+static void
+dahdi_set_private_data(struct file *file, void *private_data)
+{
+	file->private_data = private_data;
+}
+
+static void
+dahdi_poll_init(struct pollinfo *sel)
+{
+	init_wait_queue_head(&sel->wait_queue);
+}
+
+static void
+dahdi_poll_wait(struct file *file, struct pollinfo *sel, struct poll_table_struct *wait_table)
+{
+	poll_wait(file, &sel->wait_queue, wait_table);
+}
+
+static void
+dahdi_poll_wakeup(struct pollinfo *sel)
+{
+	wake_up_interruptible(&sel->wait_queue);
+}
+
+#define dahdi_poll_drain(sel)
+
+/* sleep in user space until woken up. Equivilant of tsleep() in BSD */
+static int
+schluffen(wait_queue_head_t *q)
+{
+	DECLARE_WAITQUEUE(wait, current);
+
+	add_wait_queue(q, &wait);
+	current->state = TASK_INTERRUPTIBLE;
+
+	if (!signal_pending(current))
+		schedule();
+
+	current->state = TASK_RUNNING;
+	remove_wait_queue(q, &wait);
+
+	if (signal_pending(current))
+		return -ERESTARTSYS;
+
+	return 0;
+}
+
+static int
+dahdi_fop_read(FOP_READ_ARGS_DECL, int off, void *buf, int iocount)
+{
+	return copy_to_user(usrbuf + off, buf, iocount);
+}
+
+static int
+dahdi_fop_write(FOP_WRITE_ARGS_DECL, int off, void *buf, int iocount)
+{
+	return copy_from_user(buf, usrbuf + off, iocount);
+}
+
+static int
+dahdi_copy_from_user(void *to, const void __user *from, int n)
+{
+	return copy_from_user(to, from, n);
+}
+
+int
+dahdi_register_chardev(struct dahdi_chardev *dev)
+{
+	char udevname[strlen(dev->name) + sizeof("dahdi!")];
+
+	strcpy(udevname, "dahdi!");
+	strcat(udevname, dev->name);
+	CLASS_DEV_CREATE(dahdi_class, MKDEV(DAHDI_MAJOR, dev->minor), NULL, udevname);
+	return 0;
+}
+
+int
+dahdi_unregister_chardev(struct dahdi_chardev *dev)
+{
+	CLASS_DEV_DESTROY(dahdi_class, MKDEV(DAHDI_MAJOR, dev->minor));
+	return 0;
+}
+
+struct file_operations *dahdi_transcode_fops = NULL;
 
 EXPORT_SYMBOL(dahdi_transcode_fops);
 EXPORT_SYMBOL(dahdi_init_tone_state);
@@ -187,6 +590,7 @@ static struct class_simple *dahdi_class = NULL;
 #define class_create class_simple_create
 #define class_destroy class_simple_destroy
 #endif
+#endif /* !__FreeBSD__ */
 
 static int deftaps = 64;
 
@@ -228,8 +632,6 @@ static sumtype *conf_sums;
 static sumtype *conf_sums_prev;
 
 static struct dahdi_span *master;
-static struct file_operations dahdi_fops;
-struct file_operations *dahdi_transcode_fops = NULL;
 
 static struct {
 	int	src;	/* source conf number */
@@ -365,10 +767,10 @@ struct dahdi_timer {
 	int ping;		/* Whether we've been ping'd */
 	int tripped;	/* Whether we're tripped */
 	struct list_head list;
-	wait_queue_head_t sel;
+	struct pollinfo sel;
 };
 
-static LIST_HEAD(zaptimers);
+static _LIST_HEAD(zaptimers);
 
 #ifdef DEFINE_SPINLOCK
 static DEFINE_SPINLOCK(zaptimerlock);
@@ -417,10 +819,6 @@ u_char __dahdi_lin2a[16384];
 
 static u_char defgain[256];
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 10)
-#define __RW_LOCK_UNLOCKED() RW_LOCK_UNLOCKED
-#endif
-
 #ifdef DEFINE_RWLOCK
 static DEFINE_RWLOCK(zone_lock);
 static DEFINE_RWLOCK(chan_lock);
@@ -436,10 +834,14 @@ static struct dahdi_zone *tone_zones[DAHDI_TONE_ZONE_MAX];
 #ifdef DEFINE_RWLOCK
 static DEFINE_RWLOCK(ecfactory_list_lock);
 #else
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 10)
+#define __RW_LOCK_UNLOCKED() RW_LOCK_UNLOCKED
+#endif
+
 static rwlock_t ecfactory_list_lock = __RW_LOCK_UNLOCKED();
 #endif
 
-static LIST_HEAD(ecfactory_list);
+static _LIST_HEAD(ecfactory_list);
 
 struct ecfactory {
 	const struct dahdi_echocan_factory *ec;
@@ -888,7 +1290,7 @@ static void __qevent(struct dahdi_chan *chan, int event)
 
 	wake_up_interruptible(&chan->readbufq);
 	wake_up_interruptible(&chan->writebufq);
-	wake_up_interruptible(&chan->sel);
+	dahdi_poll_wakeup(&chan->sel);
 
 	return;
 }
@@ -904,26 +1306,6 @@ void dahdi_qevent_lock(struct dahdi_chan *chan, int event)
 	spin_lock_irqsave(&chan->lock, flags);
 	__qevent(chan, event);
 	spin_unlock_irqrestore(&chan->lock, flags);
-}
-
-/* sleep in user space until woken up. Equivilant of tsleep() in BSD */
-static int schluffen(wait_queue_head_t *q)
-{
-	DECLARE_WAITQUEUE(wait, current);
-
-	add_wait_queue(q, &wait);
-	current->state = TASK_INTERRUPTIBLE;
-
-	if (!signal_pending(current))
-		schedule();
-
-	current->state = TASK_RUNNING;
-	remove_wait_queue(q, &wait);
-
-	if (signal_pending(current))
-		return -ERESTARTSYS;
-
-	return 0;
 }
 
 static inline void calc_fcs(struct dahdi_chan *ss, int inwritebuf)
@@ -1252,7 +1634,7 @@ static void close_channel(struct dahdi_chan *chan)
 	chan->pulsecount = 0;
 	chan->pulsetimer = 0;
 	chan->ringdebtimer = 0;
-	init_waitqueue_head(&chan->sel);
+	dahdi_poll_init(&chan->sel);
 	init_waitqueue_head(&chan->readbufq);
 	init_waitqueue_head(&chan->writebufq);
 	init_waitqueue_head(&chan->eventbufq);
@@ -1968,10 +2350,12 @@ static void dahdi_chan_unreg(struct dahdi_chan *chan)
 			}
 		}
 	chan->channo = -1;
+	spin_lock_destroy(&chan->lock);
+	dahdi_poll_drain(&chan->sel);
 	write_unlock_irqrestore(&chan_lock, flags);
 }
 
-static ssize_t dahdi_chan_read(struct file *file, char __user *usrbuf, size_t count, int unit)
+static ssize_t dahdi_chan_read(FOP_READ_ARGS_DECL, int unit)
 {
 	struct dahdi_chan *chan = chans[unit];
 	int amnt;
@@ -2040,7 +2424,7 @@ static ssize_t dahdi_chan_read(struct file *file, char __user *usrbuf, size_t co
 					pass = 128;
 				for (x = 0; x < pass; x++)
 					lindata[x] = DAHDI_XLAW(chan->readbuf[res][x + pos], chan);
-				if (copy_to_user(usrbuf + (pos << 1), lindata, pass << 1))
+				if (dahdi_fop_read(FOP_READ_ARGS, pos << 1, lindata, pass << 1))
 					return -EFAULT;
 				left -= pass;
 				pos += pass;
@@ -2050,7 +2434,7 @@ static ssize_t dahdi_chan_read(struct file *file, char __user *usrbuf, size_t co
 		if (amnt > chan->readn[res])
 			amnt = chan->readn[res];
 		if (amnt) {
-			if (copy_to_user(usrbuf, chan->readbuf[res], amnt))
+			if (dahdi_fop_read(FOP_READ_ARGS, 0, chan->readbuf[res], amnt))
 				return -EFAULT;
 		}
 	}
@@ -2097,7 +2481,7 @@ static int num_filled_bufs(struct dahdi_chan *chan)
 	return range1 + range2;
 }
 
-static ssize_t dahdi_chan_write(struct file *file, const char __user *usrbuf, size_t count, int unit)
+static ssize_t dahdi_chan_write(FOP_WRITE_ARGS_DECL, int unit)
 {
 	unsigned long flags;
 	struct dahdi_chan *chan = chans[unit];
@@ -2178,7 +2562,7 @@ static ssize_t dahdi_chan_write(struct file *file, const char __user *usrbuf, si
 				pass = left;
 				if (pass > 128)
 					pass = 128;
-				if (copy_from_user(lindata, usrbuf + (pos << 1), pass << 1)) {
+				if (dahdi_fop_write(FOP_WRITE_ARGS, pos << 1, lindata, pass << 1)) {
 					return -EFAULT;
 				}
 				left -= pass;
@@ -2188,7 +2572,7 @@ static ssize_t dahdi_chan_write(struct file *file, const char __user *usrbuf, si
 			}
 			chan->writen[res] = amnt >> 1;
 		} else {
-			if (copy_from_user(chan->writebuf[res], usrbuf, amnt)) {
+			if (dahdi_fop_write(FOP_WRITE_ARGS, 0, chan->writebuf[res], amnt)) {
 				return -EFAULT;
 			}
 			chan->writen[res] = amnt;
@@ -2545,7 +2929,7 @@ static int initialize_channel(struct dahdi_chan *chan)
 	chan->itimerset = chan->itimer = chan->otimer = 0;
 	chan->ringdebtimer = 0;
 
-	init_waitqueue_head(&chan->sel);
+	dahdi_poll_init(&chan->sel);
 	init_waitqueue_head(&chan->readbufq);
 	init_waitqueue_head(&chan->writebufq);
 	init_waitqueue_head(&chan->eventbufq);
@@ -2624,9 +3008,9 @@ static int dahdi_timing_open(struct inode *inode, struct file *file)
 	if (!(t = kzalloc(sizeof(*t), GFP_KERNEL)))
 		return -ENOMEM;
 
-	init_waitqueue_head(&t->sel);
+	dahdi_poll_init(&t->sel);
 	INIT_LIST_HEAD(&t->list);
-	file->private_data = t;
+	dahdi_set_private_data(file, t);
 
 	spin_lock_irqsave(&zaptimerlock, flags);
 	list_add(&t->list, &zaptimers);
@@ -2640,7 +3024,7 @@ static int dahdi_timer_release(struct inode *inode, struct file *file)
 	struct dahdi_timer *t, *cur, *next;
 	unsigned long flags;
 
-	if (!(t = file->private_data))
+	if (!(t = dahdi_get_private_data(file)))
 		return 0;
 
 	spin_lock_irqsave(&zaptimerlock, flags);
@@ -2659,6 +3043,7 @@ static int dahdi_timer_release(struct inode *inode, struct file *file)
 		return 0;
 	}
 
+	dahdi_poll_drain(&t->sel);
 	kfree(cur);
 
 	return 0;
@@ -2695,7 +3080,7 @@ static int dahdi_specchan_open(struct inode *inode, struct file *file, int unit)
 					res = chan->span->open(chan);
 			}
 			if (!res) {
-				chan->file = file;
+				chan->file = file->dev;
 				spin_unlock_irqrestore(&chan->lock, flags);
 			} else {
 				spin_unlock_irqrestore(&chan->lock, flags);
@@ -2789,6 +3174,7 @@ static int dahdi_open(struct inode *inode, struct file *file)
 	if (!unit)
 		return dahdi_ctl_open(inode, file);
 	if (unit == 250) {
+#if !defined(__FreeBSD__)
 		if (!dahdi_transcode_fops) {
 			if (request_module("dahdi_transcode")) {
 				return -ENXIO;
@@ -2808,6 +3194,7 @@ static int dahdi_open(struct inode *inode, struct file *file)
 			 * file_operations table. */
 			 WARN_ON(1);
 		}
+#endif /* !__FreeBSD__ */
 		return -ENXIO;
 	}
 	if (unit == 253) {
@@ -2822,7 +3209,7 @@ static int dahdi_open(struct inode *inode, struct file *file)
 	if (unit == 255) {
 		chan = dahdi_alloc_pseudo();
 		if (chan) {
-			file->private_data = chan;
+			dahdi_set_private_data(file, chan);
 			return dahdi_specchan_open(inode, file, chan->channo);
 		} else {
 			return -ENXIO;
@@ -2843,7 +3230,7 @@ static int dahdi_open(struct inode *inode, struct file *file)
 }
 #endif
 
-static ssize_t dahdi_read(struct file *file, char __user *usrbuf, size_t count, loff_t *ppos)
+static ssize_t dahdi_read(FOP_READ_ARGS_DECL)
 {
 	int unit = UNIT(file);
 	struct dahdi_chan *chan;
@@ -2857,27 +3244,27 @@ static ssize_t dahdi_read(struct file *file, char __user *usrbuf, size_t count, 
 		return -EINVAL;
 
 	if (unit == 254) {
-		chan = file->private_data;
+		chan = dahdi_get_private_data(file);
 		if (!chan)
 			return -EINVAL;
-		return dahdi_chan_read(file, usrbuf, count, chan->channo);
+		return dahdi_chan_read(FOP_READ_ARGS, chan->channo);
 	}
 
 	if (unit == 255) {
-		chan = file->private_data;
+		chan = dahdi_get_private_data(file);
 		if (!chan) {
 			module_printk(KERN_NOTICE, "No pseudo channel structure to read?\n");
 			return -EINVAL;
 		}
-		return dahdi_chan_read(file, usrbuf, count, chan->channo);
+		return dahdi_chan_read(FOP_READ_ARGS, chan->channo);
 	}
 	if (count < 0)
 		return -EINVAL;
 
-	return dahdi_chan_read(file, usrbuf, count, unit);
+	return dahdi_chan_read(FOP_READ_ARGS, unit);
 }
 
-static ssize_t dahdi_write(struct file *file, const char __user *usrbuf, size_t count, loff_t *ppos)
+static int dahdi_write(FOP_WRITE_ARGS_DECL)
 {
 	int unit = UNIT(file);
 	struct dahdi_chan *chan;
@@ -2889,20 +3276,20 @@ static ssize_t dahdi_write(struct file *file, const char __user *usrbuf, size_t 
 	if (unit == 253)
 		return -EINVAL;
 	if (unit == 254) {
-		chan = file->private_data;
+		chan = dahdi_get_private_data(file);
 		if (!chan)
 			return -EINVAL;
-		return dahdi_chan_write(file, usrbuf, count, chan->channo);
+		return dahdi_chan_write(FOP_WRITE_ARGS, chan->channo);
 	}
 	if (unit == 255) {
-		chan = file->private_data;
+		chan = dahdi_get_private_data(file);
 		if (!chan) {
 			module_printk(KERN_NOTICE, "No pseudo channel structure to read?\n");
 			return -EINVAL;
 		}
-		return dahdi_chan_write(file, usrbuf, count, chan->channo);
+		return dahdi_chan_write(FOP_WRITE_ARGS, chan->channo);
 	}
-	return dahdi_chan_write(file, usrbuf, count, unit);
+	return dahdi_chan_write(FOP_WRITE_ARGS, unit);
 
 }
 
@@ -2955,8 +3342,7 @@ static int ioctl_load_zone(unsigned long data)
 	if (!work)
 		return -ENOMEM;
 
-	if (copy_from_user(&work->th, (struct dahdi_tone_def_header *)data,
-	    sizeof(work->th))) {
+	if (dahdi_copy_from_user(&work->th, (struct dahdi_tone_def_header *)data, sizeof(work->th))) {
 		kfree(work);
 		return -EFAULT;
 	}
@@ -2982,7 +3368,7 @@ static int ioctl_load_zone(unsigned long data)
 		return -ENOMEM;
 	}
 
-	ptr += sizeof(*z);
+	ptr = (char *) ptr + sizeof(*z);
 	space -= sizeof(*z);
 
 	dahdi_copy_string(z->name, work->th.name, sizeof(z->name));
@@ -3008,8 +3394,7 @@ static int ioctl_load_zone(unsigned long data)
 			return -EINVAL;
 		}
 
-		res = copy_from_user(&work->td, (struct dahdi_tone_def *)data,
-				     sizeof(work->td));
+		res = dahdi_copy_from_user(&work->td, (struct dahdi_tone_def *)data, sizeof(work->td));
 		if (res) {
 			kfree(slab);
 			kfree(work);
@@ -3024,7 +3409,7 @@ static int ioctl_load_zone(unsigned long data)
 			t = work->samples[x] = ptr;
 
 			space -= sizeof(*t);
-			ptr += sizeof(*t);
+			ptr = (char *) ptr + sizeof(*t);
 
 			/* Remember which sample is work->next */
 			work->next[x] = work->td.next;
@@ -3371,14 +3756,14 @@ static int dahdi_release(struct inode *inode, struct file *file)
 		return -EFAULT;
 	}
 	if (unit == 254) {
-		chan = file->private_data;
+		chan = dahdi_get_private_data(file);
 		if (!chan)
 			return dahdi_chan_release(inode, file);
 		else
 			return dahdi_specchan_release(inode, file, chan->channo);
 	}
 	if (unit == 255) {
-		chan = file->private_data;
+		chan = dahdi_get_private_data(file);
 		if (chan) {
 			res = dahdi_specchan_release(inode, file, chan->channo);
 			dahdi_free_pseudo(chan);
@@ -3519,7 +3904,7 @@ static int dahdi_timer_ioctl(struct inode *node, struct file *file, unsigned int
 	case DAHDI_TIMERPING:
 		spin_lock_irqsave(&zaptimerlock, flags);
 		timer->ping = 1;
-		wake_up_interruptible(&timer->sel);
+		dahdi_poll_wakeup(&timer->sel);
 		spin_unlock_irqrestore(&zaptimerlock, flags);
 		break;
 	case DAHDI_TIMERPONG:
@@ -4289,6 +4674,10 @@ static int dahdi_ctl_ioctl(struct inode *inode, struct file *file, unsigned int 
 			return -EFAULT;
 		return dahdi_set_default_zone(j);
 	case DAHDI_LOADZONE:
+#if defined(__FreeBSD__)
+		if (copy_from_user(&data, (void *) data, sizeof(data)))
+			return -EFAULT;
+#endif
 		return ioctl_load_zone(data);
 	case DAHDI_FREEZONE:
 		get_user(j, (int *) data);
@@ -4594,7 +4983,7 @@ static int dahdi_chanandpseudo_ioctl(struct inode *inode, struct file *file, uns
 				chan->readidx[j] = 0;
 			}
 			wake_up_interruptible(&chan->readbufq);  /* wake_up_interruptible waiting on read */
-			wake_up_interruptible(&chan->sel); /* wake_up_interruptible waiting on select */
+			dahdi_poll_wakeup(&chan->sel);	/* wake up waiting on select */
 		   }
 		if (i & DAHDI_FLUSH_WRITE) /* if for write (output) */
 		   {
@@ -4607,7 +4996,7 @@ static int dahdi_chanandpseudo_ioctl(struct inode *inode, struct file *file, uns
 				chan->writeidx[j] = 0;
 			}
 			wake_up_interruptible(&chan->writebufq); /* wake_up_interruptible waiting on write */
-			wake_up_interruptible(&chan->sel);  /* wake_up_interruptible waiting on select */
+			dahdi_poll_wakeup(&chan->sel);	/* wake up waiting on select */
 			   /* if IO MUX wait on write empty, well, this
 				certainly *did* empty the write */
 			if (chan->iomask & DAHDI_IOMUX_WRITEEMPTY)
@@ -5068,8 +5457,9 @@ static int ioctl_echocancel(struct dahdi_chan *chan, struct dahdi_echocanparams 
 		return -ENOMEM;
 
 	/* enable mode, need the params */
-
-	if (copy_from_user(params, (struct dahdi_echocanparam *) data, sizeof(params[0]) * ecp->param_count)) {
+	if (ecp->param_count != 0 &&
+	    dahdi_copy_from_user(params, (struct dahdi_echocanparam *) data,
+			   sizeof(params[0]) * ecp->param_count)) {
 		ret = -EFAULT;
 		goto exit_with_free;
 	}
@@ -5217,6 +5607,25 @@ static int dahdi_chan_ioctl(struct inode *inode, struct file *file, unsigned int
 		return -ENOSYS;
 
 	switch(cmd) {
+#if defined(__FreeBSD__)
+	case F_SETFL: {
+		int fflags = dahdi_get_flags(file->dev);
+
+		get_user(j, data);
+		printf("F_SETFL: 0x%x\n", j);
+
+		/*
+		 * XXX: On the moment we're interested only in O_NONBLOCK
+		 * Need any other flags?
+		 */
+		if ((j & O_NONBLOCK) != 0) {
+			dahdi_set_flags(file, fflags | O_NONBLOCK);
+		} else {
+			dahdi_set_flags(file, fflags & ~O_NONBLOCK);
+		}
+		break;
+	}
+#endif
 	case DAHDI_SETSIGFREEZE:
 		get_user(j, (int *)data);
 		spin_lock_irqsave(&chan->lock, flags);
@@ -5393,6 +5802,10 @@ static int dahdi_chan_ioctl(struct inode *inode, struct file *file, unsigned int
 	{
 		struct dahdi_echocanparams ecp;
 
+#if defined(__FreeBSD__)
+		if (copy_from_user(&data, (void *) data, sizeof(data)))
+			return -EFAULT;
+#endif
 		if (!(chan->flags & DAHDI_FLAG_AUDIO))
 			return -EINVAL;
 		if (copy_from_user(&ecp, (struct dahdi_echocanparams *) data, sizeof(ecp)))
@@ -5585,7 +5998,7 @@ static int dahdi_chan_ioctl(struct inode *inode, struct file *file, unsigned int
 
 static int dahdi_prechan_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long data, int unit)
 {
-	struct dahdi_chan *chan = file->private_data;
+	struct dahdi_chan *chan = dahdi_get_private_data(file);
 	int channo;
 	int res;
 
@@ -5603,7 +6016,7 @@ static int dahdi_prechan_ioctl(struct inode *inode, struct file *file, unsigned 
 		if (!res) {
 			/* Setup the pointer for future stuff */
 			chan = chans[channo];
-			file->private_data = chan;
+			dahdi_set_private_data(file, chan);
 			/* Return success */
 			return 0;
 		}
@@ -5631,21 +6044,21 @@ static int dahdi_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	}
 
 	if (unit == 253) {
-		timer = file->private_data;
+		timer = dahdi_get_private_data(file);
 		if (timer)
 			return dahdi_timer_ioctl(inode, file, cmd, data, timer);
 		else
 			return -EINVAL;
 	}
 	if (unit == 254) {
-		chan = file->private_data;
+		chan = dahdi_get_private_data(file);
 		if (chan)
 			return dahdi_chan_ioctl(inode, file, cmd, data, chan->channo);
 		else
 			return dahdi_prechan_ioctl(inode, file, cmd, data, unit);
 	}
 	if (unit == 255) {
-		chan = file->private_data;
+		chan = dahdi_get_private_data(file);
 		if (!chan) {
 			module_printk(KERN_NOTICE, "No pseudo channel structure to read?\n");
 			return -EINVAL;
@@ -5731,11 +6144,19 @@ int dahdi_register(struct dahdi_span *span, int prefmaster)
 
 	for (x = 0; x < span->channels; x++) {
 		if (span->chans[x]->channo < 250) {
+#if defined(__FreeBSD__)
+			span->chans[x]->file = make_dev(
+			    &dahdi_devsw, span->chans[x]->channo,
+			    UID_ROOT, GID_WHEEL, 0644,
+			    "dahdi/%d", span->chans[x]->channo);
+			dev_depends(dev_ctl, span->chans[x]->file);
+#else
 			char chan_name[32];
 			snprintf(chan_name, sizeof(chan_name), "dahdi!%d", 
 					span->chans[x]->channo);
 			CLASS_DEV_CREATE(dahdi_class, MKDEV(DAHDI_MAJOR, 
 					span->chans[x]->channo), NULL, chan_name);
+#endif
 		}
 	}
 
@@ -5794,8 +6215,16 @@ int dahdi_unregister(struct dahdi_span *span)
 #endif /* CONFIG_PROC_FS */
 
 	for (x = 0; x < span->channels; x++) {
-		if (span->chans[x]->channo < 250)
+		if (span->chans[x]->channo < 250) {
+#if defined(__FreeBSD__)
+			if (span->chans[x]->file != NULL) {
+				destroy_dev(span->chans[x]->file);
+				span->chans[x]->file = NULL;
+			}
+#else
 			CLASS_DEV_DESTROY(dahdi_class, MKDEV(DAHDI_MAJOR, span->chans[x]->channo));
+#endif
+		}
 	}
 
 	spans[span->spanno] = NULL;
@@ -5821,6 +6250,7 @@ int dahdi_unregister(struct dahdi_span *span)
 				      (new_master)? new_master->name: "no master");
 	master = new_master;
 
+	spin_lock_destroy(&span->lock);
 	return 0;
 }
 
@@ -6305,7 +6735,7 @@ otherwise keeps sleeping and looking. The part in this code got "optimized"
 out in the later versions, and is put back now. */
 				if (!(ms->flags & (DAHDI_FLAG_NETDEV | DAHDI_FLAG_PPP))) {
 					wake_up_interruptible(&ms->writebufq);
-					wake_up_interruptible(&ms->sel);
+					dahdi_poll_wakeup(&ms->sel);
 					if (ms->iomask & DAHDI_IOMUX_WRITE)
 						wake_up_interruptible(&ms->eventbufq);
 				}
@@ -6470,7 +6900,7 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 	case DAHDI_TXSTATE_WINK:
 		/* Wink complete, go on hook and stabalize */
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_ONHOOK, DAHDI_TXSTATE_ONHOOK, 0);
-		if (chan->file && (chan->file->f_flags & O_NONBLOCK))
+		if (dahdi_get_flags(chan->file) & O_NONBLOCK)
 			__qevent(chan, DAHDI_EVENT_HOOKCOMPLETE);
 		wake_up_interruptible(&chan->txstateq);
 		break;
@@ -6482,7 +6912,7 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 
 	case DAHDI_TXSTATE_FLASH:
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_OFFHOOK, 0);
-		if (chan->file && (chan->file->f_flags & O_NONBLOCK))
+		if (dahdi_get_flags(chan->file) & O_NONBLOCK)
 			__qevent(chan, DAHDI_EVENT_HOOKCOMPLETE);
 		wake_up_interruptible(&chan->txstateq);
 		break;
@@ -6497,14 +6927,14 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 
 	case DAHDI_TXSTATE_AFTERSTART:
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_OFFHOOK, 0);
-		if (chan->file && (chan->file->f_flags & O_NONBLOCK))
+		if (dahdi_get_flags(chan->file) & O_NONBLOCK)
 			__qevent(chan, DAHDI_EVENT_HOOKCOMPLETE);
 		wake_up_interruptible(&chan->txstateq);
 		break;
 
 	case DAHDI_TXSTATE_KEWL:
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_ONHOOK, DAHDI_TXSTATE_AFTERKEWL, DAHDI_AFTERKEWLTIME);
-		if (chan->file && (chan->file->f_flags & O_NONBLOCK))
+		if (dahdi_get_flags(chan->file) & O_NONBLOCK)
 			__qevent(chan, DAHDI_EVENT_HOOKCOMPLETE);
 		wake_up_interruptible(&chan->txstateq);
 		break;
@@ -6809,7 +7239,7 @@ static void process_echocan_events(struct dahdi_chan *chan)
 {
 	union dahdi_echocan_events events = chan->ec_state->events;
 
-	if (events.CED_tx_detected) {
+	if (events.bit.CED_tx_detected) {
 		dahdi_qevent_nolock(chan, DAHDI_EVENT_TX_CED_DETECTED);
 		if (chan->ec_state) {
 			if (chan->ec_state->status.mode == ECHO_MODE_ACTIVE)
@@ -6819,7 +7249,7 @@ static void process_echocan_events(struct dahdi_chan *chan)
 		}
 	}
 
-	if (events.CED_rx_detected) {
+	if (events.bit.CED_rx_detected) {
 		dahdi_qevent_nolock(chan, DAHDI_EVENT_RX_CED_DETECTED);
 		if (chan->ec_state) {
 			if (chan->ec_state->status.mode == ECHO_MODE_ACTIVE)
@@ -6829,18 +7259,18 @@ static void process_echocan_events(struct dahdi_chan *chan)
 		}
 	}
 
-	if (events.CNG_tx_detected)
+	if (events.bit.CNG_tx_detected)
 		dahdi_qevent_nolock(chan, DAHDI_EVENT_TX_CNG_DETECTED);
 
-	if (events.CNG_rx_detected)
+	if (events.bit.CNG_rx_detected)
 		dahdi_qevent_nolock(chan, DAHDI_EVENT_RX_CNG_DETECTED);
 
-	if (events.NLP_auto_disabled) {
+	if (events.bit.NLP_auto_disabled) {
 		dahdi_qevent_nolock(chan, DAHDI_EVENT_EC_NLP_DISABLED);
 		chan->ec_state->status.mode = ECHO_MODE_FAX;
 	}
 
-	if (events.NLP_auto_enabled) {
+	if (events.bit.NLP_auto_enabled) {
 		dahdi_qevent_nolock(chan, DAHDI_EVENT_EC_NLP_ENABLED);
 		chan->ec_state->status.mode = ECHO_MODE_ACTIVE;
 	}
@@ -7438,7 +7868,7 @@ static inline void __putbuf_chunk(struct dahdi_chan *ss, unsigned char *rxb, int
 							/* if there are processes waiting in poll() on this channel,
 							   wake them up */
 							if (!ms->rxdisable) {
-								wake_up_interruptible(&ms->sel);
+								dahdi_poll_wakeup(&ms->sel);
 							}
 						}
 /* In the very orignal driver, it was quite well known to me (Jim) that there
@@ -7636,7 +8066,7 @@ void dahdi_hdlc_finish(struct dahdi_chan *ss)
 
 	if (!ss->rxdisable) {
 		wake_up_interruptible(&ss->readbufq);
-		wake_up_interruptible(&ss->sel);
+		dahdi_poll_wakeup(&ss->sel);
 		if (ss->iomask & DAHDI_IOMUX_READ)
 			wake_up_interruptible(&ss->eventbufq);
 	}
@@ -7688,7 +8118,7 @@ int dahdi_hdlc_getbuf(struct dahdi_chan *ss, unsigned char *bufptr, unsigned int
 
 			if (!(ss->flags & (DAHDI_FLAG_NETDEV | DAHDI_FLAG_PPP))) {
 				wake_up_interruptible(&ss->writebufq);
-				wake_up_interruptible(&ss->sel);
+				dahdi_poll_wakeup(&ss->sel);
 				if ((ss->iomask & DAHDI_IOMUX_WRITE) && (res >= 0))
 					wake_up_interruptible(&ss->eventbufq);
 			}
@@ -7716,7 +8146,7 @@ static void process_timers(void)
 			if (cur->pos <= 0) {
 				cur->tripped++;
 				cur->pos = cur->ms;
-				wake_up_interruptible(&cur->sel);
+				dahdi_poll_wakeup(&cur->sel);
 			}
 		}
 	}
@@ -7726,11 +8156,11 @@ static void process_timers(void)
 
 static unsigned int dahdi_timer_poll(struct file *file, struct poll_table_struct *wait_table)
 {
-	struct dahdi_timer *timer = file->private_data;
+	struct dahdi_timer *timer = dahdi_get_private_data(file);
 	unsigned long flags;
 	int ret = 0;
 	if (timer) {
-		poll_wait(file, &timer->sel, wait_table);
+		dahdi_poll_wait(file, &timer->sel, wait_table);
 		spin_lock_irqsave(&zaptimerlock, flags);
 		if (timer->tripped || timer->ping)
 			ret |= POLLPRI;
@@ -7751,7 +8181,7 @@ dahdi_chan_poll(struct file *file, struct poll_table_struct *wait_table, int uni
 
 	  /* do the poll wait */
 	if (chan) {
-		poll_wait(file, &chan->sel, wait_table);
+		dahdi_poll_wait(file, &chan->sel, wait_table);
 		ret = 0; /* start with nothing to return */
 		spin_lock_irqsave(&chan->lock, flags);
 		   /* if at least 1 write buffer avail */
@@ -7774,9 +8204,11 @@ dahdi_chan_poll(struct file *file, struct poll_table_struct *wait_table, int uni
 
 static int dahdi_mmap(struct file *file, struct vm_area_struct *vm)
 {
+#if !defined(__FreeBSD__)
 	int unit = UNIT(file);
 	if (unit == 250)
 		return dahdi_transcode_fops->mmap(file, vm);
+#endif
 	return -ENOSYS;
 }
 
@@ -7789,19 +8221,23 @@ static unsigned int dahdi_poll(struct file *file, struct poll_table_struct *wait
 		return -EINVAL;
 
 	if (unit == 250)
+#if defined(__FreeBSD__)
+		return -ENXIO;
+#else
 		return dahdi_transcode_fops->poll(file, wait_table);
+#endif
 
 	if (unit == 253)
 		return dahdi_timer_poll(file, wait_table);
 
 	if (unit == 254) {
-		chan = file->private_data;
+		chan = dahdi_get_private_data(file);
 		if (!chan)
 			return -EINVAL;
 		return dahdi_chan_poll(file, wait_table,chan->channo);
 	}
 	if (unit == 255) {
-		chan = file->private_data;
+		chan = dahdi_get_private_data(file);
 		if (!chan) {
 			module_printk(KERN_NOTICE, "No pseudo channel structure to read?\n");
 			return -EINVAL;
@@ -8292,6 +8728,157 @@ int dahdi_receive(struct dahdi_span *span)
 	return 0;
 }
 
+#if defined(__FreeBSD__)
+static void
+init_file(struct file *file, struct cdev *dev, int ioflag)
+{
+	file->dev = dev;
+	file->f_flags = ioflag;
+}
+
+static int
+dahdi_device_open(struct cdev *dev, int oflags, int devtype, struct thread *td)
+{
+	int res;
+	struct file file;
+
+	init_file(&file, dev, 0);
+	res = dahdi_open(NULL, &file);
+	if (res < 0)
+		return -res;
+
+	dahdi_set_flags(&file, oflags);
+	return res;
+}
+
+static int
+dahdi_device_close(struct cdev *dev, int fflag, int devtype, struct thread *td)
+{
+	int res;
+	struct file file;
+
+	init_file(&file, dev, 0);
+	res = dahdi_release(NULL, &file);
+	if (res < 0)
+		return -res;
+
+	if (res == 0)
+		devfs_clear_cdevpriv();
+	return res;
+}
+
+static int
+dahdi_device_read(struct cdev *dev, struct uio *uio, int ioflag)
+{
+	ssize_t res;
+	struct file file;
+
+	init_file(&file, dev, ioflag);
+	res = dahdi_read(&file, uio, uio->uio_resid);
+	if (res < 0)
+		return -res;
+	return 0;
+}
+
+static int
+dahdi_device_write(struct cdev *dev, struct uio *uio, int ioflag)
+{
+	ssize_t res;
+	struct file file;
+
+	init_file(&file, dev, ioflag);
+	res = dahdi_write(&file, uio, uio->uio_resid);
+	if (res < 0)
+		return -res;
+	return 0;
+}
+
+static int
+dahdi_device_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag, struct thread *td)
+{
+	int res;
+	struct file file;
+
+	init_file(&file, dev, fflag);
+	res = dahdi_ioctl(NULL, &file, cmd, (unsigned long) data);
+	if (res < 0)
+		return -res;
+	return res;
+}
+
+static int
+dahdi_device_poll(struct cdev *dev, int events, struct thread *td)
+{
+	int res;
+	struct file file;
+	struct poll_table_struct wait_table;
+
+	init_file(&file, dev, 0);
+	wait_table.selinfo = NULL;
+	res = dahdi_poll(&file, &wait_table);
+	if (res < 0)
+		return 0;
+
+	res &= events;
+	if (res == 0 && wait_table.selinfo != NULL)
+		selrecord(td, wait_table.selinfo);
+	return res;
+}
+
+static int
+dahdi_device_mmap(struct cdev *dev, vm_offset_t offset, vm_paddr_t *paddr, int nprot)
+{
+	int res;
+	struct file file;
+	struct vm_area_struct vm;
+
+	init_file(&file, dev, 0);
+	vm.offset = offset;
+	vm.paddr = paddr;
+	vm.nprot = nprot;
+	res = dahdi_mmap(&file, &vm);
+	if (res < 0)
+		return -res;
+	return res;
+}
+
+static struct cdevsw dahdi_devsw = {
+	.d_version	= D_VERSION,
+	.d_open		= dahdi_device_open,
+	.d_close	= dahdi_device_close,
+	.d_read		= dahdi_device_read,
+	.d_write	= dahdi_device_write,
+	.d_ioctl	= dahdi_device_ioctl,
+	.d_poll		= dahdi_device_poll,
+	.d_mmap		= dahdi_device_mmap,
+	.d_name		= "dahdi",
+#if __FreeBSD_version >= 800039
+	.d_flags	= D_PSEUDO | D_TRACKCLOSE | D_NEEDMINOR
+#else
+	.d_flags	= D_PSEUDO | D_TRACKCLOSE
+#endif
+};
+
+int
+dahdi_register_chardev(struct dahdi_chardev *dev)
+{
+	dev->dev = make_dev(&dahdi_devsw, dev->minor,
+	    UID_ROOT, GID_WHEEL, 0644,
+	    "dahdi/%s", dev->name);
+	return 0;
+}
+
+int
+dahdi_unregister_chardev(struct dahdi_chardev *dev)
+{
+	if (dev->dev) {
+		destroy_dev(dev->dev);
+		dev->dev = NULL;
+	}
+	return 0;
+}
+
+#else /* !__FreeBSD__ */
 MODULE_AUTHOR("Mark Spencer <markster@digium.com>");
 MODULE_DESCRIPTION("DAHDI Telephony Interface");
 MODULE_LICENSE("GPL v2");
@@ -8314,6 +8901,7 @@ static struct file_operations dahdi_fops = {
 	.fsync   = NULL,
 	.fasync  = NULL,
 };
+#endif /* !__FreeBSD__ */
 
 #ifdef CONFIG_DAHDI_WATCHDOG
 static struct timer_list watchdogtimer;
@@ -8375,24 +8963,6 @@ static void __exit watchdog_cleanup(void)
 
 #endif
 
-int dahdi_register_chardev(struct dahdi_chardev *dev)
-{
-	char udevname[strlen(dev->name) + sizeof("dahdi!")];
-
-	strcpy(udevname, "dahdi!");
-	strcat(udevname, dev->name);
-	CLASS_DEV_CREATE(dahdi_class, MKDEV(DAHDI_MAJOR, dev->minor), NULL, udevname);
-
-	return 0;
-}
-
-int dahdi_unregister_chardev(struct dahdi_chardev *dev)
-{
-	CLASS_DEV_DESTROY(dahdi_class, MKDEV(DAHDI_MAJOR, dev->minor));
-
-	return 0;
-}
-
 static int __init dahdi_init(void)
 {
 	int res = 0;
@@ -8401,6 +8971,18 @@ static int __init dahdi_init(void)
 	proc_entries[0] = proc_mkdir("dahdi", NULL);
 #endif
 
+#if defined(__FreeBSD__)
+	dev_ctl = make_dev(&dahdi_devsw, 0, UID_ROOT, GID_WHEEL, 0644, "dahdi/ctl");
+	{
+		struct cdev *dev;
+		dev = make_dev(&dahdi_devsw, 253, UID_ROOT, GID_WHEEL, 0644, "dahdi/timer");
+		dev_depends(dev_ctl, dev);
+		dev = make_dev(&dahdi_devsw, 254, UID_ROOT, GID_WHEEL, 0644, "dahdi/channel");
+		dev_depends(dev_ctl, dev);
+		dev = make_dev(&dahdi_devsw, 255, UID_ROOT, GID_WHEEL, 0644, "dahdi/pseudo");
+		dev_depends(dev_ctl, dev);
+	}
+#else /* !__FreeBSD__ */
 	if ((res = register_chrdev(DAHDI_MAJOR, "dahdi", &dahdi_fops))) {
 		module_printk(KERN_ERR, "Unable to register DAHDI character device handler on %d\n", DAHDI_MAJOR);
 		return res;
@@ -8411,6 +8993,7 @@ static int __init dahdi_init(void)
 	CLASS_DEV_CREATE(dahdi_class, MKDEV(DAHDI_MAJOR, 254), NULL, "dahdi!channel");
 	CLASS_DEV_CREATE(dahdi_class, MKDEV(DAHDI_MAJOR, 255), NULL, "dahdi!pseudo");
 	CLASS_DEV_CREATE(dahdi_class, MKDEV(DAHDI_MAJOR, 0), NULL, "dahdi!ctl");
+#endif
 
 	module_printk(KERN_INFO, "Telephony Interface Registered on major %d\n", DAHDI_MAJOR);
 	module_printk(KERN_INFO, "Version: %s\n", DAHDI_VERSION);
@@ -8430,6 +9013,12 @@ static void __exit dahdi_cleanup(void)
 
 	coretimer_cleanup();
 
+#if defined(__FreeBSD__)
+	if (dev_ctl != NULL) {
+		destroy_dev(dev_ctl);
+		dev_ctl = NULL;
+	}
+#else
 	CLASS_DEV_DESTROY(dahdi_class, MKDEV(DAHDI_MAJOR, 253)); /* timer */
 	CLASS_DEV_DESTROY(dahdi_class, MKDEV(DAHDI_MAJOR, 254)); /* channel */
 	CLASS_DEV_DESTROY(dahdi_class, MKDEV(DAHDI_MAJOR, 255)); /* pseudo */
@@ -8437,6 +9026,7 @@ static void __exit dahdi_cleanup(void)
 	class_destroy(dahdi_class);
 
 	unregister_chrdev(DAHDI_MAJOR, "dahdi");
+#endif
 
 #ifdef CONFIG_PROC_FS
 	remove_proc_entry("dahdi", NULL);
@@ -8453,5 +9043,28 @@ static void __exit dahdi_cleanup(void)
 #endif
 }
 
+#if defined(__FreeBSD__)
+static int
+dahdi_modevent(module_t mod, int cmd, void *arg)
+{
+	switch (cmd) {
+	case MOD_LOAD:
+		return dahdi_init();
+
+	case MOD_UNLOAD:
+		dahdi_cleanup();
+		return 0;
+
+	default:
+		/* we only understand load/unload*/
+		return -EINVAL;
+	}
+}
+
+/* Now declare the module to the system */
+MODULE_VERSION(dahdi, 1);
+DEV_MODULE(dahdi, dahdi_modevent, NULL);
+#else /* !__FreeBSD__ */
 module_init(dahdi_init);
 module_exit(dahdi_cleanup);
+#endif /* !__FreeBSD__ */

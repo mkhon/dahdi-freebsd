@@ -25,6 +25,61 @@
  * this program for more details.
  */
 
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/bus.h>
+#include <sys/module.h>
+#include <sys/rman.h>
+#include <sys/systm.h>
+#include <sys/time.h>
+
+#include <machine/bus.h>
+#include <machine/stdarg.h>
+#include <dev/pci/pcireg.h>
+#include <dev/pci/pcivar.h>
+
+#define dahdi_msleep(msec)	DELAY((msec) * 1000)
+
+/*
+ * Concatenate src on the end of dst.  At most strlen(dst)+n+1 bytes
+ * are written at dst (at most n+1 bytes being appended).  Return dst.
+ */
+static char *
+strncat(char * __restrict dst, const char * __restrict src, size_t n)
+{
+	if (n != 0) {
+		char *d = dst;
+		const char *s = src;
+
+		while (*d != 0)
+			d++;
+		do {
+			if ((*d = *s++) == 0)
+				break;
+			d++;
+		} while (--n != 0);
+		*d = 0;
+	}
+	return (dst);
+}
+
+static void device_rlprintf(int pps, device_t dev, const char *fmt, ...)
+{
+	va_list ap;
+	static struct timeval last_printf;
+	static int count;
+
+	if (ppsratecheck(&last_printf, &count, pps)) {
+		va_start(ap, fmt);
+		device_print_prettyname(dev);
+		vprintf(fmt, ap);
+		va_end(ap);
+	}
+}
+
+#define DPRINTF(dev, fmt, args...)      device_rlprintf(20, dev, fmt, ##args)
+
+#else
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -38,11 +93,15 @@
 #include <linux/delay.h>
 #include <linux/moduleparam.h>
 
+#define dahdi_msleep(msec)	msleep(msec)
+#endif
+
 #include <dahdi/kernel.h>
 
 #include "wct4xxp.h"
 #include "vpm450m.h"
 
+#if !defined(__FreeBSD__)
 /* Work queues are a way to better distribute load on SMP systems */
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20))
 /*
@@ -52,6 +111,7 @@
  */
 /* #define ENABLE_WORKQUEUES */
 #endif
+#endif /* !__FreeBSD__ */
 
 /* Enable prefetching may help performance */
 #define ENABLE_PREFETCH
@@ -288,7 +348,11 @@ struct t4_span {
 
 struct t4 {
 	/* This structure exists one per card */
+#if defined(__FreeBSD__)
+	device_t dev;
+#else
 	struct pci_dev *dev;		/* Pointer to PCI device */
+#endif
 	unsigned int intcount;
 	int num;			/* Which card we are */
 	int t1e1;			/* T1/E1 select pins */
@@ -322,19 +386,39 @@ struct t4 {
 	int last0;		/* for detecting double-missed IRQ */
 
 	/* DMA related fields */
+	int basesize;
 	unsigned int dmactrl;
+#if defined(__FreeBSD__)
+	struct resource *mem_res;
+	int mem_rid;
+
+	struct resource *irq_res;		/* resource for irq */
+	int irq_rid;
+	void *irq_handle;
+
+	uint32_t readdma;
+	bus_dma_tag_t   read_dma_tag;
+	bus_dmamap_t    read_dma_map;
+
+	uint32_t writedma;
+	bus_dma_tag_t   write_dma_tag;
+	bus_dmamap_t    write_dma_map;
+#else
 	dma_addr_t 	readdma;
 	dma_addr_t	writedma;
 	unsigned long memaddr;		/* Base address of card */
 	unsigned long memlen;
 	__iomem volatile unsigned int *membase;	/* Base address of card */
+#endif
 
 	/* Add this for our softlockup protector */
 	unsigned int oct_rw_count;
 
 	/* Flags for our bottom half */
 	unsigned long checkflag;
+#if !defined(__FreeBSD__)
 	struct tasklet_struct t4_tlet;
+#endif
 	unsigned int vpm400checkstatus;
 	
 #ifdef VPM_SUPPORT
@@ -421,8 +505,6 @@ static void t4_check_sigbits(struct t4 *wc, int span);
 
 #define MAX_T4_CARDS 64
 
-static void t4_isr_bh(unsigned long data);
-
 static struct t4 *cards[MAX_T4_CARDS];
 
 
@@ -438,14 +520,24 @@ static struct t4 *cards[MAX_T4_CARDS];
 
 static inline unsigned int __t4_pci_in(struct t4 *wc, const unsigned int addr)
 {
+#if defined(__FreeBSD__)
+	unsigned int res = bus_space_read_4(rman_get_bustag(wc->mem_res),
+	    rman_get_bushandle(wc->mem_res), addr * 4);
+#else
 	unsigned int res = readl(&wc->membase[addr]);
+#endif
 	return res;
 }
 
 static inline void __t4_pci_out(struct t4 *wc, const unsigned int addr, const unsigned int value)
 {
 	unsigned int tmp;
+#if defined(__FreeBSD__)
+	bus_space_write_4(rman_get_bustag(wc->mem_res),
+	    rman_get_bushandle(wc->mem_res), addr * 4, value);
+#else
 	writel(value, &wc->membase[addr]);
+#endif
 	if (pedanticpci) {
 		tmp = __t4_pci_in(wc, WC_VERSION);
 		if ((tmp & 0xffff0000) != 0xc01a0000)
@@ -1470,7 +1562,7 @@ static int t4_shutdown(struct dahdi_span *span)
 	spin_unlock_irqrestore(&wc->reglock, flags);
 
 	/* Wait for interrupt routine to shut itself down */
-	msleep(10);
+	dahdi_msleep(10);
 	if (wasrunning)
 		wc->spansstarted--;
 
@@ -1625,7 +1717,7 @@ static void init_spans(struct t4 *wc)
 		else
 			snprintf(ts->span.location, sizeof(ts->span.location) - 1,
 				 "PCI%s Bus %02d Slot %02d", (ts->spanflags & FLAG_EXPRESS) ? " Express" : " ",
-				 wc->dev->bus->number, PCI_SLOT(wc->dev->devfn) + 1);
+				 dahdi_pci_get_bus(wc->dev), dahdi_pci_get_slot(wc->dev));
 		switch (ts->spantype) {
 		case TYPE_T1:
 			ts->span.spantype = "T1";
@@ -1640,7 +1732,7 @@ static void init_spans(struct t4 *wc)
 		ts->span.owner = THIS_MODULE;
 		ts->span.spanconfig = t4_spanconfig;
 		ts->span.chanconfig = t4_chanconfig;
-		ts->span.irq = wc->dev->irq;
+		ts->span.irq = dahdi_pci_get_irq(wc->dev);
 		ts->span.startup = t4_startup;
 		ts->span.shutdown = t4_shutdown;
 		ts->span.rbsbits = t4_rbsbits;
@@ -2221,6 +2313,7 @@ static void t4_receiveprep(struct t4 *wc, int irq)
 		if (debug & DEBUG_MAIN)
 			printk(KERN_DEBUG "TE%dXXP: Double/missed interrupt detected\n", wc->numspans);
 	}
+	bus_dmamap_sync(wc->read_dma_tag, wc->read_dma_map, BUS_DMASYNC_POSTREAD);
 	for (x=0;x<DAHDI_CHUNKSIZE;x++) {
 		for (z=0;z<24;z++) {
 			/* All T1/E1 channels */
@@ -2333,8 +2426,10 @@ static void workq_handlespan(void *data)
 	struct t4_span *ts = data;
 	struct t4 *wc = ts->owner;
 	
+	bus_dmamap_sync(wc->read_dma_tag, wc->read_dma_map, BUS_DMASYNC_POSTREAD);
 	__receive_span(ts);
 	__transmit_span(ts);
+	bus_dmamap_sync(wc->write_dma_tag, wc->write_dma_map, BUS_DMASYNC_PREWRITE);
 	atomic_dec(&wc->worklist);
 	if (!atomic_read(&wc->worklist))
 		t4_pci_out(wc, WC_INTR, 0);
@@ -2345,8 +2440,10 @@ static void t4_prep_gen2(struct t4 *wc)
 	int x;
 	for (x=0;x<wc->numspans;x++) {
 		if (wc->tspans[x]->span.flags & DAHDI_FLAG_RUNNING) {
+			bus_dmamap_sync(wc->read_dma_tag, wc->read_dma_map, BUS_DMASYNC_POSTREAD);
 			__receive_span(wc->tspans[x]);
 			__transmit_span(wc->tspans[x]);
+			bus_dmamap_sync(wc->write_dma_tag, wc->write_dma_map, BUS_DMASYNC_PREWRITE);
 		}
 	}
 }
@@ -2402,7 +2499,7 @@ static void t4_transmitprep(struct t4 *wc, int irq)
 		/* Advance pointer by 4 TDM frame lengths */
 		writechunk += 32;
 	}
-
+	bus_dmamap_sync(wc->write_dma_tag, wc->write_dma_map, BUS_DMASYNC_PREWRITE);
 }
 #endif
 
@@ -2868,14 +2965,23 @@ DAHDI_IRQ_HANDLER(t4_interrupt)
 	}
 
 	/* Ignore if it's not for us */
-	if (!status)
+	if (!status) {
+#if defined(__FreeBSD__)
+		return FILTER_STRAY;
+#else
 		return IRQ_NONE;
+#endif
+	}
 
 	__t4_pci_out(wc, WC_INTR, 0);
 
 	if (!wc->spansstarted) {
 		printk(KERN_NOTICE "Not prepped yet!\n");
+#if defined(__FreeBSD__)
+		return FILTER_STRAY;
+#else
 		return IRQ_NONE;
+#endif
 	}
 
 	wc->intcount++;
@@ -2926,14 +3032,23 @@ DAHDI_IRQ_HANDLER(t4_interrupt)
 
 	spin_unlock_irqrestore(&wc->reglock, flags);
 
+#if defined(__FreeBSD__)
+	return (FILTER_HANDLED);
+#else
 	return IRQ_RETVAL(1);
+#endif
 }
 #endif
 
+#if defined(__FreeBSD__)
+static void t4_isr_bh(void *data)
+#else
 static void t4_isr_bh(unsigned long data)
+#endif
 {
 	struct t4 *wc = (struct t4 *)data;
 
+	DPRINTF(wc->dev, "%s\n", __FUNCTION__);
 #ifdef VPM_SUPPORT
 	if (wc->vpm) {
 		if (test_and_clear_bit(T4_CHECK_VPM, &wc->checkflag)) {
@@ -2951,6 +3066,9 @@ static void t4_isr_bh(unsigned long data)
 
 DAHDI_IRQ_HANDLER(t4_interrupt_gen2)
 {
+#if defined(__FreeBSD__)
+	int res;
+#endif
 	struct t4 *wc = dev_id;
 	unsigned int status;
 	
@@ -2964,7 +3082,11 @@ DAHDI_IRQ_HANDLER(t4_interrupt_gen2)
 		spin_lock(&wc->reglock);
 		__t4_set_timing_source(wc, 4, 0, 0);
 		spin_unlock(&wc->reglock);
+#if defined(__FreeBSD__)
+		return (FILTER_HANDLED);
+#else
 		return IRQ_RETVAL(1);
+#endif
 	}
 
 	/* Make sure it's really for us */
@@ -2972,7 +3094,11 @@ DAHDI_IRQ_HANDLER(t4_interrupt_gen2)
 
 	/* Ignore if it's not for us */
 	if (!(status & 0x7)) {
+#if defined(__FreeBSD__)
+		return (FILTER_STRAY);
+#else
 		return IRQ_NONE;
+#endif
 	}
 
 #ifdef ENABLE_WORKQUEUES
@@ -2981,7 +3107,11 @@ DAHDI_IRQ_HANDLER(t4_interrupt_gen2)
 
 	if (unlikely(!wc->spansstarted)) {
 		printk(KERN_INFO "Not prepped yet!\n");
+#if defined(__FreeBSD__)
+		return (FILTER_STRAY);
+#else
 		return IRQ_NONE;
+#endif
 	}
 
 	wc->intcount++;
@@ -3058,14 +3188,27 @@ DAHDI_IRQ_HANDLER(t4_interrupt_gen2)
 
 	spin_unlock(&wc->reglock);
 
-	if (unlikely(test_bit(T4_CHECK_VPM, &wc->checkflag)))
+#if defined(__FreeBSD__)
+	res = FILTER_HANDLED;
+#endif
+	if (unlikely(test_bit(T4_CHECK_VPM, &wc->checkflag))) {
+		DPRINTF(wc->dev, "scheduling filter thread\n");
+#if defined(__FreeBSD__)
+		res |= FILTER_SCHEDULE_THREAD;
+#else
 		tasklet_schedule(&wc->t4_tlet);
+#endif
+	}
 
 #ifndef ENABLE_WORKQUEUES
 	__t4_pci_out(wc, WC_INTR, 0);
 #endif	
 
+#if defined(__FreeBSD__)
+	return (res);
+#else
 	return IRQ_RETVAL(1);
+#endif
 }
 
 #ifdef SUPPORT_GEN1
@@ -3168,8 +3311,13 @@ static void t4_vpm450_init(struct t4 *wc)
 	extern u8 _binary_dahdi_fw_oct6114_064_bin_start[];
 	extern u8 _binary_dahdi_fw_oct6114_128_bin_start[];
 #else
+#if defined(__FreeBSD__)
+	static const char oct064_firmware[] = "dahdi_fw_oct6114_064";
+	static const char oct128_firmware[] = "dahdi_fw_oct6114_128";
+#else
 	static const char oct064_firmware[] = "dahdi-fw-oct6114-064.bin";
 	static const char oct128_firmware[] = "dahdi-fw-oct6114-128.bin";
+#endif
 #endif
 
 	if (!vpmsupport) {
@@ -3199,11 +3347,20 @@ static void t4_vpm450_init(struct t4 *wc)
 	switch ((vpm_capacity = get_vpm450m_capacity(wc))) {
 	case 64:
 #if defined(HOTPLUG_FIRMWARE)
+#if defined(__FreeBSD__)
+		firmware = firmware_get(oct064_firmware);
+		if (firmware == NULL) {
+			device_printf(wc->dev, "VPM450: can not load firmware %s\n",
+			    oct064_firmware);
+			return;
+		}
+#else
 		if ((request_firmware(&firmware, oct064_firmware, &wc->dev->dev) != 0) ||
 		    !firmware) {
 			printk(KERN_NOTICE "VPM450: firmware %s not available from userspace\n", oct064_firmware);
 			return;
 		}
+#endif
 #else
 		embedded_firmware.data = _binary_dahdi_fw_oct6114_064_bin_start;
 		/* Yes... this is weird. objcopy gives us a symbol containing
@@ -3217,11 +3374,20 @@ static void t4_vpm450_init(struct t4 *wc)
 		break;
 	case 128:
 #if defined(HOTPLUG_FIRMWARE)
+#if defined(__FreeBSD__)
+		firmware = firmware_get(oct128_firmware);
+		if (firmware == NULL) {
+			device_printf(wc->dev, "VPM450: can not load firmware %s\n",
+			    oct128_firmware);
+			return;
+		}
+#else
 		if ((request_firmware(&firmware, oct128_firmware, &wc->dev->dev) != 0) ||
 		    !firmware) {
 			printk(KERN_NOTICE "VPM450: firmware %s not available from userspace\n", oct128_firmware);
 			return;
 		}
+#endif
 #else
 		embedded_firmware.data = _binary_dahdi_fw_oct6114_128_bin_start;
 		/* Yes... this is weird. objcopy gives us a symbol containing
@@ -3241,12 +3407,20 @@ static void t4_vpm450_init(struct t4 *wc)
 	if (!(wc->vpm450m = init_vpm450m(wc, laws, wc->numspans, firmware))) {
 		printk(KERN_NOTICE "VPM450: Failed to initialize\n");
 		if (firmware != &embedded_firmware)
+#if defined(__FreeBSD__)
+			firmware_put(firmware, FIRMWARE_UNLOAD);
+#else
 			release_firmware(firmware);
+#endif
 		return;
 	}
 
 	if (firmware != &embedded_firmware)
+#if defined(__FreeBSD__)
+		firmware_put(firmware, FIRMWARE_UNLOAD);
+#else
 		release_firmware(firmware);
+#endif
 
 	if (vpmdtmfsupport == -1) {
 		printk(KERN_NOTICE "VPM450: hardware DTMF disabled.\n");
@@ -3557,7 +3731,9 @@ static int __devinit t4_launch(struct t4 *wc)
 	spin_lock_irqsave(&wc->reglock, flags);
 	__t4_set_timing_source(wc,4, 0, 0);
 	spin_unlock_irqrestore(&wc->reglock, flags);
+#if !defined(__FreeBSD__)
 	tasklet_init(&wc->t4_tlet, t4_isr_bh, (unsigned long)wc);
+#endif
 	return 0;
 }
 
@@ -3579,88 +3755,57 @@ static void free_wc(struct t4 *wc)
 		}
 		kfree(wc->tspans[x]);
 	}
-	kfree(wc);
+	order_index[wc->order]--;
+	cards[wc->num] = NULL;
 }
 
-static int __devinit t4_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
+static int t4_hardware_stop(struct t4 *wc)
 {
-	struct t4 *wc;
-	struct devtype *dt;
-	unsigned int x, f;
-	int basesize;
-#if 0
-	int y;
-	unsigned int *canary;
-#endif
 	
-	if (pci_enable_device(pdev)) {
-		return -EIO;
-	}
+	/* Turn off DMA, leave interrupts enabled */
+	set_bit(T4_STOP_DMA, &wc->checkflag);
 
-	if (!(wc = kmalloc(sizeof(*wc), GFP_KERNEL))) {
-		return -ENOMEM;
-	}
+	/* Wait for interrupts to stop */
+	dahdi_msleep(25);
 
-	memset(wc, 0x0, sizeof(*wc));
+	/* Turn off counter, address, etc */
+	if (wc->tspans[0]->spanflags & FLAG_2NDGEN) {
+		t4_tsi_reset(wc);
+	} else {
+		t4_pci_out(wc, WC_COUNT, 0x000000);
+	}
+	t4_pci_out(wc, WC_RDADDR, 0x0000000);
+	t4_pci_out(wc, WC_WRADDR, 0x0000000);
+	wc->gpio = 0x00000000;
+	t4_pci_out(wc, WC_GPIO, wc->gpio);
+	t4_pci_out(wc, WC_LEDS, 0x00000000);
+
+	printk(KERN_NOTICE "\nStopped TE%dXXP, Turned off DMA\n", wc->numspans);
+	return 0;
+}
+
+static int t4_setup_intr(struct t4 *wc, struct devtype *dt);
+
+static int
+t4_register(struct t4 *wc, struct devtype *dt, int numports)
+{
+	int x, f, res;
 	spin_lock_init(&wc->reglock);
-	dt = (struct devtype *) (ent->driver_data);
-	if (dt->flags & FLAG_2NDGEN)
-		basesize = DAHDI_MAX_CHUNKSIZE * 32 * 4;
-	else
-		basesize = DAHDI_MAX_CHUNKSIZE * 32 * 2 * 4;
-	
-	if (dt->flags & FLAG_2PORT) 
-		wc->numspans = 2;
-	else
-		wc->numspans = 4;
-	
+	wc->numspans = numports;
 	wc->variety = dt->desc;
 	
-	wc->memaddr = pci_resource_start(pdev, 0);
-	wc->memlen = pci_resource_len(pdev, 0);
-	wc->membase = ioremap(wc->memaddr, wc->memlen);
 	/* This rids of the Double missed interrupt message after loading */
 	wc->last0 = 1;
-#if 0
-	if (!request_mem_region(wc->memaddr, wc->memlen, wc->variety))
-		printk(KERN_INFO "wct4: Unable to request memory region :(, using anyway...\n");
-#endif
-	if (pci_request_regions(pdev, wc->variety))
-		printk(KERN_INFO "wct%dxxp: Unable to request regions\n", wc->numspans);
-	
-	printk(KERN_INFO "Found TE%dXXP at base address %08lx, remapped to %p\n", wc->numspans, wc->memaddr, wc->membase);
-	
-	wc->dev = pdev;
-	
-	wc->writechunk = 
-		/* 32 channels, Double-buffer, Read/Write, 4 spans */
-		(unsigned int *)pci_alloc_consistent(pdev, basesize * 2, &wc->writedma);
-	if (!wc->writechunk) {
-		printk(KERN_NOTICE "wct%dxxp: Unable to allocate DMA-able memory\n", wc->numspans);
-		return -ENOMEM;
-	}
-	
-	/* Read is after the whole write piece (in words) */
-	wc->readchunk = wc->writechunk + basesize / 4;
-	
-	/* Same thing but in bytes...  */
-	wc->readdma = wc->writedma + basesize;
 	
 	/* Initialize Write/Buffers to all blank data */
-	memset((void *)wc->writechunk,0x00, basesize);
-	memset((void *)wc->readchunk,0xff, basesize);
+	memset((void *)wc->writechunk,0x00, wc->basesize);
+	memset((void *)wc->readchunk,0xff, wc->basesize);
 #if 0
 	memset((void *)wc->readchunk,0xff,DAHDI_MAX_CHUNKSIZE * 2 * 32 * 4);
 	/* Initialize canary */
 	canary = (unsigned int *)(wc->readchunk + DAHDI_CHUNKSIZE * 64 * 4 - 4);
 	*canary = (CANARY << 16) | (0xffff);
 #endif			
-	
-	/* Enable bus mastering */
-	pci_set_master(pdev);
-
-	/* Keep track of which device we are */
-	pci_set_drvdata(pdev, wc);
 	
 	/* Initialize hardware */
 	t4_hardware_init_1(wc, dt->flags);
@@ -3669,10 +3814,8 @@ static int __devinit t4_init_one(struct pci_dev *pdev, const struct pci_device_i
 		if (!cards[x])
 			break;
 	}
-	
 	if (x >= MAX_T4_CARDS) {
 		printk(KERN_NOTICE "No cards[] slot available!!\n");
-		kfree(wc);
 		return -ENOMEM;
 	}
 	
@@ -3728,20 +3871,10 @@ static int __devinit t4_init_one(struct pci_dev *pdev, const struct pci_device_i
 	/* Continue hardware intiialization */
 	t4_hardware_init_2(wc);
 	
-#ifdef SUPPORT_GEN1
-	if (request_irq(pdev->irq, (dt->flags & FLAG_2NDGEN) ? t4_interrupt_gen2 : t4_interrupt, DAHDI_IRQ_SHARED_DISABLED, (wc->numspans == 2) ? "wct2xxp" : "wct4xxp", wc)) 
-#else
-		if (!(wc->tspans[0]->spanflags & FLAG_2NDGEN)) {
-			printk(KERN_NOTICE "This driver does not support 1st gen modules\n");
-			free_wc(wc);
-			return -ENODEV;
-		}	
-	if (request_irq(pdev->irq, t4_interrupt_gen2, DAHDI_IRQ_SHARED_DISABLED, "t4xxp", wc)) 
-#endif
-	{
-		printk(KERN_NOTICE "t4xxp: Unable to request IRQ %d\n", pdev->irq);
+	res = t4_setup_intr(wc, dt);
+	if (res) {
 		free_wc(wc);
-		return -EIO;
+		return res;
 	}
 	
 	init_spans(wc);
@@ -3783,41 +3916,11 @@ static int __devinit t4_init_one(struct pci_dev *pdev, const struct pci_device_i
 	return 0;
 }
 
-static int t4_hardware_stop(struct t4 *wc)
+static void
+t4_unregister(struct t4 *wc)
 {
-
-	/* Turn off DMA, leave interrupts enabled */
-	set_bit(T4_STOP_DMA, &wc->checkflag);
-
-	/* Wait for interrupts to stop */
-	msleep(25);
-
-	/* Turn off counter, address, etc */
-	if (wc->tspans[0]->spanflags & FLAG_2NDGEN) {
-		t4_tsi_reset(wc);
-	} else {
-		t4_pci_out(wc, WC_COUNT, 0x000000);
-	}
-	t4_pci_out(wc, WC_RDADDR, 0x0000000);
-	t4_pci_out(wc, WC_WRADDR, 0x0000000);
-	wc->gpio = 0x00000000;
-	t4_pci_out(wc, WC_GPIO, wc->gpio);
-	t4_pci_out(wc, WC_LEDS, 0x00000000);
-
-	printk(KERN_NOTICE "\nStopped TE%dXXP, Turned off DMA\n", wc->numspans);
-	return 0;
-}
-
-static void __devexit t4_remove_one(struct pci_dev *pdev)
-{
-	struct t4 *wc = pci_get_drvdata(pdev);
 	struct dahdi_span *span;
-	int basesize;
 	int i;
-
-	if (!wc) {
-		return;
-	}
 
 	/* Stop hardware */
 	t4_hardware_stop(wc);
@@ -3827,11 +3930,6 @@ static void __devexit t4_remove_one(struct pci_dev *pdev)
 		release_vpm450m(wc->vpm450m);
 	wc->vpm450m = NULL;
 	/* Unregister spans */
-
-	basesize = DAHDI_MAX_CHUNKSIZE * 32 * 4;
-	if (!(wc->tspans[0]->spanflags & FLAG_2NDGEN))
-		basesize = basesize * 2;
-
 	for (i = 0; i < wc->numspans; ++i) {
 		span = &wc->tspans[i]->span;
 		if (test_bit(DAHDI_FLAGBIT_REGISTERED, &span->flags))
@@ -3843,24 +3941,6 @@ static void __devexit t4_remove_one(struct pci_dev *pdev)
 		destroy_workqueue(wc->workq);
 	}
 #endif			
-	
-	free_irq(pdev->irq, wc);
-	
-	if (wc->membase)
-		iounmap((void *)wc->membase);
-	
-	pci_release_regions(pdev);		
-	
-	/* Immediately free resources */
-
-	pci_free_consistent(pdev, basesize * 2,
-				(void *)wc->writechunk, wc->writedma);
-	
-	order_index[wc->order]--;
-	
-	cards[wc->num] = NULL;
-	pci_set_drvdata(pdev, NULL);
-	free_wc(wc);
 }
 
 
@@ -3885,6 +3965,402 @@ static struct pci_device_id t4_pci_tbl[] __devinitdata =
 	{ 0xd161, 0x0210, PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long)&wct210 },
 	{ 0, }
 };
+
+#if defined(__FreeBSD__)
+static void
+t4_release_resources(struct t4 *wc)
+{
+        /* disconnect the interrupt handler */
+	if (wc->irq_handle != NULL) {
+		bus_teardown_intr(wc->dev, wc->irq_res, wc->irq_handle);
+		wc->irq_handle = NULL;
+	}
+
+	if (wc->irq_res != NULL) {
+		bus_release_resource(wc->dev, SYS_RES_IRQ, wc->irq_rid, wc->irq_res);
+		wc->irq_res = NULL;
+	}
+
+	/* release DMA resources */
+	if (wc->writedma != 0) {
+		bus_dmamap_unload(wc->write_dma_tag, wc->write_dma_map);
+		wc->writedma = 0;
+	}
+	if (wc->writechunk != NULL) {
+		bus_dmamem_free(wc->write_dma_tag, (void *) wc->writechunk, wc->write_dma_map);
+		wc->writechunk = NULL;
+
+		bus_dmamap_destroy(wc->write_dma_tag, wc->write_dma_map);
+		wc->write_dma_map = NULL;
+	}
+	if (wc->write_dma_tag != NULL) {
+		bus_dma_tag_destroy(wc->write_dma_tag);
+		wc->write_dma_tag = NULL;
+	}
+
+	if (wc->readdma != 0) {
+		bus_dmamap_unload(wc->read_dma_tag, wc->read_dma_map);
+		wc->readdma = 0;
+	}
+	if (wc->readchunk != NULL) {
+		bus_dmamem_free(wc->read_dma_tag, (void *) wc->readchunk, wc->read_dma_map);
+		wc->readchunk = NULL;
+
+		bus_dmamap_destroy(wc->read_dma_tag, wc->read_dma_map);
+		wc->read_dma_map = NULL;
+	}
+	if (wc->read_dma_tag != NULL) {
+		bus_dma_tag_destroy(wc->read_dma_tag);
+		wc->read_dma_tag = NULL;
+	}
+
+	/* release memory window */
+	if (wc->mem_res != NULL) {
+		bus_deactivate_resource(wc->dev, SYS_RES_MEMORY, wc->mem_rid, wc->mem_res);
+		bus_release_resource(wc->dev, SYS_RES_MEMORY, wc->mem_rid, wc->mem_res);
+		wc->mem_res = NULL;
+	}
+}
+
+static int
+t4_setup_intr(struct t4 *wc, struct devtype *dt)
+{
+	int error;
+
+#ifndef SUPPORT_GEN1
+	if ((dt & FLAG_2NDGEN) == 0) {
+		printk(KERN_NOTICE "This driver does not support 1st gen modules\n");
+		return -ENODEV;
+	}
+#endif
+
+	wc->irq_res = bus_alloc_resource_any(
+	     wc->dev, SYS_RES_IRQ, &wc->irq_rid, RF_SHAREABLE | RF_ACTIVE);
+	if (wc->irq_res == NULL) {
+		device_printf(wc->dev, "Can't allocate irq resource\n");
+		return -ENXIO;
+	}
+
+	error = bus_setup_intr(
+	    wc->dev, wc->irq_res, INTR_TYPE_CLK | INTR_MPSAFE,
+#ifndef SUPPORT_GEN1
+	    t4_interrupt_gen2, t4_isr_bh,
+#else
+	    (dt->flags & FLAG_2NDGEN) ? t4_interrupt_gen2 : t4_interrupt, t4_isr_bh,
+#endif
+	    wc, &wc->irq_handle);
+	if (error) {
+		device_printf(wc->dev, "Can't setup interrupt handler (error %d)\n", error);
+		return -ENXIO;
+	}
+
+	return (0);
+}
+
+static struct pci_device_id *
+t4_pci_device_id_lookup(device_t dev)
+{
+	struct pci_device_id *id;
+	uint16_t vendor = pci_get_vendor(dev);
+	uint16_t device = pci_get_device(dev);
+	uint16_t subvendor = pci_get_subvendor(dev);
+	uint16_t subdevice = pci_get_subdevice(dev);
+
+	for (id = t4_pci_tbl; id->vendor != 0; id++) {
+		if ((id->vendor == PCI_ANY_ID || id->vendor == vendor) &&
+		    (id->device == PCI_ANY_ID || id->device == device) &&
+		    (id->subvendor == PCI_ANY_ID || id->subvendor == subvendor) &&
+		    (id->subdevice == PCI_ANY_ID || id->subdevice == subdevice))
+			return id;
+	}
+
+	return NULL;
+}
+
+static int
+t4_device_probe(device_t dev)
+{
+        struct pci_device_id *id;
+	struct devtype *dt;
+
+	id = t4_pci_device_id_lookup(dev);
+	if (id == NULL)
+		return ENXIO;
+
+	/* found device */
+	device_printf(dev, "vendor=%x device=%x subvendor=%x\n",
+	    id->vendor, id->device, id->subvendor);
+	dt = (struct devtype *) id->driver_data;
+	device_set_desc(dev, dt->desc);
+	return (0);
+}
+
+static void
+t4_dma_map_addr(void *arg, bus_dma_segment_t *segs, int nseg, int error)
+{
+	uint32_t *paddr = arg;
+	*paddr = segs->ds_addr;
+}
+
+static int
+t4_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr)
+{
+	int res;
+
+	res = bus_dma_tag_create(NULL, 8, 0,
+	    BUS_SPACE_MAXADDR_32BIT, BUS_SPACE_MAXADDR, NULL, NULL,
+	    size, 1, size, BUS_DMA_ALLOCNOW , NULL, NULL, ptag);
+	if (res)
+		return res;
+
+	res = bus_dmamem_alloc(*ptag, pvaddr, BUS_DMA_NOWAIT | BUS_DMA_ZERO, pmap);
+	if (res)
+		return res;
+
+	res = bus_dmamap_load(*ptag, *pmap, *pvaddr, size, t4_dma_map_addr, ppaddr, 0);
+	if (res)
+		return res;
+
+	return 0;
+}
+
+static int
+t4_device_attach(device_t dev)
+{
+	int res;
+        struct pci_device_id *id;
+	struct devtype *dt;
+	struct t4 *wc;
+
+	id = t4_pci_device_id_lookup(dev);
+	if (id == NULL)
+		return ENXIO;
+
+	dt = (struct devtype *) id->driver_data;
+	wc = device_get_softc(dev);
+	wc->dev = dev;
+
+	/* calculate base size */
+	wc->basesize = DAHDI_MAX_CHUNKSIZE * 32 * 4;
+	if ((dt->flags & FLAG_2NDGEN) == 0)
+		wc->basesize *= 2;
+
+        /* allocate memory resource */
+	wc->mem_rid = PCIR_BAR(0);
+	wc->mem_res = bus_alloc_resource_any(dev, SYS_RES_MEMORY, &wc->mem_rid, RF_ACTIVE);
+	if (wc->mem_res == NULL) {
+		device_printf(dev, "Can't allocate memory resource\n");
+		return ENXIO;
+	}
+
+	/* allocate DMA resources */
+	res = t4_dma_allocate(wc->basesize, &wc->write_dma_tag, &wc->write_dma_map,
+	    (void **) &wc->writechunk, &wc->writedma);
+	if (res) {
+		t4_release_resources(wc);
+		return res;
+	}
+
+	res = t4_dma_allocate(wc->basesize, &wc->read_dma_tag, &wc->read_dma_map,
+	    (void **) &wc->readchunk, &wc->readdma);
+	if (res) {
+		t4_release_resources(wc);
+		return res;
+	}
+
+	/* enable bus mastering */
+	pci_enable_busmaster(dev);
+
+	/* register card */
+	res = t4_register(wc, dt, (dt->flags & FLAG_2PORT) ? 2 : 4);
+	if (res) {
+		t4_release_resources(wc);
+		return -res;
+	}
+
+	/* launch card */
+	t4_launch(wc);
+	return 0;
+}
+
+static int
+t4_device_detach(device_t dev)
+{
+	struct t4 *wc = device_get_softc(dev);
+
+	/* unregister */
+	t4_unregister(wc);
+
+	/* release resources */
+	t4_release_resources(wc);
+
+	free_wc(wc);
+	return (0);
+}
+
+static int
+t4_device_shutdown(device_t dev)
+{
+	DPRINTF(dev, "wct4xxp shutdown\n");
+	return (0);
+}
+
+static int
+t4_device_suspend(device_t dev)
+{
+	DPRINTF(dev, "wct4xxp suspend\n");
+	return (0);
+}
+
+static int
+t4_device_resume(device_t dev)
+{
+	DPRINTF(dev, "wct4xxp resume\n");
+	return (0);
+}
+
+static device_method_t t4_methods[] = {
+	DEVMETHOD(device_probe,     t4_device_probe),
+	DEVMETHOD(device_attach,    t4_device_attach),
+	DEVMETHOD(device_detach,    t4_device_detach),
+	DEVMETHOD(device_shutdown,  t4_device_shutdown),
+	DEVMETHOD(device_suspend,   t4_device_suspend),
+	DEVMETHOD(device_resume,    t4_device_resume),
+	{ 0, 0 }
+};
+
+static driver_t t4_pci_driver = {
+	"wct4xxp",
+	t4_methods,
+	sizeof(struct t4)
+};
+
+static devclass_t t4_devclass;
+
+DRIVER_MODULE(wct4xxp, pci, t4_pci_driver, t4_devclass, 0, 0);
+MODULE_DEPEND(wct4xxp, pci, 1, 1, 1);
+MODULE_DEPEND(wct4xxp, dahdi, 1, 1, 1);
+MODULE_DEPEND(wct4xxp, firmware, 1, 1, 1);
+
+#else
+static int
+t4_setup_intr(struct t4 *wc, struct devtype *dt)
+{
+#ifdef SUPPORT_GEN1
+	if (request_irq(pdev->irq, (dt->flags & FLAG_2NDGEN) ? t4_interrupt_gen2 : t4_interrupt, DAHDI_IRQ_SHARED_DISABLED, (wc->numspans == 2) ? "wct2xxp" : "wct4xxp", wc))
+#else
+	if (!(dt & FLAG_2NDGEN)) {
+		printk(KERN_NOTICE "This driver does not support 1st gen modules\n");
+		return -ENODEV;
+	}
+	if (request_irq(pdev->irq, t4_interrupt_gen2, DAHDI_IRQ_SHARED_DISABLED, "t4xxp", wc))
+#endif
+	{
+		printk(KERN_NOTICE "t4xxp: Unable to request IRQ %d\n", pdev->irq);
+		return -EIO;
+	}
+}
+
+static int __devinit t4_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
+{
+	struct t4 *wc;
+	struct devtype *dt;
+	unsigned int x, f;
+	int numports;
+#if 0
+	int y;
+	unsigned int *canary;
+#endif
+
+	if (pci_enable_device(pdev)) {
+		return -EIO;
+	}
+
+	if (!(wc = kmalloc(sizeof(*wc), GFP_KERNEL))) {
+		return -ENOMEM;
+	}
+
+	memset(wc, 0x0, sizeof(*wc));
+	dt = (struct devtype *) (ent->driver_data);
+	if (dt->flags & FLAG_2NDGEN)
+		wc->basesize = DAHDI_MAX_CHUNKSIZE * 32 * 4;
+	else
+		wc->basesize = DAHDI_MAX_CHUNKSIZE * 32 * 2 * 4;
+
+	wc->memaddr = pci_resource_start(pdev, 0);
+	wc->memlen = pci_resource_len(pdev, 0);
+	wc->membase = ioremap(wc->memaddr, wc->memlen);
+
+#if 0
+	if (!request_mem_region(wc->memaddr, wc->memlen, wc->variety))
+		printk(KERN_INFO "wct4: Unable to request memory region :(, using anyway...\n");
+#endif
+	if (pci_request_regions(pdev, wc->variety))
+		printk(KERN_INFO "wct%dxxp: Unable to request regions\n", wc->numspans);
+
+	numports = (dt->flags & FLAG_2PORT) ? 2 : 4;
+	printk(KERN_INFO "Found TE%dXXP at base address %08lx, remapped to %p\n",
+	       numports, wc->memaddr, wc->membase);
+
+	wc->dev = pdev;
+
+	wc->writechunk =
+		/* 32 channels, Double-buffer, Read/Write, 4 spans */
+		(unsigned int *)pci_alloc_consistent(pdev, wc->basesize * 2, &wc->writedma);
+	if (!wc->writechunk) {
+		printk(KERN_NOTICE "wct%dxxp: Unable to allocate DMA-able memory\n", wc->numspans);
+		kfree(wc);
+		return -ENOMEM;
+	}
+
+	/* Read is after the whole write piece (in words) */
+	wc->readchunk = wc->writechunk + wc->basesize / 4;
+
+	/* Same thing but in bytes...  */
+	wc->readdma = wc->writedma + wc->basesize;
+
+	/* Enable bus mastering */
+	pci_set_master(pdev);
+
+	/* Keep track of which device we are */
+	pci_set_drvdata(pdev, wc);
+
+	/* Register card */
+	res = t4_register(wc, dt, numports);
+	if (res) {
+		kfree(wc);
+		return res;
+	}
+
+	return 0;
+}
+
+static void __devexit t4_remove_one(struct pci_dev *pdev)
+{
+	struct t4 *wc = pci_get_drvdata(pdev);
+
+	if (!wc) {
+		return;
+	}
+
+	t4_unregister(wc);
+
+	free_irq(pdev->irq, wc);
+
+	if (wc->membase)
+		iounmap((void *)wc->membase);
+
+	pci_release_regions(pdev);
+
+	/* Immediately free resources */
+	pci_free_consistent(pdev, wc->basesize * 2,
+				(void *)wc->writechunk, wc->writedma);
+
+	pci_set_drvdata(pdev, NULL);
+	free_wc(wc);
+	kfree(wc);
+}
+
 
 static struct pci_driver t4_driver = {
 	.name = "wct4xxp",
@@ -3949,3 +4425,4 @@ MODULE_DEVICE_TABLE(pci, t4_pci_tbl);
 
 module_init(t4_init);
 module_exit(t4_cleanup);
+#endif
