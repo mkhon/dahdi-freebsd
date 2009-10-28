@@ -13,12 +13,7 @@
 
 .PHONY: dist-clean clean all uninstall have_download install object-build hotplug-install hotplug-dirs hotplug-uninstall make_firmware_object firmware-loaders
 
-OCT6114_064_VERSION:=1.05.01
-OCT6114_128_VERSION:=1.05.01
-TC400M_VERSION:=MR6.12
-VPMADT032_VERSION:=1.17.0
-
-FIRMWARE_URL:=http://downloads.digium.com/pub/telephony/firmware/releases
+include "../../../firmware.mk"
 
 ALL_FIRMWARE=FIRMWARE-OCT6114-064 FIRMWARE-OCT6114-128 FIRMWARE-TC400M
 
