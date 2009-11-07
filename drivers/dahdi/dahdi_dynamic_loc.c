@@ -45,6 +45,16 @@
  * this program for more details.
  */
 
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/param.h>
+#include <sys/conf.h>
+#include <sys/module.h>
+#include <sys/systm.h>
+
+#define try_module_get(m)	(1)
+#define module_put(m)
+#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -54,6 +64,7 @@
 #include <linux/kmod.h>
 #include <linux/netdevice.h>
 #include <linux/notifier.h>
+#endif /* !__FreeBSD__ */
 
 #include <dahdi/kernel.h>
 
@@ -259,7 +270,27 @@ static void __exit ztdlocal_exit(void)
 	dahdi_dynamic_unregister(&ztd_local);
 }
 
+#if defined(__FreeBSD__)
+static int
+dahdi_dynamic_loc_modevent(module_t mod __unused, int type, void *data __unused)
+{
+	switch (type) {
+	case MOD_LOAD:
+		return ztdlocal_init();
+	case MOD_UNLOAD:
+		ztdlocal_exit();
+		return 0;
+	default:
+		return EOPNOTSUPP;
+	}
+}
+
+DEV_MODULE(dahdi_dynamic_loc, dahdi_dynamic_loc_modevent, NULL);
+MODULE_VERSION(dahdi_dynamic_loc, 1);
+MODULE_DEPEND(dahdi_dynamic_loc, dahdi_dynamic, 1, 1, 1);
+#else /* !__FreeBSD__ */
 module_init(ztdlocal_init);
 module_exit(ztdlocal_exit);
 
 MODULE_LICENSE("GPL v2");
+#endif /* !__FreeBSD__ */

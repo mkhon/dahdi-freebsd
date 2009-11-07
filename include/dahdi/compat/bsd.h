@@ -9,6 +9,8 @@
 
 struct module;
 
+#define EXPORT_SYMBOL(s)
+
 #define KERNEL_VERSION(x, y, z)	0
 
 #define copy_from_user(to, from, n)	(bcopy((from), (to), (n)), 0)
