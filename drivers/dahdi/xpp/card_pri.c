@@ -84,6 +84,7 @@ static int pri_startup(struct dahdi_span *span);
 static int pri_shutdown(struct dahdi_span *span);
 static int pri_rbsbits(struct dahdi_chan *chan, int bits);
 static int pri_lineconfig(xpd_t *xpd, int lineconfig);
+static void send_idlebits(xpd_t *xpd, bool saveold);
 
 #define	PROC_REGISTER_FNAME	"slics"
 #ifdef	OLD_PROC
@@ -181,6 +182,8 @@ struct pri_leds {
 	byte	led_sel:2;	/* enum pri_led_selectors */
 	byte	reserved:4;
 };
+
+#define	REG_CCB1_T	0x2F	/* Clear Channel Register 1 */
 
 #define	REG_FRS0	0x4C	/* Framer Receive Status Register 0 */
 #define	REG_FRS0_T1_FSR	BIT(0)	/* T1 - Frame Search Restart Flag */
@@ -304,7 +307,9 @@ struct pri_leds {
 #define	VAL_PC_GPOH	0x0A	/* General Purpose Output, high level */
 #define	VAL_PC_GPOL	0x0B	/* General Purpose Output, low level */
 
-#define	NUM_CAS_RS	(REG_RS16_E - REG_RS1_E + 1)
+#define	NUM_CAS_RS_E	(REG_RS16_E - REG_RS2_E + 1)
+/* and of those, the ones used in T1: */
+#define	NUM_CAS_RS_T	(REG_RS12_E - REG_RS1_E + 1)
 
 struct PRI_priv_data {
 	bool				clock_source;
@@ -312,6 +317,7 @@ struct PRI_priv_data {
 	struct proc_dir_entry		*pri_info;
 #endif
 	enum pri_protocol		pri_protocol;
+	xpp_line_t			rbslines;
 	int				deflaw;
 	unsigned int			dchan_num;
 	bool				initialized;
@@ -323,8 +329,8 @@ struct PRI_priv_data {
 #define	VALID_DCHAN(p)	(DCHAN(p) != NO_DCHAN)
 #define	SET_DCHAN(p,d)	do { DCHAN(p) = (d); } while(0);
 
-	byte				cas_rs_e[NUM_CAS_RS];
-	byte				cas_ts_e[NUM_CAS_RS];
+	byte				cas_rs_e[NUM_CAS_RS_E];
+	byte				cas_ts_e[NUM_CAS_RS_E];
 	uint				cas_replies;
 	bool				is_esf;
 	bool				local_loopback;
@@ -413,6 +419,78 @@ static int pri_write_reg(xpd_t *xpd, int regnum, byte val)
 			0,			/* data_H	*/
 			0			/* should_reply	*/
 			);
+}
+
+static int cas_regbase(xpd_t *xpd)
+{
+	struct PRI_priv_data	*priv;
+
+	priv = xpd->priv;
+	switch (priv->pri_protocol) {
+	case PRI_PROTO_E1:
+		return REG_RS2_E;
+	case PRI_PROTO_T1:
+		/* fall-through */
+	case PRI_PROTO_J1:
+		return REG_RS1_E;
+	case PRI_PROTO_0:
+		/* fall-through */
+		;
+	}
+	BUG();
+	return 0;
+}
+
+static int cas_numregs(xpd_t *xpd)
+{
+	struct PRI_priv_data	*priv;
+
+	priv = xpd->priv;
+	switch (priv->pri_protocol) {
+	case PRI_PROTO_E1:
+		return NUM_CAS_RS_E;
+	case PRI_PROTO_T1:
+		/* fall-through */
+	case PRI_PROTO_J1:
+		return NUM_CAS_RS_T;
+	case PRI_PROTO_0:
+		/* fall-through */
+		;
+	}
+	BUG();
+	return 0;
+}
+
+static int write_cas_reg(xpd_t *xpd, int rsnum, byte val)
+{
+	struct PRI_priv_data	*priv;
+	int			regbase = cas_regbase(xpd);
+	int			num_cas_rs = cas_numregs(xpd);
+	int			regnum;
+	bool			is_d4 = 0;
+
+	BUG_ON(!xpd);
+	priv = xpd->priv;
+	if (priv->pri_protocol && !priv->is_esf) {
+		/* same data should be copied to RS7..12 in D4 only */
+		is_d4 = 1;
+	}
+	if (rsnum < 0 || rsnum >= num_cas_rs) {
+		XPD_ERR(xpd, "RBS(TX): rsnum=%d\n", rsnum);
+		BUG();
+	}
+	regnum = regbase + rsnum;
+	priv->cas_ts_e[rsnum] = val;
+	XPD_DBG(SIGNAL, xpd, "RBS(TX): reg=0x%X val=0x%02X\n", regnum, val);
+	write_subunit(xpd, regbase + rsnum, val);
+	if (is_d4) {
+		/* same data should be copied to RS7..12 in D4 only */
+		regnum = REG_RS7_E + rsnum;
+		XPD_DBG(SIGNAL, xpd, "RBS(TX): reg=0x%X val=0x%02X\n",
+				regnum, val);
+		write_subunit(xpd, regnum, val);
+	}
+	return 0;
 }
 
 #ifdef	OLD_PROC
@@ -746,26 +824,75 @@ static const struct {
 	VALID_CONFIG(10, DAHDI_CONFIG_CRC4, "CRC4"),
 };
 
+/*
+ * Mark the lines as CLEAR or RBS signalling.
+ * With T1, we need to mark the CLEAR lines on the REG_CCB1_T registers
+ * Should be called only when we are registered to DAHDI
+ * The channo parameter:
+ *	channo == 0: set lines for the whole span
+ *	channo != 0: only set modified lines
+ */
+static void set_rbslines(xpd_t *xpd, int channo)
+{
+	struct PRI_priv_data	*priv;
+	xpp_line_t		new_rbslines = 0;
+	xpp_line_t		modified_lines;
+	int			i;
+
+	priv = xpd->priv;
+	for_each_line(xpd, i) {
+		struct dahdi_chan	*chan = XPD_CHAN(xpd, i);
+
+		if(chan->flags & DAHDI_FLAG_CLEAR)
+			BIT_CLR(new_rbslines, i);
+		else
+			BIT_SET(new_rbslines, i);
+	}
+	new_rbslines &= BITMASK(xpd->channels);
+	modified_lines = priv->rbslines ^ new_rbslines;
+	XPD_DBG(DEVICES, xpd, "RBSLINES-%d(%s): 0x%X\n",
+		channo, pri_protocol_name(priv->pri_protocol), new_rbslines);
+	if((priv->pri_protocol == PRI_PROTO_T1) || (priv->pri_protocol == PRI_PROTO_J1)) {
+		byte	clear_lines = 0;	/* Mark clear lines */
+		bool	reg_changed = 0;
+
+		for_each_line(xpd, i) {
+			int	bytenum = i / 8;
+			int	bitnum = i % 8;
+
+			if(!IS_SET(new_rbslines, i)) {
+				BIT_SET(clear_lines, (7 - bitnum));
+			}
+			if(IS_SET(modified_lines, i))
+				reg_changed = 1;
+			if(bitnum == 7) {
+				if(channo == 0 || reg_changed) {
+					bytenum += REG_CCB1_T;
+					XPD_DBG(DEVICES, xpd, "RBS(%s): modified=0x%X rbslines=0x%X reg=0x%X clear_lines=0x%X\n",
+							pri_protocol_name(priv->pri_protocol),
+							modified_lines, new_rbslines, bytenum, clear_lines);
+					write_subunit(xpd, bytenum, clear_lines);
+				}
+				clear_lines = 0;
+				reg_changed = 0;
+			}
+		}
+	}
+	priv->rbslines = new_rbslines;
+}
+
 static int set_mode_cas(xpd_t *xpd, bool want_cas)
 {
 	struct PRI_priv_data	*priv;
-	byte			xsp  = 0;
 
 	priv = xpd->priv;
 	XPD_INFO(xpd, "Setting TDM to %s\n", (want_cas) ? "CAS" : "PRI");
-	if(priv->pri_protocol == PRI_PROTO_E1) {
-		xsp |= REG_XSP_E_EBP | REG_XSP_E_AXS | REG_XSP_E_XSIF;
-	} else if(priv->pri_protocol == PRI_PROTO_T1) {
-		xsp &= ~REG_FMR5_T_XTM;
-	}
 	if(want_cas) {
-		xsp |= REG_XSP_E_CASEN;	/* Same as REG_FMR5_T_EIBR for T1 */
 		priv->is_cas = 1;
+		priv->dchan_alive = 0;
 	} else {
 		priv->is_cas = 0;
 	}
-	XPD_DBG(GENERAL, xpd, "%s: xsp(0x%02X) = 0x%02X\n", __FUNCTION__, REG_XSP_E, xsp);
-	write_subunit(xpd, REG_XSP_E, xsp);
 	return 0;
 }
 
@@ -784,7 +911,9 @@ static int pri_lineconfig(xpd_t *xpd, int lineconfig)
 	byte			fmr3 = 0;	/* write only for CRC4 */
 	byte			fmr4 = 0;
 	byte                    cmdr = REG_CMDR_RRES | REG_CMDR_XRES;
+	byte			xsp  = 0;
 	unsigned int		bad_bits;
+	bool			force_cas = 0;
 	int			i;
 
 	BUG_ON(!xpd);
@@ -823,13 +952,18 @@ static int pri_lineconfig(xpd_t *xpd, int lineconfig)
 		fmr1 |= REG_FMR1_AFR;
 		fmr2 = REG_FMR2_E_AXRA | REG_FMR2_E_ALMF;	/* 0x03 */
 		fmr4 = 0x9F;								/*  E1.XSW:  All spare bits = 1*/
+		xsp |= REG_XSP_E_EBP | REG_XSP_E_AXS | REG_XSP_E_XSIF;
 	} else if(priv->pri_protocol == PRI_PROTO_T1) {
 		fmr1 |= REG_FMR1_PMOD | REG_FMR1_T_CRC;
 		fmr2 = REG_FMR2_T_SSP | REG_FMR2_T_AXRA;	/* 0x22 */
 		fmr4 = 0x0C;
+		xsp &= ~REG_FMR5_T_XTM;
+		force_cas = 1;					/* T1 - Chip always in CAS mode */
 	} else if(priv->pri_protocol == PRI_PROTO_J1) {
 		fmr1 |= REG_FMR1_PMOD;
 		fmr4 = 0x1C;
+		xsp &= ~REG_FMR5_T_XTM;
+		force_cas = 1;					/* T1 - Chip always in CAS mode */
 		XPD_ERR(xpd, "J1 unsupported yet\n");
 		return -ENOSYS;
 	}
@@ -842,6 +976,22 @@ static int pri_lineconfig(xpd_t *xpd, int lineconfig)
 	} else if (lineconfig & DAHDI_CONFIG_AMI) {
 		framingstr = "AMI";
 		fmr0 = REG_FMR0_E_XC1 | REG_FMR0_E_RC1;
+		/*
+		 * From Infineon Errata Sheet: PEF 22554, Version 3.1
+		 * Problem: Incorrect CAS Receiption when
+		 *          using AMI receive line code
+		 * Workaround: For E1,
+		 *               "...The receive line coding HDB3 is
+		 *                recommended instead."
+		 *             For T1,
+		 *               "...in T1 mode it is recommended to
+		 *                configure the Rx side to B8ZS coding"
+		 * For both cases this is the same bit in FMR0
+		 */
+		if(priv->pri_protocol == PRI_PROTO_J1)
+			XPD_NOTICE(xpd, "J1 is not supported yet\n");
+		else
+			fmr0 |= REG_FMR0_E_RC0;
 	} else if (lineconfig & DAHDI_CONFIG_HDB3) {
 		framingstr = "HDB3";
 		fmr0 = REG_FMR0_E_XC1 | REG_FMR0_E_XC0 | REG_FMR0_E_RC1 | REG_FMR0_E_RC0;
@@ -863,6 +1013,7 @@ static int pri_lineconfig(xpd_t *xpd, int lineconfig)
 		set_mode_cas(xpd, 0);	/* In E1 we know right from the span statement. */
 	} else {
 		codingstr = "CAS";	/* In E1 we know right from the span statement. */
+		force_cas = 1;
 		set_mode_cas(xpd, 1);
 	}
 	pri_pcm_update(xpd);
@@ -903,6 +1054,11 @@ static int pri_lineconfig(xpd_t *xpd, int lineconfig)
 		write_subunit(xpd, REG_RC0, rc0);
 	}
 #endif
+	if(force_cas) {
+		xsp |= REG_XSP_E_CASEN;	/* Same as REG_FMR5_T_EIBR for T1 */
+	}
+	XPD_DBG(GENERAL, xpd, "%s: xsp(0x%02X) = 0x%02X\n", __FUNCTION__, REG_XSP_E, xsp);
+	write_subunit(xpd, REG_XSP_E, xsp);
 	return 0;
 bad_lineconfig:
 	XPD_ERR(xpd, "Bad lineconfig. Abort\n");
@@ -956,26 +1112,35 @@ static int pri_chanconfig(struct dahdi_chan *chan, int sigtype)
 	BUG_ON(!xpd);
 	priv = xpd->priv;
 	DBG(GENERAL, "channel %d (%s) -> %s\n", chan->channo, chan->name, sig2str(sigtype));
+	/*
+	 * Some bookkeeping to check if we have DChan defined or not
+	 * FIXME: actually use this to prevent duplicate DChan definitions
+	 *        and prevent DChan definitions with CAS.
+	 */
 	if(is_sigtype_dchan(sigtype)) {
-		if(VALID_DCHAN(priv)) {
+		if(VALID_DCHAN(priv) && DCHAN(priv) != chan->channo) {
 			ERR("channel %d (%s) marked DChan but also channel %d.\n",
 				chan->channo, chan->name, DCHAN(priv));
 			return -EINVAL;
 		} else {
-			DBG(GENERAL, "channel %d (%s) marked as DChan\n", chan->channo, chan->name);
+			XPD_DBG(GENERAL, xpd, "channel %d (%s) marked as DChan\n", chan->channo, chan->name);
 			SET_DCHAN(priv, chan->channo);
 			/* In T1, we don't know before-hand */
 			if(priv->pri_protocol != PRI_PROTO_E1 && priv->is_cas != 0)
 				set_mode_cas(xpd, 0);
 		}
 	} else {
-		if(DCHAN(priv) == chan->channo) {
-			DBG(GENERAL, "channel %d (%s) marked a not DChan\n", chan->channo, chan->name);
+		if(chan->channo == 1) {
+			XPD_DBG(GENERAL, xpd, "channel %d (%s) marked a not DChan\n", chan->channo, chan->name);
 			SET_DCHAN(priv, NO_DCHAN);
 		}
 		/* In T1, we don't know before-hand */
 		if(priv->pri_protocol != PRI_PROTO_E1 && priv->is_cas != 1)
 			set_mode_cas(xpd, 1);
+	}
+	if(xpd->span.flags & DAHDI_FLAG_RUNNING) {
+		XPD_DBG(DEVICES, xpd, "Span is RUNNING. Updating rbslines.\n");
+		set_rbslines(xpd, chan->channo);
 	}
 	// FIXME: sanity checks:
 	// - should be supported (within the sigcap)
@@ -1316,6 +1481,7 @@ static int pri_startup(struct dahdi_span *span)
 	XPD_DBG(GENERAL, xpd, "STARTUP\n");
 	// Turn on all channels
 	CALL_XMETHOD(XPD_STATE, xpd->xbus, xpd, 1);
+	set_rbslines(xpd, 0);
 	return 0;
 }
 
@@ -1344,10 +1510,7 @@ static int encode_rbsbits_e1(xpd_t *xpd, int pos, int bits)
 {
 	struct PRI_priv_data	*priv;
 	byte			val;
-	int			reg_pos;
-	int			regnum;
-	unsigned long		flags;
-	
+	int			rsnum;
 
 	BUG_ON(!xpd);
 	priv = xpd->priv;
@@ -1359,22 +1522,17 @@ static int encode_rbsbits_e1(xpd_t *xpd, int pos, int bits)
 		XPD_NOTICE(xpd, "%s: pos=%d out of range. Ignore\n", __FUNCTION__, pos);
 		return 0;
 	}
-	spin_lock_irqsave(&xpd->lock, flags);
 	if(pos >= 16) {
 		/* Low nibble */
-		reg_pos = pos - 16;
-		val = (priv->cas_ts_e[reg_pos] & 0xF0) | (bits & 0x0F);
+		rsnum = pos - 16;
+		val = (priv->cas_ts_e[rsnum] & 0xF0) | (bits & 0x0F);
 	} else {
 		/* High nibble */
-		reg_pos = pos;
-		val = (priv->cas_ts_e[reg_pos] & 0x0F) | ((bits << 4) & 0xF0);
+		rsnum = pos;
+		val = (priv->cas_ts_e[rsnum] & 0x0F) | ((bits << 4) & 0xF0);
 	}
-	regnum = REG_RS2_E + reg_pos;
-	priv->cas_ts_e[reg_pos] = val;
-	spin_unlock_irqrestore(&xpd->lock, flags);
-	LINE_DBG(SIGNAL, xpd, pos, "RBS: TX: bits=0x%X (reg=0x%X val=0x%02X)\n",
-		bits, regnum, val);
-	write_subunit(xpd, regnum, val);
+	LINE_DBG(SIGNAL, xpd, pos, "RBS: TX: bits=0x%X\n", bits);
+	write_cas_reg(xpd, rsnum, val);
 	return 0;
 }
 
@@ -1387,6 +1545,7 @@ static int encode_rbsbits_t1(xpd_t *xpd, int pos, int bits)
 	int			width;
 	uint			tx_bits = bits;
 	uint			mask;
+	byte			val;
 
 	BUG_ON(!xpd);
 	priv = xpd->priv;
@@ -1405,27 +1564,52 @@ static int encode_rbsbits_t1(xpd_t *xpd, int pos, int bits)
 		tx_bits >>= 2;
 	tx_bits &= BITMASK(width);
 	tx_bits <<= (chan_per_reg - offset - 1) * width;
-	if((priv->cas_ts_e[rsnum] & mask) == tx_bits) {
-#if 0
-		LINE_DBG(SIGNAL, xpd, pos, "RBS: TX: RS%02d(0x%02X, 0x%02X): REPEAT 0x%02X\n",
-			rsnum+1, mask, tx_bits, bits);
-#endif
-		return 0;
-	}
-	priv->cas_ts_e[rsnum] &= ~mask;
-	priv->cas_ts_e[rsnum] |= tx_bits;
+	val = priv->cas_ts_e[rsnum];
+	val &= ~mask;
+	val |= tx_bits;
 	LINE_DBG(SIGNAL, xpd, pos,
 		"bits=0x%02X RS%02d(%s) offset=%d tx_bits=0x%02X\n",
 		bits, rsnum+1,
 		(priv->is_esf) ? "esf" : "d4",
 		offset, tx_bits);
-	write_subunit(xpd, REG_RS1_E + rsnum , priv->cas_ts_e[rsnum]);
-	if (!priv->is_esf) {
-		/* same data should be copied to RS7..12 in D4 only */
-		write_subunit(xpd, REG_RS7_E + rsnum , priv->cas_ts_e[rsnum]);
-	}
+	write_cas_reg(xpd, rsnum , val);
 	priv->dchan_tx_counter++;
 	return 0;
+}
+
+static void send_idlebits(xpd_t *xpd, bool saveold)
+{
+	struct PRI_priv_data	*priv;
+	byte			save_rs[NUM_CAS_RS_E];
+	int			i;
+
+	if (!SPAN_REGISTERED(xpd))
+		return;
+	priv = xpd->priv;
+	BUG_ON(!priv);
+	XPD_DBG(SIGNAL, xpd, "saveold=%d\n", saveold);
+	if (saveold)
+		memcpy(save_rs, priv->cas_ts_e, sizeof(save_rs));
+	for_each_line(xpd, i) {
+		struct dahdi_chan	*chan = XPD_CHAN(xpd, i);
+
+		pri_rbsbits(chan, chan->idlebits);
+	}
+	if (saveold)
+		memcpy(priv->cas_ts_e, save_rs, sizeof(save_rs));
+}
+
+static void send_oldbits(xpd_t *xpd)
+{
+	struct PRI_priv_data	*priv;
+	int			i;
+
+	BUG_ON(!xpd);
+	priv = xpd->priv;
+	BUG_ON(!priv);
+	XPD_DBG(SIGNAL, xpd, "\n");
+	for (i = 0; i < cas_numregs(xpd); i++)
+		write_cas_reg(xpd, i , priv->cas_ts_e[i]);
 }
 
 static int pri_rbsbits(struct dahdi_chan *chan, int bits)
@@ -1440,11 +1624,16 @@ static int pri_rbsbits(struct dahdi_chan *chan, int bits)
 	priv = xpd->priv;
 	BUG_ON(!priv);
 	if(!priv->layer1_up) {
-		XPD_DBG(SIGNAL, xpd, "RBS: TX: No layer1. Ignore.\n");
-		return 0;
+		XPD_DBG(SIGNAL, xpd, "RBS: TX: No layer1 yet. Keep going.\n");
 	}
 	if(!priv->is_cas) {
 		XPD_NOTICE(xpd, "RBS: TX: not in CAS mode. Ignore.\n");
+		return 0;
+	}
+	if (chan->sig == DAHDI_SIG_NONE) {
+		LINE_DBG(SIGNAL, xpd, pos,
+				"RBS: TX: sigtyp=%s. , bits=0x%X. Ignore.\n", 
+				sig2str(chan->sig), bits);
 		return 0;
 	}
 	if(priv->pri_protocol == PRI_PROTO_E1) {
@@ -1636,7 +1825,8 @@ static /* 0x33 */ HOSTCMD(PRI, SET_LED, enum pri_led_selectors led_sel, enum pri
 static void layer1_state(xpd_t *xpd, byte data_low)
 {
 	struct PRI_priv_data	*priv;
-	int			alarms = 0;
+	int			alarms = DAHDI_ALARM_NONE;
+	int			layer1_up_prev;
 
 	BUG_ON(!xpd);
 	priv = xpd->priv;
@@ -1648,7 +1838,8 @@ static void layer1_state(xpd_t *xpd, byte data_low)
 		alarms |= DAHDI_ALARM_BLUE;
 	if(data_low & REG_FRS0_RRA)
 		alarms |= DAHDI_ALARM_YELLOW;
-	priv->layer1_up = alarms == 0;
+	layer1_up_prev  = priv->layer1_up;
+	priv->layer1_up = alarms == DAHDI_ALARM_NONE;
 #if 0
 	/*
 	 * Some bad bits (e.g: LMFA and NMF have no alarm "colors"
@@ -1660,10 +1851,17 @@ static void layer1_state(xpd_t *xpd, byte data_low)
 #endif
 	priv->alarms = alarms;
 	if(!priv->layer1_up) {
-		memset(priv->cas_rs_e, 0, NUM_CAS_RS);
-		memset(priv->cas_ts_e, 0, NUM_CAS_RS);
 		dchan_state(xpd, 0);
+	} else if (priv->is_cas && !layer1_up_prev) {
+		int	regbase = cas_regbase(xpd);
+		int	i;
+
+		XPD_DBG(SIGNAL , xpd,
+			"Returning From Alarm Refreshing Rx register data \n");
+		for (i = 0; i < cas_numregs(xpd); i++)
+			query_subunit(xpd, regbase + i);
 	}
+
 	if(SPAN_REGISTERED(xpd) && xpd->span.alarms != alarms) {
 		char	str1[MAX_PROC_WRITE];
 		char	str2[MAX_PROC_WRITE];
@@ -1673,6 +1871,12 @@ static void layer1_state(xpd_t *xpd, byte data_low)
 		XPD_NOTICE(xpd, "Alarms: 0x%X (%s) => 0x%X (%s)\n",
 				xpd->span.alarms, str1,
 				alarms, str2);
+		if (priv->is_cas) {
+			if (alarms == DAHDI_ALARM_NONE)
+				send_oldbits(xpd);
+			else if (xpd->span.alarms == DAHDI_ALARM_NONE)
+				send_idlebits(xpd, 1);
+		}
 		xpd->span.alarms = alarms;
 		dahdi_alarm_notify(&xpd->span);
 		set_clocking(xpd);
@@ -1689,13 +1893,15 @@ static int decode_cas_e1(xpd_t *xpd, byte regnum, byte data_low)
 	int			rsnum = pos + 2;
 	int			chan1 = pos;
 	int			chan2 = pos + 16;
+	int			val1 = (data_low >> 4) & 0xF;
+	int			val2 = data_low & 0xF;
 
 	priv = xpd->priv;
 	BUG_ON(!priv->is_cas);
 	BUG_ON(priv->pri_protocol != PRI_PROTO_E1);
 	XPD_DBG(SIGNAL, xpd, "RBS: RX: data_low=0x%02X\n", data_low);
-	if(pos < 0 || pos >= NUM_CAS_RS) {
-		XPD_ERR(xpd, "%s: got bad pos=%d [0-%d]\n", __FUNCTION__, pos, NUM_CAS_RS);
+	if(pos < 0 || pos >= NUM_CAS_RS_E) {
+		XPD_ERR(xpd, "%s: got bad pos=%d [0-%d]\n", __FUNCTION__, pos, NUM_CAS_RS_E);
 		return -EINVAL;
 	}
 	if(chan1 < 0 || chan1 > xpd->channels) {
@@ -1712,28 +1918,14 @@ static int decode_cas_e1(xpd_t *xpd, byte regnum, byte data_low)
 			chan2);
 		return -EINVAL;
 	}
-	if(priv->cas_rs_e[pos] != data_low) {
-		int	old1 = (priv->cas_rs_e[pos] >> 4) & 0xF;
-		int	old2 = priv->cas_rs_e[pos] & 0xF;
-		int	new1 = (data_low >> 4) & 0xF;
-		int	new2 = data_low & 0xF;
-
-		XPD_DBG(SIGNAL, xpd, "RBS: RX: RS%02d (channel %2d, channel %2d): 0x%02X -> 0x%02X\n",
-				rsnum, chan1+1, chan2+1, priv->cas_rs_e[pos], data_low);
-		if(SPAN_REGISTERED(xpd)) {
-			if(old1 != new1)
-				dahdi_rbsbits(XPD_CHAN(xpd, chan1), new1);
-			if(old2 != new2)
-				dahdi_rbsbits(XPD_CHAN(xpd, chan2), new2);
-		}
-		priv->dchan_rx_counter++;
-		priv->cas_rs_e[pos] = data_low;
-	} else {
-#if 0
-		XPD_DBG(SIGNAL, xpd, "RBS: RX: RS%02d (channel %2d, channel %2d): REPEAT 0x%02X\n",
-			rsnum, chan1+1, chan2+1, priv->cas_rs_e[pos]);
-#endif
+	XPD_DBG(SIGNAL, xpd, "RBS: RX: RS%02d (channel %2d, channel %2d): 0x%02X -> 0x%02X\n",
+		rsnum, chan1+1, chan2+1, priv->cas_rs_e[pos], data_low);
+	if(SPAN_REGISTERED(xpd)) {
+		dahdi_rbsbits(XPD_CHAN(xpd, chan1), val1);
+		dahdi_rbsbits(XPD_CHAN(xpd, chan2), val2);
 	}
+	priv->dchan_rx_counter++;
+	priv->cas_rs_e[pos] = data_low;
 	return 0;
 }
 
@@ -1757,13 +1949,6 @@ static int decode_cas_t1(xpd_t *xpd, byte regnum, byte data_low)
 		rsnum = rsnum % 6;	/* 2 identical banks of 6 registers */
 	chan_per_reg = CHAN_PER_REGS(priv);
 	width = 8 / chan_per_reg;
-	if(priv->cas_rs_e[rsnum] == data_low) {
-#if 0
-		XPD_DBG(SIGNAL, xpd, "RBS: RX: RS%02d: REPEAT 0x%02X\n",
-			rsnum+1, data_low);
-#endif
-		return 0;
-	}
 	XPD_DBG(SIGNAL, xpd,
 		"RBS: RX(%s,%d): RS%02d data_low=0x%02X\n",
 		(priv->is_esf) ? "esf" : "d4",
@@ -1811,8 +1996,7 @@ static void process_cas_dchan(xpd_t *xpd, byte regnum, byte data_low)
 		static int	rate_limit;
 
 		if((rate_limit++ % 10003) == 0)
-			XPD_NOTICE(xpd, "RBS: RX: No layer1. Ignore.\n");
-		return;
+			XPD_DBG(SIGNAL, xpd, "RBS: RX: No layer1.\n");
 	}
 	if(!SPAN_REGISTERED(xpd)) {
 		static int	rate_limit;
@@ -2055,12 +2239,12 @@ static int proc_pri_info_read(char *page, char **start, off_t off, int count, in
 		len += sprintf(page + len,
 			"CAS: replies=%d\n", priv->cas_replies);
 		len += sprintf(page + len, "   CAS-TS: ");
-		for(i = 0; i < NUM_CAS_RS; i++) {
+		for(i = 0; i < NUM_CAS_RS_E; i++) {
 			len += sprintf(page + len, " %02X", priv->cas_ts_e[i]);
 		}
 		len += sprintf(page + len, "\n");
 		len += sprintf(page + len, "   CAS-RS: ");
-		for(i = 0; i < NUM_CAS_RS; i++) {
+		for(i = 0; i < NUM_CAS_RS_E; i++) {
 			len += sprintf(page + len, " %02X", priv->cas_rs_e[i]);
 		}
 		len += sprintf(page + len, "\n");
@@ -2283,12 +2467,12 @@ static DEVICE_ATTR_READER(pri_cas_show, dev, buf)
 		len += sprintf(buf + len,
 			"CAS: replies=%d\n", priv->cas_replies);
 		len += sprintf(buf + len, "   CAS-TS: ");
-		for(i = 0; i < NUM_CAS_RS; i++) {
+		for(i = 0; i < NUM_CAS_RS_E; i++) {
 			len += sprintf(buf + len, " %02X", priv->cas_ts_e[i]);
 		}
 		len += sprintf(buf + len, "\n");
 		len += sprintf(buf + len, "   CAS-RS: ");
-		for(i = 0; i < NUM_CAS_RS; i++) {
+		for(i = 0; i < NUM_CAS_RS_E; i++) {
 			len += sprintf(buf + len, " %02X", priv->cas_rs_e[i]);
 		}
 		len += sprintf(buf + len, "\n");

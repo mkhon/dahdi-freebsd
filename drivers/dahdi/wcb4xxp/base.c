@@ -168,6 +168,8 @@ static struct devtype hfc8s_OV = {"OpenVox B800P", .ports = 8, .card_type = B800
 static struct devtype hfc2s_BN = {"BeroNet BN2S0", .ports = 2, .card_type = BN2S0 };
 static struct devtype hfc4s_BN = {"BeroNet BN4S0", .ports = 4, .card_type = BN4S0 };
 static struct devtype hfc8s_BN = {"BeroNet BN8S0", .ports = 8, .card_type = BN8S0 };
+static struct devtype hfc4s_EV = {"CCD HFC-4S Eval. Board", .ports = 4,
+					.card_type = QUADBRI_EVAL };
  
 #define CARD_HAS_EC(card) ((card)->card_type == B410P)
 
@@ -1735,6 +1737,7 @@ static int hdlc_rx_frame(struct b4xxp_span *bspan)
 	char debugbuf[256];
 	unsigned long irq_flags;
 	struct b4xxp *b4 = bspan->parent;
+	unsigned char stat;
 
 	fifo = bspan->fifos[2];
 
@@ -1762,10 +1765,14 @@ static int hdlc_rx_frame(struct b4xxp_span *bspan)
 	zleft = zlen + 1;	/* include STAT byte that the HFC injects after FCS */
 
 	do {
-		if (zleft > WCB4XXP_HDLC_BUF_LEN)
+		int truncated;
+		if (zleft > WCB4XXP_HDLC_BUF_LEN) {
+			truncated = 1;
 			j = WCB4XXP_HDLC_BUF_LEN;
-		else
+		} else {
+			truncated = 0;
 			j = zleft;
+		}
 
 		spin_lock_irqsave(&b4->fifolock, irq_flags);
 		hfc_setreg_waitbusy(b4, R_FIFO, (fifo << V_FIFO_NUM_SHIFT) | V_FIFO_DIR);
@@ -1774,8 +1781,8 @@ static int hdlc_rx_frame(struct b4xxp_span *bspan)
 		spin_unlock_irqrestore(&b4->fifolock, irq_flags);
 
 /* don't send STAT byte to DAHDI */
-		if (bspan->sigchan)
-			dahdi_hdlc_putbuf(bspan->sigchan, buf, (j == WCB4XXP_HDLC_BUF_LEN) ? j : j - 1);
+		if ((bspan->sigchan) && (j > 1))
+			dahdi_hdlc_putbuf(bspan->sigchan, buf, truncated ? j : j - 1);
 
 		zleft -= j;
 		if (DBG_HDLC && DBG_SPANFILTER) {
@@ -1784,6 +1791,7 @@ static int hdlc_rx_frame(struct b4xxp_span *bspan)
 			for (i=0; i < j; i++) printk("%02x%c", buf[i], (i < ( j - 1)) ? ' ':'\n');
 		}
 	} while (zleft > 0);
+	stat = buf[j - 1];
 
 /* Frame received, increment F2 and get an updated count of frames left */
 	spin_lock_irqsave(&b4->fifolock, irq_flags);
@@ -1802,7 +1810,6 @@ static int hdlc_rx_frame(struct b4xxp_span *bspan)
 			dev_notice(b4->dev, "odd, zlen less then 3?\n");
 		dahdi_hdlc_abort(bspan->sigchan, DAHDI_EVENT_ABORT);
 	} else {
-		unsigned char stat = buf[i - 1];
 
 /* if STAT != 0, indicates bad frame */
 		if (stat != 0x00) {
@@ -1948,13 +1955,14 @@ static void b4xxp_init_stage1(struct b4xxp *b4)
 	b4xxp_setreg8(b4, R_SCI_MSK, 0x00);	/* mask off all S/T interrupts */
 	b4xxp_setreg8(b4, R_IRQMSK_MISC, 0x00);	/* nothing else can generate an interrupt */
 
-/*
- * set up the clock controller
- * B410P has a 24.576MHz crystal, so the PCM clock is 2x the incoming clock.
- * Other cards have a 49.152Mhz crystal, so the PCM clock equals incoming clock.
- */
+	/*
+	 * set up the clock controller B410P & Cologne Eval Board have a
+	 * 24.576MHz crystal, so the PCM clock is 2x the incoming clock.
+	 * Other cards have a 49.152Mhz crystal, so the PCM clock equals
+	 * incoming clock.
+	 */
 
-	if (b4->card_type == B410P)
+	if ((b4->card_type == B410P) || (b4->card_type == QUADBRI_EVAL))
 		b4xxp_setreg8(b4, R_BRG_PCM_CFG, 0x02);
 	else
 		b4xxp_setreg8(b4, R_BRG_PCM_CFG, V_PCM_CLK);
@@ -2957,9 +2965,13 @@ static struct pci_device_id b4xx_ids[] __devinitdata =
 	{ 0x1397, 0x08b4, 0x1397, 0xe888, 0, 0, (unsigned long)&hfc4s_OV },
 	{ 0x1397, 0x16b8, 0x1397, 0xe998, 0, 0, (unsigned long)&hfc8s_OV },
 	{ 0x1397, 0x08b4, 0x1397, 0xb566, 0, 0, (unsigned long)&hfc2s_BN },
+	{ 0x1397, 0x08b4, 0x1397, 0xb761, 0, 0, (unsigned long)&hfc2s_BN },
 	{ 0x1397, 0x08b4, 0x1397, 0xb560, 0, 0, (unsigned long)&hfc4s_BN },
+	{ 0x1397, 0x08b4, 0x1397, 0xb550, 0, 0, (unsigned long)&hfc4s_BN },
 	{ 0x1397, 0x16b8, 0x1397, 0xb562, 0, 0, (unsigned long)&hfc8s_BN },
-	{ 0, }
+	{ 0x1397, 0x16b8, 0x1397, 0xb56b, 0, 0, (unsigned long)&hfc8s_BN },
+	{ 0x1397, 0x08b4, 0x1397, 0x08b4, 0, 0, (unsigned long)&hfc4s_EV },
+	{0, }
 
 };
 

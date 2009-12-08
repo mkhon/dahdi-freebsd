@@ -105,9 +105,8 @@ struct vpmadt032_options {
 
 struct GpakChannelConfig;
 
-#define MAX_CHANNELS_PER_SPAN 32
 struct vpmadt032 {
-	void *context;
+	struct voicebus *vb;
 	struct work_struct work;
 	struct workqueue_struct *wq;
 	int dspid;
@@ -115,8 +114,10 @@ struct vpmadt032 {
 	unsigned long control;
 	unsigned char curpage;
 	unsigned short version;
-	struct adt_lec_params curecstate[MAX_CHANNELS_PER_SPAN];
-	struct adt_lec_params desiredecstate[MAX_CHANNELS_PER_SPAN];
+	enum adt_companding companding;
+	struct adt_lec_params curecstate[MAX_CHANNELS];
+	spinlock_t change_list_lock;
+	struct list_head change_list;
 	spinlock_t list_lock;
 	/* Commands that are ready to be used. */
 	struct list_head free_cmds;
@@ -124,7 +125,6 @@ struct vpmadt032 {
 	struct list_head pending_cmds;
 	/* Commands that are currently in progress by the VPM module */
 	struct list_head active_cmds;
-	unsigned char curtone[MAX_CHANNELS_PER_SPAN];
 	struct vpmadt032_options options;
 	void (*setchanconfig_from_state)(struct vpmadt032 *vpm, int channel, struct GpakChannelConfig *chanconfig);
 	/* This must be last */

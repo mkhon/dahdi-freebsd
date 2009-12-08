@@ -312,7 +312,8 @@ void setchanconfig_from_state(struct vpmadt032 *vpm, int channel, GpakChannelCon
 	chanconfig->MuteToneB = Disabled;
 	chanconfig->FaxCngDetB = Disabled;
 
-	chanconfig->SoftwareCompand = (vpm->desiredecstate[channel].companding == ADT_COMP_ALAW) ? cmpPCMA : cmpPCMU;
+	chanconfig->SoftwareCompand = (ADT_COMP_ALAW == vpm->companding) ?
+						cmpPCMA : cmpPCMU;
 	chanconfig->FrameRate = rate2ms;
 	p = &chanconfig->EcanParametersA;
 
@@ -416,13 +417,15 @@ static int config_vpmadt032(struct vpmadt032 *vpm, struct wctdm *wc)
 		return -1;
 	}
 
+	vpm->companding = (wc->span.deflaw == DAHDI_LAW_MULAW) ?
+				ADT_COMP_ULAW : ADT_COMP_ALAW;
+
 	for (i = 0; i < vpm->options.channels; ++i) {
 		vpm->curecstate[i].tap_length = 0;
 		vpm->curecstate[i].nlp_type = vpm->options.vpmnlptype;
 		vpm->curecstate[i].nlp_threshold = vpm->options.vpmnlpthresh;
 		vpm->curecstate[i].nlp_max_suppress = vpm->options.vpmnlpmaxsupp;
 		vpm->curecstate[i].companding = (wc->span.deflaw == DAHDI_LAW_MULAW) ? ADT_COMP_ULAW : ADT_COMP_ALAW;
-		memcpy(&vpm->desiredecstate[i], &vpm->curecstate[i], sizeof(vpm->curecstate[i]));
 
 		/* set_vpmadt032_chanconfig_from_state(&vpm->curecstate[i], &vpm->options, i, &chanconfig); !!! */
 		vpm->setchanconfig_from_state(vpm, i, &chanconfig);
@@ -459,7 +462,6 @@ static int config_vpmadt032(struct vpmadt032 *vpm, struct wctdm *wc)
 
 static inline void cmd_dequeue_vpmadt032(struct wctdm *wc, u8 *writechunk, int whichframe)
 {
-	unsigned long flags;
 	struct vpmadt032_cmd *curcmd = NULL;
 	struct vpmadt032 *vpmadt032 = wc->vpmadt032;
 	int x;
@@ -467,8 +469,6 @@ static inline void cmd_dequeue_vpmadt032(struct wctdm *wc, u8 *writechunk, int w
 
 	/* Skip audio */
 	writechunk += 24;
-
-	spin_lock_irqsave(&wc->reglock, flags);
 
 	if (test_bit(VPM150M_SPIRESET, &vpmadt032->control) || test_bit(VPM150M_HPIRESET, &vpmadt032->control)) {
 		if (debug & DEBUG_ECHOCAN)
@@ -484,7 +484,6 @@ static inline void cmd_dequeue_vpmadt032(struct wctdm *wc, u8 *writechunk, int w
 			writechunk[CMD_BYTE(x, 1, 0)] = 0;
 			writechunk[CMD_BYTE(x, 2, 0)] = 0x00;
 		}
-		spin_unlock_irqrestore(&wc->reglock, flags);
 		return;
 	}
 
@@ -543,7 +542,6 @@ static inline void cmd_dequeue_vpmadt032(struct wctdm *wc, u8 *writechunk, int w
 			writechunk[CMD_BYTE(27, 2, 0)] = 0;
 		}
 	} else if (test_and_clear_bit(VPM150M_SWRESET, &vpmadt032->control)) {
-		printk(KERN_INFO "Booting VPMADT032\n");
 		for (x = 24; x < 28; x++) {
 			if (x == 24)
 				writechunk[CMD_BYTE(x, 0, 0)] = (0x8 << 4);
@@ -567,13 +565,6 @@ static inline void cmd_dequeue_vpmadt032(struct wctdm *wc, u8 *writechunk, int w
 	for (x = 24; x < 28; x++) {
 		writechunk[CMD_BYTE(x, 0, 0)] |= leds;
 	}
-
-	/* Now let's figure out if we need to check for DTMF */
-	if (test_bit(VPM150M_ACTIVE, &vpmadt032->control) && !whichframe && !(wc->intcount % 100)) {
-		schedule_work(&vpmadt032->work);
-	}
-
-	spin_unlock_irqrestore(&wc->reglock, flags);
 }
 
 static inline void cmd_dequeue(struct wctdm *wc, unsigned char *writechunk, int card, int pos)
@@ -3553,7 +3544,6 @@ static int wctdm_locate_modules(struct wctdm *wc)
 {
 	int x;
 	unsigned long flags;
-	unsigned int startinglatency = voicebus_current_latency(wc->vb);
 	wc->ctlreg = 0x00;
 	
 	/* Make sure all units go into daisy chain mode */
@@ -3586,9 +3576,6 @@ static int wctdm_locate_modules(struct wctdm *wc)
 	for (x=0;x<wc->cards;x++) {
 		int sane=0,ret=0,readi=0;
 retry:
-		if (voicebus_current_latency(wc->vb) > startinglatency) {
-			return -EAGAIN;
-		}
 		/* Init with Auto Calibration */
 		if (!(ret = wctdm_init_proslic(wc, x, 0, 0, sane))) {
 			wc->cardflag |= (1 << x);
@@ -3674,16 +3661,9 @@ retry:
 			return -ENOMEM;
 
 		wc->vpmadt032->setchanconfig_from_state = setchanconfig_from_state;
-		wc->vpmadt032->context = wc;
 		wc->vpmadt032->options.channels = wc->span.channels;
 		get_default_portconfig(&portconfig);
 		res = vpmadt032_init(wc->vpmadt032, wc->vb);
-		/* In case there was an error while we were loading the VPM module. */
-		if (voicebus_current_latency(wc->vb) > startinglatency) {
-			vpmadt032_free(wc->vpmadt032);
-			wc->vpmadt032 = NULL;
-			return -EAGAIN;
-		}
 		if (res) {
 			vpmadt032_free(wc->vpmadt032);
 			wc->vpmadt032 = NULL;
@@ -3732,7 +3712,6 @@ static int __devinit wctdm_init_one(struct pci_dev *pdev, const struct pci_devic
 	
 	neonmwi_offlimit_cycles = neonmwi_offlimit /MS_PER_HOOKCHECK;
 
-retry:
 	if (!(wc = kmalloc(sizeof(*wc), GFP_KERNEL))) {
 		return -ENOMEM;
 	}
@@ -3795,29 +3774,14 @@ retry:
 		return -EIO;
 	}
 
+	voicebus_lock_latency(wc->vb);
 
-	/* Keep track of which device we are */
-	pci_set_drvdata(pdev, wc);
-
-	/* Start the hardware processing. */
 	if (voicebus_start(wc->vb)) {
 		BUG_ON(1);
 	}
 	
 	/* Now track down what modules are installed */
-	ret = wctdm_locate_modules(wc);
-	if (-EAGAIN == ret ) {
-		/* The voicebus library increased the latency during
-		 * initialization.  There is a chance that the hardware is in
-		 * an inconsistent state, so lets increase the default latency
-		 * and start the initialization over.
-		 */
-		printk(KERN_NOTICE "%s: Restarting board initialization " \
-		 "after increasing latency.\n", wc->board_name);
-		latency = voicebus_current_latency(wc->vb);
-		wctdm_release(wc);
-		goto retry;
-	}
+	wctdm_locate_modules(wc);
 	
 	/* Final initialization */
 	wctdm_post_initialize(wc);
@@ -3833,6 +3797,7 @@ retry:
 	printk(KERN_INFO "Found a Wildcard TDM: %s (%d modules)\n",
 	       wc->desc->name, wc->desc->ports);
 	
+	voicebus_unlock_latency(wc->vb);
 	return 0;
 }
 
@@ -3859,7 +3824,7 @@ static void wctdm_release(struct wctdm *wc)
 
 static void __devexit wctdm_remove_one(struct pci_dev *pdev)
 {
-	struct wctdm *wc = pci_get_drvdata(pdev);
+	struct wctdm *wc = voicebus_pci_dev_to_context(pdev);
 	struct vpmadt032 *vpm = wc->vpmadt032;
 
 	if (wc) {
