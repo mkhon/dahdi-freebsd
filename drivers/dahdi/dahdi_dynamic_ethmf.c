@@ -23,6 +23,8 @@
  *
  */
 
+#if defined(__FreeBSD__)
+#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -42,6 +44,7 @@
  * support. Undefining this would give a slight performance increase.
  */
 #define USE_PROC_FS
+#endif /* !__FreeBSD__ */
 
 #ifdef USE_PROC_FS
 # include <linux/proc_fs.h>
@@ -811,6 +814,8 @@ static void __exit ztdethmf_exit(void)
 #endif
 }
 
+#if defined(__FreeBSD__)
+#else /* !__FreeBSD__ */
 MODULE_DESCRIPTION("DAHDI Dynamic TDMoEmf Support");
 MODULE_AUTHOR("Joseph Benden <joe@thrallingpenguin.com>");
 #ifdef MODULE_LICENSE
@@ -819,3 +824,4 @@ MODULE_LICENSE("GPL");
 
 module_init(ztdethmf_init);
 module_exit(ztdethmf_exit);
+#endif /* !__FreeBSD__ */

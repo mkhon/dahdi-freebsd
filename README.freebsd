@@ -1,0 +1,18 @@
+OVERVIEW
+========
+
+This is semi-official DAHDI port to FreeBSD.
+
+The following HW drivers are currently ported and tested:
+- wct4xxp, including HW echo cancellation support (Octasic)
+- wcb4xxp
+
+Drop me an e-mail if you have hardware that is supported by dahdi-linux
+but is not supported by this port.
+
+BUILDING
+========
+
+Just run "make", then "make install" in directory freebsd/
+
+Max Khon <fjoe@FreeBSD.org>
