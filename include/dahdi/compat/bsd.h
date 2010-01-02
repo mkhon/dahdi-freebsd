@@ -103,6 +103,11 @@ typedef struct mtx spinlock_t;
 		if (cond)				\
 			printf("WARN_ON: " #cond "\n");	\
 	} while (0)
+#define BUG_ON(cond)					\
+	do {						\
+		if (cond)				\
+			panic("BUG_ON: " #cond);	\
+	} while (0)
 
 #define KERN_EMERG	"<0>"	/* system is unusable			*/
 #define KERN_ALERT	"<1>"	/* action must be taken immediately	*/
