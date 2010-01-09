@@ -3,7 +3,17 @@ OVERVIEW
 
 This is semi-official DAHDI port to FreeBSD.
 
-The following HW drivers are currently ported and tested:
+The following drivers are currently ported:
+- main DAHDI driver
+- dahdi_echocan_jpah
+- dahdi_echocan_kb1
+- dahdi_echocan_mg2
+- dahdi_echocan_sec
+- dahdi_echocan_sec2
+- dahdi_dummy
+- dahdi_dynamic
+- dahdi_dynamic_loc
+- dahdi_dynamic_eth (requires ng_ether module to be loaded)
 - wct4xxp, including HW echo cancellation support (Octasic)
 - wcb4xxp
 
