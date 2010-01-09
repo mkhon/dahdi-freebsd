@@ -34,6 +34,26 @@
 #include <sys/taskqueue.h>
 
 #include <machine/stdarg.h>
+
+#if 0
+static void
+rlprintf(int pps, const char *fmt, ...)
+	__printflike(2, 3);
+
+static void
+rlprintf(int pps, const char *fmt, ...)
+{
+	va_list ap;
+	static struct timeval last_printf;
+	static int count;
+
+	if (ppsratecheck(&last_printf, &count, pps)) {
+		va_start(ap, fmt);
+		vprintf(fmt, ap);
+		va_end(ap);
+	}
+}
+#endif
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -902,9 +922,11 @@ void dahdi_dynamic_unregister(struct dahdi_dynamic_driver *dri)
 				zp->next = z->next;
 			else
 				dspans = z->next;
-			if (!z->usecount)
+			if (!z->usecount) {
+				spin_unlock_irqrestore(&dlock, flags);
 				dynamic_destroy(z);
-			else
+				spin_lock_irqsave(&dlock, flags);
+			} else
 				z->dead = 1;
 		} else {
 			zp = z;
