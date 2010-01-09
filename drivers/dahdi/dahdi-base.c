@@ -141,6 +141,10 @@ static char *dahdi_txlevelnames[] = {
 
 #if defined(__FreeBSD__)
 #if 0
+static void
+rlprintf(int pps, const char *fmt, ...)
+	__printflike(2, 3);
+
 static void rlprintf(int pps, const char *fmt, ...)
 {
 	va_list ap;
