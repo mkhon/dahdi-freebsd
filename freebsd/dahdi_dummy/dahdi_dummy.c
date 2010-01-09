@@ -137,6 +137,7 @@ dahdi_dummy_initialize(struct dahdi_dummy *dahdi_d)
 	dahdi_d->chan = &dahdi_d->_chan;
 	sprintf(dahdi_d->span.name, "DAHDI_DUMMY/1");
 	sprintf(dahdi_d->span.desc, "%s %d", dahdi_d->span.name, 1);
+	dahdi_d->span.owner = THIS_MODULE;
 	sprintf(dahdi_d->chan->name, "DAHDI_DUMMY/%d/%d", 1, 0);
 	dahdi_copy_string(dahdi_d->span.devicetype, "DAHDI Dummy Timing", sizeof(dahdi_d->span.devicetype));
 	dahdi_d->chan->chanpos = 1;
