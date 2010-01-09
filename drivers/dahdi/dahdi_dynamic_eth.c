@@ -22,6 +22,48 @@
  * this program for more details.
  */
 
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/param.h>
+#include <sys/conf.h>
+#include <sys/module.h>
+
+#include <machine/stdarg.h>
+
+#include "ng_dahdi_netdev.h"
+
+#define ETH_ALEN ETHER_ADDR_LEN
+#define LINUX_VERSION_CODE -1
+
+#define try_module_get(m)	(1)
+#define module_put(m)
+
+#if _BYTE_ORDER == _LITTLE_ENDIAN
+#define __constant_htons(x)	((uint16_t) (((uint16_t) (x)) << 8 | ((uint16_t) (x)) >> 8))
+#else
+#define __constant_htons(x)	(x)
+#endif
+
+#if 0
+static void
+rlprintf(int pps, const char *fmt, ...)
+	__printflike(2, 3);
+
+static void
+rlprintf(int pps, const char *fmt, ...)
+{
+	va_list ap;
+	static struct timeval last_printf;
+	static int count;
+
+	if (ppsratecheck(&last_printf, &count, pps)) {
+		va_start(ap, fmt);
+		vprintf(fmt, ap);
+		va_end(ap);
+	}
+}
+#endif
+#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -31,6 +73,7 @@
 #include <linux/kmod.h>
 #include <linux/netdevice.h>
 #include <linux/notifier.h>
+#endif /* !__FreeBSD__ */
 
 #include <dahdi/kernel.h>
 
@@ -48,7 +91,9 @@ static DEFINE_SPINLOCK(zlock);
 static spinlock_t zlock = SPIN_LOCK_UNLOCKED;
 #endif
 
+#if !defined(__FreeBSD__)
 static struct sk_buff_head skbs;
+#endif
 
 static struct ztdeth {
 	unsigned char addr[ETH_ALEN];
@@ -78,6 +123,24 @@ static struct dahdi_span *ztdeth_getspan(unsigned char *addr, unsigned short sub
 	return span;
 }
 
+#if defined(__FreeBSD__)
+static int ztdeth_rcv(struct net_device *dev, struct ether_header *eh,
+		      unsigned char *msg, int msglen)
+{
+	struct dahdi_span *span;
+	struct ztdeth_header *zh = (struct ztdeth_header *) msg;
+
+	if (msglen < sizeof(*zh))
+		return 0;
+	span = ztdeth_getspan(eh->ether_shost, zh->subaddr);
+	if (span) {
+		dahdi_dynamic_receive(span,
+		    msg + sizeof(*zh), msglen - sizeof(*zh));
+	}
+
+	return 0;
+}
+#else /* !__FreeBSD__ */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,14)
 static int ztdeth_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt, struct net_device *orig_dev)
 #else
@@ -108,6 +171,7 @@ static int ztdeth_rcv(struct sk_buff *skb, struct net_device *dev, struct packet
 	kfree_skb(skb);
 	return 0;
 }
+#endif /* !__FreeBSD__ */
 
 static int ztdeth_notifier(struct notifier_block *block, unsigned long event, void *ptr)
 {
@@ -145,21 +209,53 @@ static int ztdeth_notifier(struct notifier_block *block, unsigned long event, vo
 static int ztdeth_transmit(void *pvt, unsigned char *msg, int msglen)
 {
 	struct ztdeth *z;
+#if defined(__FreeBSD__)
+	struct mbuf *m;
+	struct ether_header eh;
+	struct ztdeth_header zh;
+#else
 	struct sk_buff *skb;
 	struct ztdeth_header *zh;
-	unsigned long flags;
-	struct net_device *dev;
 	unsigned char addr[ETH_ALEN];
 	unsigned short subaddr; /* Network byte order */
+#endif /* !__FreeBSD__ */
+	unsigned long flags;
+	struct net_device *dev;
 
 	spin_lock_irqsave(&zlock, flags);
 	z = pvt;
 	if (z->dev) {
 		/* Copy fields to local variables to remove spinlock ASAP */
-		dev = z->dev;
+#if defined(__FreeBSD__)
+		bcopy(z->addr, &eh.ether_dhost, sizeof(eh.ether_dhost));
+		zh.subaddr = z->subaddr;
+#else
 		memcpy(addr, z->addr, sizeof(z->addr));
 		subaddr = z->subaddr;
+#endif
+		dev = z->dev;
 		spin_unlock_irqrestore(&zlock, flags);
+#if defined(__FreeBSD__)
+		MGETHDR(m, M_DONTWAIT, MT_DATA);
+		if (m != NULL) {
+			if (sizeof(eh) + sizeof(zh) + msglen >= MINCLSIZE) {
+				MCLGET(m, M_DONTWAIT);
+			}
+
+			/* copy ethernet header */
+			bcopy(dev->dev_addr, &eh.ether_shost, sizeof(eh.ether_shost));
+			eh.ether_type = __constant_htons(ETH_P_DAHDI_DETH);
+			m_copyback(m, 0, sizeof(eh), (caddr_t) &eh);
+			m->m_pkthdr.len = m->m_len = sizeof(eh);
+
+			/* append ztdeth header and message */
+			m_append(m, sizeof(zh), (caddr_t) &zh);
+			m_append(m, msglen, msg);
+
+			/* send raw ethernet frame */
+			dev_xmit(dev, m);
+		}
+#else /* !__FreeBSD__ */
 		skb = dev_alloc_skb(msglen + dev->hard_header_len + sizeof(struct ztdeth_header) + 32);
 		if (skb) {
 			/* Reserve header space */
@@ -188,6 +284,7 @@ static int ztdeth_transmit(void *pvt, unsigned char *msg, int msglen)
 #endif
 			skb_queue_tail(&skbs, skb);
 		}
+#endif /* !__FreeBSD__ */
 	}
 	else
 		spin_unlock_irqrestore(&zlock, flags);
@@ -197,12 +294,14 @@ static int ztdeth_transmit(void *pvt, unsigned char *msg, int msglen)
 
 static int ztdeth_flush(void)
 {
+#if !defined(__FreeBSD__)
 	struct sk_buff *skb;
 
 	/* Handle all transmissions now */
 	while ((skb = skb_dequeue(&skbs))) {
 		dev_queue_xmit(skb);
 	}
+#endif /* !__FreeBSD__ */
 	return 0;
 }
 
@@ -418,7 +517,9 @@ static int __init ztdeth_init(void)
 	register_netdevice_notifier(&ztdeth_nblock);
 	dahdi_dynamic_register(&ztd_eth);
 
+#if !defined(__FreeBSD__)
 	skb_queue_head_init(&skbs);
+#endif
 
 	return 0;
 }
@@ -430,9 +531,31 @@ static void __exit ztdeth_exit(void)
 	dahdi_dynamic_unregister(&ztd_eth);
 }
 
+#if defined(__FreeBSD__)
+static int
+dahdi_dynamic_eth_modevent(module_t mod __unused, int type, void *data __unused)
+{
+	switch (type) {
+	case MOD_LOAD:
+		return ztdeth_init();
+	case MOD_UNLOAD:
+		ztdeth_exit();
+		return 0;
+	default:
+		return EOPNOTSUPP;
+	}
+}
+
+DEV_MODULE(dahdi_dynamic_eth, dahdi_dynamic_eth_modevent, NULL);
+MODULE_VERSION(dahdi_dynamic_eth, 1);
+MODULE_DEPEND(dahdi_dynamic_eth, dahdi, 1, 1, 1);
+MODULE_DEPEND(dahdi_dynamic_eth, dahdi_dynamic, 1, 1, 1);
+MODULE_DEPEND(dahdi_dynamic_eth, ng_dahdi_netdev, 1, 1, 1);
+#else /* !__FreeBSD__ */
 MODULE_DESCRIPTION("DAHDI Dynamic TDMoE Support");
 MODULE_AUTHOR("Mark Spencer <markster@digium.com>");
 MODULE_LICENSE("GPL v2");
 
 module_init(ztdeth_init);
 module_exit(ztdeth_exit);
+#endif /* !__FreeBSD__ */
