@@ -204,7 +204,12 @@ static const char *build_stamp = "" __DATE__ " " __TIME__ "";
  */
 
 #if defined(__FreeBSD__)
-static void device_rlprintf(int pps, device_t dev, const char *fmt, ...)
+static void
+device_rlprintf(int pps, device_t dev, const char *fmt, ...)
+	__printflike(3, 4);
+
+static void
+device_rlprintf(int pps, device_t dev, const char *fmt, ...)
 {
 	va_list ap;
 	static struct timeval last_printf;
