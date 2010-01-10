@@ -41,6 +41,10 @@
 
 #include "ng_dahdi_netdev.h"
 
+#if __FreeBSD_version < 800000
+struct ng_node *ng_name2noderef(struct ng_node *node, const char *name);
+#endif
+
 static struct mtx netdev_mtx;
 MTX_SYSINIT(netdev_mtx, &netdev_mtx, "DAHDI netdevice lock", 0);
 
