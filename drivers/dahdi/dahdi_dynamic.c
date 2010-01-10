@@ -140,6 +140,7 @@ static void
 run_timer(void *arg)
 {
 	struct timer_list *t = (struct timer_list *) arg;
+	void (*function)(unsigned long);
 
 	mtx_lock_spin(&t->mtx);
 	if (callout_pending(&t->callout)) {
@@ -154,8 +155,10 @@ run_timer(void *arg)
 	}
 	callout_deactivate(&t->callout);
 
-	t->function(t->data);
+	function = t->function;
 	mtx_unlock_spin(&t->mtx);
+
+	function(t->data);
 }
 
 static void
@@ -171,7 +174,9 @@ init_timer(struct timer_list *t)
 static void
 mod_timer(struct timer_list *t, unsigned long expires)
 {
+	mtx_lock_spin(&t->mtx);
 	callout_reset(&t->callout, expires - jiffies, run_timer, t);
+	mtx_unlock_spin(&t->mtx);
 }
 
 static void
