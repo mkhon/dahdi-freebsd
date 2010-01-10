@@ -467,7 +467,8 @@ struct dahdi_chan {
 	/* Specified by driver, readable by DAHDI */
 	void *pvt;			/*!< Private channel data */
 #if defined(__FreeBSD__)
-	struct cdev *file;	/*!< Device structure */
+	struct cdev *dev;	/*!< Device structure */
+	struct cdev *file;	/*!< File structure */
 #else
 	struct file *file;	/*!< File structure */
 #endif

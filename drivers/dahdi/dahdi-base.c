@@ -6163,11 +6163,11 @@ int dahdi_register(struct dahdi_span *span, int prefmaster)
 	for (x = 0; x < span->channels; x++) {
 		if (span->chans[x]->channo < 250) {
 #if defined(__FreeBSD__)
-			span->chans[x]->file = make_dev(
+			span->chans[x]->dev = make_dev(
 			    &dahdi_devsw, span->chans[x]->channo,
 			    UID_ROOT, GID_WHEEL, 0644,
 			    "dahdi/%d", span->chans[x]->channo);
-			dev_depends(dev_ctl, span->chans[x]->file);
+			dev_depends(dev_ctl, span->chans[x]->dev);
 #else
 			char chan_name[32];
 			snprintf(chan_name, sizeof(chan_name), "dahdi!%d", 
@@ -6235,9 +6235,9 @@ int dahdi_unregister(struct dahdi_span *span)
 	for (x = 0; x < span->channels; x++) {
 		if (span->chans[x]->channo < 250) {
 #if defined(__FreeBSD__)
-			if (span->chans[x]->file != NULL) {
-				destroy_dev(span->chans[x]->file);
-				span->chans[x]->file = NULL;
+			if (span->chans[x]->dev != NULL) {
+				destroy_dev(span->chans[x]->dev);
+				span->chans[x]->dev = NULL;
 			}
 #else
 			CLASS_DEV_DESTROY(dahdi_class, MKDEV(DAHDI_MAJOR, span->chans[x]->channo));
