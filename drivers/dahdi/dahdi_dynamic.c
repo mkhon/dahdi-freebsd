@@ -28,32 +28,9 @@
 #include <sys/conf.h>
 #include <sys/ioccom.h>
 #include <sys/lock.h>
+#include <sys/module.h>
 #include <sys/mutex.h>
-#include <sys/syscallsubr.h>
 #include <sys/systm.h>
-#include <sys/taskqueue.h>
-
-#include <machine/stdarg.h>
-
-#if 0
-static void
-rlprintf(int pps, const char *fmt, ...)
-	__printflike(2, 3);
-
-static void
-rlprintf(int pps, const char *fmt, ...)
-{
-	va_list ap;
-	static struct timeval last_printf;
-	static int count;
-
-	if (ppsratecheck(&last_printf, &count, pps)) {
-		va_start(ap, fmt);
-		vprintf(fmt, ap);
-		va_end(ap);
-	}
-}
-#endif
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -69,126 +46,6 @@ rlprintf(int pps, const char *fmt, ...)
 #endif /* !__FreeBSD__ */
 
 #include <dahdi/kernel.h>
-
-#if defined(__FreeBSD__)
-#define LINUX_VERSION_CODE	0
-
-static int
-request_module(const char *fmt, ...)
-{
-	va_list ap;
-	char modname[128];
-	int fileid;
-
-	va_start(ap, fmt);
-	vsnprintf(modname, sizeof(modname), fmt, ap);
-	va_end(ap);
-
-	return kern_kldload(curthread, modname, &fileid);
-}
-
-struct tasklet_struct {
-	struct task task;
-
-	void (*func)(unsigned long);
-	unsigned long data;
-};
-
-static void
-tasklet_run(void *context, int pending)
-{
-	struct tasklet_struct *t = (struct tasklet_struct *) context;
-	t->func(t->data);
-}
-
-static void
-tasklet_init(struct tasklet_struct *t, void (*func)(unsigned long), unsigned long data)
-{
-	TASK_INIT(&t->task, 0, tasklet_run, t);
-	t->func = func;
-	t->data = data;
-}
-
-static void
-tasklet_hi_schedule(struct tasklet_struct *t)
-{
-	taskqueue_enqueue_fast(taskqueue_fast, &t->task);
-}
-
-static void
-tasklet_disable(struct tasklet_struct *t)
-{
-	// nothing to do
-}
-
-static void
-tasklet_kill(struct tasklet_struct *t)
-{
-	taskqueue_drain(taskqueue_fast, &t->task);
-}
-
-struct timer_list {
-	struct mtx mtx;
-	struct callout callout;
-
-	unsigned long expires;
-	void (*function)(unsigned long);
-	unsigned long data;
-};
-
-static void
-run_timer(void *arg)
-{
-	struct timer_list *t = (struct timer_list *) arg;
-	void (*function)(unsigned long);
-
-	mtx_lock_spin(&t->mtx);
-	if (callout_pending(&t->callout)) {
-		/* callout was reset */
-		mtx_unlock_spin(&t->mtx);
-		return;
-	}
-	if (!callout_active(&t->callout)) {
-		/* callout was stopped */
-		mtx_unlock_spin(&t->mtx);
-		return;
-	}
-	callout_deactivate(&t->callout);
-
-	function = t->function;
-	mtx_unlock_spin(&t->mtx);
-
-	function(t->data);
-}
-
-static void
-init_timer(struct timer_list *t)
-{
-	mtx_init(&t->mtx, "dahdi_dynamic lock", NULL, MTX_SPIN);
-	callout_init(&t->callout, CALLOUT_MPSAFE);
-	t->expires = 0;
-	t->function = 0;
-	t->data = 0;
-}
-
-static void
-mod_timer(struct timer_list *t, unsigned long expires)
-{
-	mtx_lock_spin(&t->mtx);
-	callout_reset(&t->callout, expires - jiffies, run_timer, t);
-	mtx_unlock_spin(&t->mtx);
-}
-
-static void
-del_timer(struct timer_list *t)
-{
-	mtx_lock_spin(&t->mtx);
-	callout_stop(&t->callout);
-	mtx_unlock_spin(&t->mtx);
-
-	mtx_destroy(&t->mtx);
-}
-#endif /* __FreeBSD__ */
 
 /*
  * Tasklets provide better system interactive response at the cost of the

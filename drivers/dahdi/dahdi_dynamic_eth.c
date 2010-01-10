@@ -28,41 +28,9 @@
 #include <sys/conf.h>
 #include <sys/module.h>
 
-#include <machine/stdarg.h>
-
 #include "ng_dahdi_netdev.h"
 
 #define ETH_ALEN ETHER_ADDR_LEN
-#define LINUX_VERSION_CODE -1
-
-#define try_module_get(m)	(1)
-#define module_put(m)
-
-#if _BYTE_ORDER == _LITTLE_ENDIAN
-#define __constant_htons(x)	((uint16_t) (((uint16_t) (x)) << 8 | ((uint16_t) (x)) >> 8))
-#else
-#define __constant_htons(x)	(x)
-#endif
-
-#if 0
-static void
-rlprintf(int pps, const char *fmt, ...)
-	__printflike(2, 3);
-
-static void
-rlprintf(int pps, const char *fmt, ...)
-{
-	va_list ap;
-	static struct timeval last_printf;
-	static int count;
-
-	if (ppsratecheck(&last_printf, &count, pps)) {
-		va_start(ap, fmt);
-		vprintf(fmt, ap);
-		va_end(ap);
-	}
-}
-#endif
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>

@@ -3,7 +3,7 @@
 .PATH: ${.CURDIR}/../../drivers/dahdi
 
 KMOD=		dahdi
-SRCS=		dahdi-base.c version.h
+SRCS=		dahdi-base.c bsd-compat.c version.h
 SRCS+=		device_if.h bus_if.h
 CLEANFILES=	version.h
 INCS=		user.h wctdm_user.h compat/types.h

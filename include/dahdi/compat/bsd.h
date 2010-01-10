@@ -1,16 +1,19 @@
 #ifndef _DAHDI_COMPAT_BSD_H_
 #define _DAHDI_COMPAT_BSD_H_
 
+#include <sys/callout.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/mutex.h>
 #include <sys/sx.h>
+#include <sys/taskqueue.h>
 #include <machine/atomic.h>
 
 struct module;
 
 #define EXPORT_SYMBOL(s)
 
+#define LINUX_VERSION_CODE	-1
 #define KERNEL_VERSION(x, y, z)	0
 
 #define copy_from_user(to, from, n)	(bcopy((from), (to), (n)), 0)
@@ -66,6 +69,14 @@ typedef u_int atomic_t;
 #define atomic_add(v, p)	atomic_add_int(p, v)
 #define atomic_sub(v, p)	atomic_subtract_int(p, v)
 
+#define ATOMIC_INIT(v)		(v)
+
+#if _BYTE_ORDER == _LITTLE_ENDIAN
+#define __constant_htons(x)	((uint16_t) (((uint16_t) (x)) << 8 | ((uint16_t) (x)) >> 8))
+#else
+#define __constant_htons(x)	(x)
+#endif
+
 typedef struct mtx spinlock_t;
 
 #define DEFINE_SPINLOCK(name)				\
@@ -98,6 +109,43 @@ typedef struct mtx spinlock_t;
 	} while (0)
 #define write_unlock_irqrestore(rwlock, flags)		\
 	sx_xunlock(rwlock)
+
+struct tasklet_struct {
+	struct task task;
+
+	void (*func)(unsigned long);
+	unsigned long data;
+};
+
+void tasklet_init(struct tasklet_struct *t, void (*func)(unsigned long), unsigned long data);
+void tasklet_hi_schedule(struct tasklet_struct *t);
+void tasklet_disable(struct tasklet_struct *t);
+void tasklet_kill(struct tasklet_struct *t);
+
+struct timer_list {
+	struct mtx mtx;
+	struct callout callout;
+
+	unsigned long expires;
+	void (*function)(unsigned long);
+	unsigned long data;
+};
+
+void init_timer(struct timer_list *t);
+void mod_timer(struct timer_list *t, unsigned long expires);
+void add_timer(struct timer_list *t);
+void del_timer(struct timer_list *t);
+void del_timer_sync(struct timer_list *t);
+
+void rlprintf(int pps, const char *fmt, ...)
+	__printflike(2, 3);
+
+void
+device_rlprintf(int pps, device_t dev, const char *fmt, ...)
+	__printflike(3, 4);
+
+char *
+strncat(char * __restrict dst, const char * __restrict src, size_t n);
 
 #define WARN_ON(cond)					\
 	do {						\
@@ -176,9 +224,12 @@ static inline unsigned long _jiffies(void)
 #define time_after(a, b)	((a) > (b))
 #define time_after_eq(a, b)	((a) >= (b))
 
-#define DAHDI_IRQ_HANDLER(a)	static int a(void *dev_id)
-
+#define try_module_get(m)	(1)
+#define module_put(m)		((void) (m))
 #define THIS_MODULE		((struct module *) __FILE__)
+int request_module(const char *fmt, ...);
+
+#define DAHDI_IRQ_HANDLER(a)	static int a(void *dev_id)
 
 #define PCI_ANY_ID (~0)
 

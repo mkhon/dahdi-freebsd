@@ -31,58 +31,14 @@
 #include <sys/module.h>
 #include <sys/rman.h>
 #include <sys/systm.h>
-#include <sys/time.h>
 
 #include <machine/bus.h>
-#include <machine/stdarg.h>
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcivar.h>
 
-#define dahdi_msleep(msec)	DELAY((msec) * 1000)
-
-/*
- * Concatenate src on the end of dst.  At most strlen(dst)+n+1 bytes
- * are written at dst (at most n+1 bytes being appended).  Return dst.
- */
-static char *
-strncat(char * __restrict dst, const char * __restrict src, size_t n)
-{
-	if (n != 0) {
-		char *d = dst;
-		const char *s = src;
-
-		while (*d != 0)
-			d++;
-		do {
-			if ((*d = *s++) == 0)
-				break;
-			d++;
-		} while (--n != 0);
-		*d = 0;
-	}
-	return (dst);
-}
-
-static void
-device_rlprintf(int pps, device_t dev, const char *fmt, ...)
-	__printflike(3, 4);
-
-static void
-device_rlprintf(int pps, device_t dev, const char *fmt, ...)
-{
-	va_list ap;
-	static struct timeval last_printf;
-	static int count;
-
-	if (ppsratecheck(&last_printf, &count, pps)) {
-		va_start(ap, fmt);
-		device_print_prettyname(dev);
-		vprintf(fmt, ap);
-		va_end(ap);
-	}
-}
-
 #define DPRINTF(dev, fmt, args...)      device_rlprintf(20, dev, fmt, ##args)
+
+#define dahdi_msleep(msec)	DELAY((msec) * 1000)
 
 #else
 #include <linux/kernel.h>

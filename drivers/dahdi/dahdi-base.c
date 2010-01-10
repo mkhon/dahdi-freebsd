@@ -48,9 +48,6 @@
 #include <sys/poll.h>
 #include <net/ppp_defs.h>
 #include <sys/selinfo.h>
-#include <sys/syscallsubr.h>
-
-#include <machine/stdarg.h>
 
 #include "version.h"
 
@@ -140,26 +137,7 @@ static char *dahdi_txlevelnames[] = {
 } ;
 
 #if defined(__FreeBSD__)
-#if 0
-static void
-rlprintf(int pps, const char *fmt, ...)
-	__printflike(2, 3);
-
-static void rlprintf(int pps, const char *fmt, ...)
-{
-	va_list ap;
-	static struct timeval last_printf;
-	static int count;
-
-	if (ppsratecheck(&last_printf, &count, pps)) {
-		va_start(ap, fmt);
-		vprintf(fmt, ap);
-		va_end(ap);
-	}
-}
-
 #define DPRINTF(fmt, args...)	rlprintf(10, "%s: " fmt, __FUNCTION__, ##args)
-#endif
 
 MALLOC_DEFINE(M_DAHDI, "dahdi", "DAHDI interface data structures");
 
@@ -200,43 +178,6 @@ static u_short fcstab[256] = {
 	0xf78f,	0xe606,	0xd49d,	0xc514,	0xb1ab,	0xa022,	0x92b9,	0x8330,
 	0x7bc7,	0x6a4e,	0x58d5,	0x495c,	0x3de3,	0x2c6a,	0x1ef1,	0x0f78
 };
-
-static int
-request_module(const char *fmt, ...)
-{
-	va_list ap;
-	char modname[128];
-	int fileid;
-
-	va_start(ap, fmt);
-	vsnprintf(modname, sizeof(modname), fmt, ap);
-	va_end(ap);
-
-	return kern_kldload(curthread, modname, &fileid);
-}
-
-/*
- * Concatenate src on the end of dst.  At most strlen(dst)+n+1 bytes
- * are written at dst (at most n+1 bytes being appended).  Return dst.
- */
-static char *
-strncat(char * __restrict dst, const char * __restrict src, size_t n)
-{
-	if (n != 0) {
-		char *d = dst;
-		const char *s = src;
-
-		while (*d != 0)
-			d++;
-		do {
-			if ((*d = *s++) == 0)
-				break;
-			d++;
-		} while (--n != 0);
-		*d = 0;
-	}
-	return (dst);
-}
 
 static struct cdev *dev_ctl = NULL;
 
@@ -406,9 +347,6 @@ dahdi_copy_from_user(void *to, const void *from, int n)
 {
 	return copyin(from, to, n);
 }
-
-#define try_module_get(m)	(1)
-#define module_put(m)		((void) (&m))
 
 #else /* !__FreeBSD__ */
 /* macro-oni for determining a unit (channel) number */

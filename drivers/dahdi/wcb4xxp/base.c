@@ -29,7 +29,6 @@
 #include <sys/systm.h>
 
 #include <machine/bus.h>
-#include <machine/stdarg.h>
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcivar.h>
 
@@ -46,6 +45,8 @@
 #define mmiowb()
 
 #define printk_ratelimit()	1
+
+#define DPRINTF(dev, fmt, args...)	device_rlprintf(10, dev, fmt, ##args)
 
 #else /* !__FreeBSD__ */
 #include <linux/autoconf.h>
@@ -204,27 +205,6 @@ static const char *build_stamp = "" __DATE__ " " __TIME__ "";
  */
 
 #if defined(__FreeBSD__)
-static void
-device_rlprintf(int pps, device_t dev, const char *fmt, ...)
-	__printflike(3, 4);
-
-static void
-device_rlprintf(int pps, device_t dev, const char *fmt, ...)
-{
-	va_list ap;
-	static struct timeval last_printf;
-	static int count;
-
-	if (ppsratecheck(&last_printf, &count, pps)) {
-		va_start(ap, fmt);
-		device_print_prettyname(dev);
-		vprintf(fmt, ap);
-		va_end(ap);
-	}
-}
-
-#define DPRINTF(dev, fmt, args...)	device_rlprintf(10, dev, fmt, ##args)
-
 static inline unsigned char __pci_in8(struct b4xxp *b4, const unsigned int reg)
 {
         return bus_space_read_1(
