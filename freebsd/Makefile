@@ -6,6 +6,7 @@ SUBDIR=\
 	dahdi_dynamic\
 	dahdi_dynamic_loc\
 	dahdi_dynamic_eth\
+	dahdi_dynamic_ethmf\
 	dahdi_echocan_jpah\
 	dahdi_echocan_kb1\
 	dahdi_echocan_mg2\

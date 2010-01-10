@@ -13,7 +13,7 @@ The following drivers are currently ported:
 - dahdi_dummy
 - dahdi_dynamic
 - dahdi_dynamic_loc
-- dahdi_dynamic_eth (requires ng_ether module to be loaded)
+- dahdi_dynamic_eth and dahdi_dynamic_ethmf
 - wct4xxp, including HW echo cancellation support (Octasic)
 - wcb4xxp
 
@@ -24,5 +24,11 @@ BUILDING
 ========
 
 Just run "make", then "make install" in directory freebsd/
+
+NOTES
+=====
+
+dahdi_dynamic_eth and dahdi_dynamic_ethmf require ng_ether kernel module
+to be loaded.
 
 Max Khon <fjoe@FreeBSD.org>
