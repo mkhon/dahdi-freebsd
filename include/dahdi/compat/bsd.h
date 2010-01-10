@@ -155,6 +155,7 @@ MALLOC_DECLARE(M_DAHDI);
 #define likely(x)       __builtin_expect(!!(x), 1)
 #define unlikely(x)     __builtin_expect(!!(x), 0)
 
+#if 1
 /* emulate jiffies */
 static inline unsigned long _jiffies(void)
 {
@@ -165,6 +166,9 @@ static inline unsigned long _jiffies(void)
 }
 
 #define jiffies			_jiffies()
+#else
+#define jiffies			ticks
+#endif
 #define HZ			hz
 #define udelay(usec)		DELAY(usec)
 #define mdelay(msec)		DELAY((msec) * 1000)
