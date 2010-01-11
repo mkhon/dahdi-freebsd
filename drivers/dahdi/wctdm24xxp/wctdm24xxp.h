@@ -53,9 +53,9 @@
 #define FLAG_3215	(1 << 0)
 #define FLAG_EXPRESS	(1 << 1)
 
-#define EFRAME_SIZE	108
-#define ERING_SIZE 16		/* Maximum ring size */
-#define EFRAME_GAP 20
+#define EFRAME_SIZE 108L
+#define ERING_SIZE 16L		/* Maximum ring size */
+#define EFRAME_GAP 20L
 #define SFRAME_SIZE ((EFRAME_SIZE * DAHDI_CHUNKSIZE) + (EFRAME_GAP * (DAHDI_CHUNKSIZE - 1)))
 
 #define MAX_ALARMS 10
@@ -227,7 +227,7 @@ struct wctdm {
 	int echocanpos;
 	int blinktimer;
 #endif	
-	struct voicebus *vb;
+	struct voicebus vb;
 	struct dahdi_chan *chans[NUM_CARDS];
 	struct dahdi_echocan_state *ec[NUM_CARDS];
 	int initialized;

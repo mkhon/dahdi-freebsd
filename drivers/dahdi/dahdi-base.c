@@ -72,6 +72,10 @@
 #include <linux/sched.h>
 #include <linux/list.h>
 
+#ifdef HAVE_UNLOCKED_IOCTL
+#include <linux/smp_lock.h>
+#endif
+
 #include <linux/ppp_defs.h>
 
 #include <asm/atomic.h>
@@ -648,7 +652,7 @@ static struct dahdi_dialparams global_dialparams = {
 	.mfr2_tonelen = DEFAULT_MFR2_LENGTH,
 };
 
-static int dahdi_chan_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long data, int unit);
+static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long data, int unit);
 
 #if defined(CONFIG_DAHDI_MMX) || defined(ECHO_CAN_FP)
 #if (defined(CONFIG_X86) && !defined(CONFIG_X86_64)) || defined(CONFIG_I386)
@@ -2574,25 +2578,25 @@ static ssize_t dahdi_chan_write(FOP_WRITE_ARGS_DECL, int unit)
 	return amnt;
 }
 
-static int dahdi_ctl_open(struct inode *inode, struct file *file)
+static int dahdi_ctl_open(struct file *file)
 {
 	/* Nothing to do, really */
 	return 0;
 }
 
-static int dahdi_chan_open(struct inode *inode, struct file *file)
+static int dahdi_chan_open(struct file *file)
 {
 	/* Nothing to do here for now either */
 	return 0;
 }
 
-static int dahdi_ctl_release(struct inode *inode, struct file *file)
+static int dahdi_ctl_release(struct file *file)
 {
 	/* Nothing to do */
 	return 0;
 }
 
-static int dahdi_chan_release(struct inode *inode, struct file *file)
+static int dahdi_chan_release(struct file *file)
 {
 	/* Nothing to do for now */
 	return 0;
@@ -2952,7 +2956,7 @@ static int initialize_channel(struct dahdi_chan *chan)
 	return 0;
 }
 
-static int dahdi_timing_open(struct inode *inode, struct file *file)
+static int dahdi_timing_open(struct file *file)
 {
 	struct dahdi_timer *t;
 	unsigned long flags;
@@ -2971,7 +2975,7 @@ static int dahdi_timing_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static int dahdi_timer_release(struct inode *inode, struct file *file)
+static int dahdi_timer_release(struct file *file)
 {
 	struct dahdi_timer *t, *cur, *next;
 	unsigned long flags;
@@ -3001,7 +3005,7 @@ static int dahdi_timer_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static int dahdi_specchan_open(struct inode *inode, struct file *file, int unit)
+static int dahdi_specchan_open(struct file *file, int unit)
 {
 	int res = 0;
 	struct dahdi_chan *const chan = chans[unit];
@@ -3047,7 +3051,7 @@ static int dahdi_specchan_open(struct inode *inode, struct file *file, int unit)
 	return res;
 }
 
-static int dahdi_specchan_release(struct inode *node, struct file *file, int unit)
+static int dahdi_specchan_release(struct file *file, int unit)
 {
 	int res=0;
 	unsigned long flags;
@@ -3124,7 +3128,7 @@ static int dahdi_open(struct inode *inode, struct file *file)
 	struct dahdi_chan *chan;
 	/* Minor 0: Special "control" descriptor */
 	if (!unit)
-		return dahdi_ctl_open(inode, file);
+		return dahdi_ctl_open(file);
 	if (unit == 250) {
 #if !defined(__FreeBSD__)
 		if (!dahdi_transcode_fops) {
@@ -3151,32 +3155,32 @@ static int dahdi_open(struct inode *inode, struct file *file)
 	}
 	if (unit == 253) {
 		if (can_open_timer()) {
-			return dahdi_timing_open(inode, file);
+			return dahdi_timing_open(file);
 		} else {
 			return -ENXIO;
 		}
 	}
 	if (unit == 254)
-		return dahdi_chan_open(inode, file);
+		return dahdi_chan_open(file);
 	if (unit == 255) {
 		chan = dahdi_alloc_pseudo();
 		if (chan) {
 			dahdi_set_private_data(file, chan);
-			return dahdi_specchan_open(inode, file, chan->channo);
+			return dahdi_specchan_open(file, chan->channo);
 		} else {
 			return -ENXIO;
 		}
 	}
-	return dahdi_specchan_open(inode, file, unit);
+	return dahdi_specchan_open(file, unit);
 }
 
 #if 0
-static int dahdi_open(struct inode *inode, struct file *file)
+static int dahdi_open(struct file *file)
 {
 	int res;
 	unsigned long flags;
 	spin_lock_irqsave(&bigzaplock, flags);
-	res = __dahdi_open(inode, file);
+	res = __dahdi_open(file);
 	spin_unlock_irqrestore(&bigzaplock, flags);
 	return res;
 }
@@ -3696,9 +3700,9 @@ static int dahdi_release(struct inode *inode, struct file *file)
 	struct dahdi_chan *chan;
 
 	if (!unit)
-		return dahdi_ctl_release(inode, file);
+		return dahdi_ctl_release(file);
 	if (unit == 253) {
-		return dahdi_timer_release(inode, file);
+		return dahdi_timer_release(file);
 	}
 	if (unit == 250) {
 		/* We should not be here because the dahdi_transcode.ko module
@@ -3710,14 +3714,14 @@ static int dahdi_release(struct inode *inode, struct file *file)
 	if (unit == 254) {
 		chan = dahdi_get_private_data(file);
 		if (!chan)
-			return dahdi_chan_release(inode, file);
+			return dahdi_chan_release(file);
 		else
-			return dahdi_specchan_release(inode, file, chan->channo);
+			return dahdi_specchan_release(file, chan->channo);
 	}
 	if (unit == 255) {
 		chan = dahdi_get_private_data(file);
 		if (chan) {
-			res = dahdi_specchan_release(inode, file, chan->channo);
+			res = dahdi_specchan_release(file, chan->channo);
 			dahdi_free_pseudo(chan);
 		} else {
 			module_printk(KERN_NOTICE, "Pseudo release and no private data??\n");
@@ -3725,7 +3729,7 @@ static int dahdi_release(struct inode *inode, struct file *file)
 		}
 		return res;
 	}
-	return dahdi_specchan_release(inode, file, unit);
+	return dahdi_specchan_release(file, unit);
 }
 
 #if 0
@@ -3735,7 +3739,7 @@ static int dahdi_release(struct inode *inode, struct file *file)
 	unsigned long flags;
 	int res;
 	spin_lock_irqsave(&bigzaplock, flags);
-	res = __dahdi_release(inode, file);
+	res = __dahdi_release(file);
 	spin_unlock_irqrestore(&bigzaplock, flags);
 	return res;
 }
@@ -3821,7 +3825,7 @@ void dahdi_alarm_notify(struct dahdi_span *span)
 		return -ENXIO; \
 } while(0)
 
-static int dahdi_timer_ioctl(struct inode *node, struct file *file, unsigned int cmd, unsigned long data, struct dahdi_timer *timer)
+static int dahdi_timer_ioctl(struct file *file, unsigned int cmd, unsigned long data, struct dahdi_timer *timer)
 {
 	int j;
 	unsigned long flags;
@@ -3870,7 +3874,7 @@ static int dahdi_timer_ioctl(struct inode *node, struct file *file, unsigned int
 	return 0;
 }
 
-static int dahdi_ioctl_getgains(struct inode *node, struct file *file,
+static int dahdi_ioctl_getgains(struct file *file,
 				unsigned int cmd, unsigned long data, int unit)
 {
 	int res = 0;
@@ -3915,7 +3919,7 @@ cleanup:
 	return res;
 }
 
-static int dahdi_ioctl_setgains(struct inode *node, struct file *file,
+static int dahdi_ioctl_setgains(struct file *file,
 				unsigned int cmd, unsigned long data, int unit)
 {
 	int res = 0;
@@ -3992,7 +3996,7 @@ cleanup:
 	return res;
 }
 
-static int dahdi_common_ioctl(struct inode *node, struct file *file, unsigned int cmd, unsigned long data, int unit)
+static int dahdi_common_ioctl(struct file *file, unsigned int cmd, unsigned long data, int unit)
 {
 	union {
 		struct dahdi_spaninfo spaninfo;
@@ -4125,9 +4129,9 @@ static int dahdi_common_ioctl(struct inode *node, struct file *file, unsigned in
 		break;
 	case DAHDI_GETGAINS_V1: /* Intentional drop through. */
 	case DAHDI_GETGAINS:  /* get gain stuff */
-		return dahdi_ioctl_getgains(node, file, cmd, data, unit);
+		return dahdi_ioctl_getgains(file, cmd, data, unit);
 	case DAHDI_SETGAINS:  /* set gain stuff */
-		return dahdi_ioctl_setgains(node, file, cmd, data, unit);
+		return dahdi_ioctl_setgains(file, cmd, data, unit);
 	case DAHDI_SPANSTAT:
 		size_to_copy = sizeof(struct dahdi_spaninfo);
 		if (copy_from_user(&stack.spaninfo, (struct dahdi_spaninfo *) data, size_to_copy))
@@ -4292,7 +4296,7 @@ static void recalc_slaves(struct dahdi_chan *chan)
 #endif
 }
 
-static int dahdi_ctl_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long data)
+static int dahdi_ctl_ioctl(struct file *file, unsigned int cmd, unsigned long data)
 {
 	/* I/O CTL's for control interface */
 	int i,j;
@@ -4310,7 +4314,7 @@ static int dahdi_ctl_ioctl(struct inode *inode, struct file *file, unsigned int 
 		if (copy_from_user(&ind, (struct dahdi_indirect_data *)data, sizeof(ind)))
 			return -EFAULT;
 		VALID_CHANNEL(ind.chan);
-		return dahdi_chan_ioctl(inode, file, ind.op, (unsigned long) ind.data, ind.chan);
+		return dahdi_chan_ioctl(file, ind.op, (unsigned long) ind.data, ind.chan);
 	}
 	case DAHDI_SPANCONFIG:
 	{
@@ -4790,7 +4794,7 @@ static int dahdi_ctl_ioctl(struct inode *inode, struct file *file, unsigned int 
 		}
 		return -ENOSYS;
 	default:
-		return dahdi_common_ioctl(inode, file, cmd, data, 0);
+		return dahdi_common_ioctl(file, cmd, data, 0);
 	}
 	return 0;
 }
@@ -4852,7 +4856,7 @@ static int ioctl_dahdi_dial(struct dahdi_chan *chan, unsigned long data)
 	return rv;
 }
 
-static int dahdi_chanandpseudo_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long data, int unit)
+static int dahdi_chanandpseudo_ioctl(struct file *file, unsigned int cmd, unsigned long data, int unit)
 {
 	struct dahdi_chan *chan = chans[unit];
 	union {
@@ -5338,7 +5342,7 @@ static int dahdi_chanandpseudo_ioctl(struct inode *inode, struct file *file, uns
 		break;
 	default:
 		/* Check for common ioctl's and private ones */
-		rv = dahdi_common_ioctl(inode, file, cmd, data, unit);
+		rv = dahdi_common_ioctl(file, cmd, data, unit);
 		/* if no span, just return with value */
 		if (!chan->span) return rv;
 		if ((rv == -ENOTTY) && chan->span->ioctl)
@@ -5545,7 +5549,7 @@ static void set_echocan_fax_mode(struct dahdi_chan *chan, unsigned int channo, c
 	}
 }
 
-static int dahdi_chan_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long data, int unit)
+static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long data, int unit)
 {
 	struct dahdi_chan *chan = chans[unit];
 	unsigned long flags;
@@ -5947,12 +5951,12 @@ static int dahdi_chan_ioctl(struct inode *inode, struct file *file, unsigned int
 		break;
 #endif
 	default:
-		return dahdi_chanandpseudo_ioctl(inode, file, cmd, data, unit);
+		return dahdi_chanandpseudo_ioctl(file, cmd, data, unit);
 	}
 	return 0;
 }
 
-static int dahdi_prechan_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long data, int unit)
+static int dahdi_prechan_ioctl(struct file *file, unsigned int cmd, unsigned long data, int unit)
 {
 	struct dahdi_chan *chan = dahdi_get_private_data(file);
 	int channo;
@@ -5968,7 +5972,7 @@ static int dahdi_prechan_ioctl(struct inode *inode, struct file *file, unsigned 
 			return -EINVAL;
 		if (channo > DAHDI_MAX_CHANNELS)
 			return -EINVAL;
-		res = dahdi_specchan_open(inode, file, channo);
+		res = dahdi_specchan_open(file, channo);
 		if (!res) {
 			/* Setup the pointer for future stuff */
 			chan = chans[channo];
@@ -5983,47 +5987,80 @@ static int dahdi_prechan_ioctl(struct inode *inode, struct file *file, unsigned 
 	return 0;
 }
 
-static int dahdi_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long data)
+#ifdef HAVE_UNLOCKED_IOCTL
+static long dahdi_ioctl(struct file *file, unsigned int cmd, unsigned long data)
+#else
+static int dahdi_ioctl(struct inode *inode, struct file *file,
+		unsigned int cmd, unsigned long data)
+#endif
 {
 	int unit = UNIT(file);
 	struct dahdi_chan *chan;
 	struct dahdi_timer *timer;
+	int ret;
 
-	if (!unit)
-		return dahdi_ctl_ioctl(inode, file, cmd, data);
+#ifdef HAVE_UNLOCKED_IOCTL
+	lock_kernel();
+#endif
+
+	if (!unit) {
+		ret = dahdi_ctl_ioctl(file, cmd, data);
+		goto unlock_exit;
+	}
 
 	if (unit == 250) {
 		/* dahdi_transcode should have updated the file_operations on
 		 * this file object on open, so we shouldn't be here. */
 		WARN_ON(1);
-		return -EFAULT;
+		ret = -EFAULT;
+		goto unlock_exit;
 	}
 
 	if (unit == 253) {
 		timer = dahdi_get_private_data(file);
 		if (timer)
-			return dahdi_timer_ioctl(inode, file, cmd, data, timer);
+			ret = dahdi_timer_ioctl(file, cmd, data, timer);
 		else
-			return -EINVAL;
+			ret = -EINVAL;
+		goto unlock_exit;
 	}
 	if (unit == 254) {
 		chan = dahdi_get_private_data(file);
 		if (chan)
-			return dahdi_chan_ioctl(inode, file, cmd, data, chan->channo);
+			ret = dahdi_chan_ioctl(file, cmd, data, chan->channo);
 		else
-			return dahdi_prechan_ioctl(inode, file, cmd, data, unit);
+			ret = dahdi_prechan_ioctl(file, cmd, data, unit);
+		goto unlock_exit;
 	}
 	if (unit == 255) {
 		chan = dahdi_get_private_data(file);
 		if (!chan) {
 			module_printk(KERN_NOTICE, "No pseudo channel structure to read?\n");
-			return -EINVAL;
+			ret = -EINVAL;
+			goto unlock_exit;
 		}
-		return dahdi_chanandpseudo_ioctl(inode, file, cmd, data, chan->channo);
+		ret = dahdi_chanandpseudo_ioctl(file, cmd, data, chan->channo);
+		goto unlock_exit;
 	}
-	return dahdi_chan_ioctl(inode, file, cmd, data, unit);
+	ret = dahdi_chan_ioctl(file, cmd, data, unit);
+
+unlock_exit:
+#ifdef HAVE_UNLOCKED_IOCTL
+	unlock_kernel();
+#endif
+	return ret;
 }
 
+#ifdef HAVE_COMPAT_IOCTL
+static long dahdi_ioctl_compat(struct file *file, unsigned int cmd,
+		unsigned long data)
+{
+	if (cmd == DAHDI_SFCONFIG)
+		return -ENOTTY; /* Not supported yet */
+
+	return dahdi_ioctl(file, cmd, data);
+}
+#endif
 
 /**
  * dahdi_register() - unregister a new DAHDI span
@@ -6041,6 +6078,7 @@ static int dahdi_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 int dahdi_register(struct dahdi_span *span, int prefmaster)
 {
 	int x;
+	int res = 0;
 
 	if (!span)
 		return -EINVAL;
@@ -6086,7 +6124,12 @@ int dahdi_register(struct dahdi_span *span, int prefmaster)
 
 	for (x = 0; x < span->channels; x++) {
 		span->chans[x]->span = span;
-		dahdi_chan_reg(span->chans[x]);
+		res = dahdi_chan_reg(span->chans[x]);
+		if (res) {
+			for (x--; x >= 0; x--)
+				dahdi_chan_unreg(span->chans[x]);
+			goto unreg_channels;
+		}
 	}
 
 #ifdef CONFIG_PROC_FS
@@ -6130,6 +6173,10 @@ int dahdi_register(struct dahdi_span *span, int prefmaster)
 	}
 
 	return 0;
+
+unreg_channels:
+	spans[span->spanno] = NULL;
+	return res;
 }
 
 
@@ -8863,17 +8910,20 @@ module_param(deftaps, int, 0644);
 
 static struct file_operations dahdi_fops = {
 	.owner   = THIS_MODULE,
-	.llseek  = NULL,
 	.open    = dahdi_open,
 	.release = dahdi_release,
+#ifdef HAVE_UNLOCKED_IOCTL
+	.unlocked_ioctl  = dahdi_ioctl,
+#ifdef HAVE_COMPAT_IOCTL
+	.compat_ioctl = dahdi_ioctl_compat,
+#endif
+#else
 	.ioctl   = dahdi_ioctl,
+#endif
 	.read    = dahdi_read,
 	.write   = dahdi_write,
 	.poll    = dahdi_poll,
 	.mmap    = dahdi_mmap,
-	.flush   = NULL,
-	.fsync   = NULL,
-	.fasync  = NULL,
 };
 #endif /* !__FreeBSD__ */
 
