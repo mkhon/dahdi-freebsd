@@ -1,5 +1,5 @@
 OVERVIEW
-========
+~~~~~~~~
 
 This is semi-official DAHDI port to FreeBSD.
 
@@ -21,14 +21,20 @@ Drop me an e-mail if you have hardware that is supported by dahdi-linux
 but is not supported by this port.
 
 BUILDING
-========
+~~~~~~~~
 
 Just run "make", then "make install" in directory freebsd/
 
 NOTES
-=====
+~~~~~
 
 dahdi_dynamic_eth and dahdi_dynamic_ethmf require ng_ether kernel module
 to be loaded.
+
+CREDITS
+~~~~~~~
+
+main DAHDI driver and wcb4xxp port sponsored by Ethon Technologies GmbH, http://ethon.de/
+dahdi_dynamic and eth/ethmf port sponsored by Redfone Communications, LLC, http://red-fone.com/
 
 Max Khon <fjoe@FreeBSD.org>
