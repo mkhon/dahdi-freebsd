@@ -23,6 +23,8 @@
  * this program for more details.
  */
 
+#if defined(__FreeBSD__)
+#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -33,6 +35,7 @@
 #include <linux/moduleparam.h>
 #include <linux/sched.h>
 #include <asm/io.h>
+#endif /* !__FreeBSD__ */
 #include "proslic.h"
 
 /*
@@ -265,9 +268,12 @@ struct wctdm {
 	unsigned char reg0shadow[NUM_CARDS];
 	unsigned char reg1shadow[NUM_CARDS];
 
+#if defined(__FreeBSD__)
+#else /* !__FreeBSD__ */
 	unsigned long ioaddr;
 	dma_addr_t 	readdma;
 	dma_addr_t	writedma;
+#endif /* !__FreeBSD__ */
 	volatile unsigned int *writechunk;				/* Double-word aligned write memory */
 	volatile unsigned int *readchunk;				/* Double-word aligned read memory */
 	struct dahdi_chan _chans[NUM_CARDS];
@@ -315,6 +321,50 @@ static int fxsrxgain = 0;
 static int wctdm_init_proslic(struct wctdm *wc, int card, int fast , int manual, int sane);
 static int wctdm_init_ring_generator_mode(struct wctdm *wc, int card);
 static int wctdm_set_ring_generator_mode(struct wctdm *wc, int card, int mode);
+
+#if defined(__FreeBSD__)
+static inline void
+wctdm_outb(struct wctdm *wc, int reg, u8 val)
+{
+        bus_space_write_1(
+	    rman_get_bustag(wc->io_res), rman_get_bushandle(wc->io_res),
+	    reg, val);
+}
+
+static inline void
+wctdm_outl(struct wctdm *wc, int reg, u32 val)
+{
+        bus_space_write_4(
+	    rman_get_bustag(wc->io_res), rman_get_bushandle(wc->io_res),
+	    reg, val);
+}
+
+static inline u8
+wctdm_inb(struct wctdm *wc, int reg)
+{
+        return bus_space_read_1(
+	    rman_get_bustag(wc->io_res), rman_get_bushandle(wc->io_res),
+	    reg);
+}
+#else /* !__FreeBSD__ */
+static inline void
+wctdm_outb(struct wctdm *wc, int reg, u8 val)
+{
+	outb(val, wc->ioaddr + reg);
+}
+
+static inline void
+wctdm_outl(struct wctdm *wc, int reg, u32 val)
+{
+	outl(val, wc->ioaddr + reg);
+}
+
+static inline u8
+wctdm_inb(struct wctdm *wc, int reg)
+{
+	return inb(wc->ioaddr + reg);
+}
+#endif /* !__FreeBSD__ */
 
 static inline void wctdm_transmitprep(struct wctdm *wc, unsigned char ints)
 {
@@ -463,7 +513,7 @@ static inline void __write_8bits(struct wctdm *wc, unsigned char bits)
 	int x;
 	/* Drop chip select */
 	wc->ios &= ~BIT_CS;
-	outb(wc->ios, wc->ioaddr + WC_AUXD);
+	wctdm_outb(wc, WC_AUXD, wc->ios);
 	for (x=0;x<8;x++) {
 		/* Send out each bit, MSB first, drop SCLK as we do so */
 		if (bits & 0x80)
@@ -471,40 +521,40 @@ static inline void __write_8bits(struct wctdm *wc, unsigned char bits)
 		else
 			wc->ios &= ~BIT_SDI;
 		wc->ios &= ~BIT_SCLK;
-		outb(wc->ios, wc->ioaddr + WC_AUXD);
+		wctdm_outb(wc, WC_AUXD, wc->ios);
 
 		/* Now raise SCLK high again and repeat */
 		wc->ios |= BIT_SCLK;
-		outb(wc->ios, wc->ioaddr + WC_AUXD);
+		wctdm_outb(wc, WC_AUXD, wc->ios);
 		bits <<= 1;
 	}
 	/* Finally raise CS back high again */
 	wc->ios |= BIT_CS;
-	outb(wc->ios, wc->ioaddr + WC_AUXD);
+	wctdm_outb(wc, WC_AUXD, wc->ios);
 }
 
 static inline void __reset_spi(struct wctdm *wc)
 {
 	/* Drop chip select and clock once and raise and clock once */
 	wc->ios |= BIT_SCLK;
-	outb(wc->ios, wc->ioaddr + WC_AUXD);
+	wctdm_outb(wc, WC_AUXD, wc->ios);
 	wc->ios &= ~BIT_CS;
-	outb(wc->ios, wc->ioaddr + WC_AUXD);
+	wctdm_outb(wc, WC_AUXD, wc->ios);
 	wc->ios |= BIT_SDI;
 	wc->ios &= ~BIT_SCLK;
-	outb(wc->ios, wc->ioaddr + WC_AUXD);
+	wctdm_outb(wc, WC_AUXD, wc->ios);
 	/* Now raise SCLK high again and repeat */
 	wc->ios |= BIT_SCLK;
-	outb(wc->ios, wc->ioaddr + WC_AUXD);
+	wctdm_outb(wc, WC_AUXD, wc->ios);
 	/* Finally raise CS back high again */
 	wc->ios |= BIT_CS;
-	outb(wc->ios, wc->ioaddr + WC_AUXD);
+	wctdm_outb(wc, WC_AUXD, wc->ios);
 	/* Clock again */
 	wc->ios &= ~BIT_SCLK;
-	outb(wc->ios, wc->ioaddr + WC_AUXD);
+	wctdm_outb(wc, WC_AUXD, wc->ios);
 	/* Now raise SCLK high again and repeat */
 	wc->ios |= BIT_SCLK;
-	outb(wc->ios, wc->ioaddr + WC_AUXD);
+	wctdm_outb(wc, WC_AUXD, wc->ios);
 	
 }
 
@@ -522,24 +572,24 @@ static inline unsigned char __read_8bits(struct wctdm *wc)
 	int x;
 	/* Drop chip select */
 	wc->ios &= ~BIT_CS;
-	outb(wc->ios, wc->ioaddr + WC_AUXD);
+	wctdm_outb(wc, WC_AUXD, wc->ios);
 	for (x=0;x<8;x++) {
 		res <<= 1;
 		/* Drop SCLK */
 		wc->ios &= ~BIT_SCLK;
-		outb(wc->ios, wc->ioaddr + WC_AUXD);
+		wctdm_outb(wc, WC_AUXD, wc->ios);
 		/* Now raise SCLK high again */
 		wc->ios |= BIT_SCLK;
-		outb(wc->ios, wc->ioaddr + WC_AUXD);
+		wctdm_outb(wc, WC_AUXD, wc->ios);
 
 		/* Read back the value */
-		c = inb(wc->ioaddr + WC_AUXR);
+		c = wctdm_inb(wc, WC_AUXR);
 		if (c & BIT_SDO)
 			res |= 1;
 	}
 	/* Finally raise CS back high again */
 	wc->ios |= BIT_CS;
-	outb(wc->ios, wc->ioaddr + WC_AUXD);
+	wctdm_outb(wc, WC_AUXD, wc->ios);
 
 	/* And return our result */
 	return res;
@@ -547,12 +597,12 @@ static inline unsigned char __read_8bits(struct wctdm *wc)
 
 static void __wctdm_setcreg(struct wctdm *wc, unsigned char reg, unsigned char val)
 {
-	outb(val, wc->ioaddr + WC_REGBASE + ((reg & 0xf) << 2));
+	wctdm_outb(wc, WC_REGBASE + ((reg & 0xf) << 2), val);
 }
 
 static unsigned char __wctdm_getcreg(struct wctdm *wc, unsigned char reg)
 {
-	return inb(wc->ioaddr + WC_REGBASE + ((reg & 0xf) << 2));
+	return wctdm_inb(wc, WC_REGBASE + ((reg & 0xf) << 2));
 }
 
 static inline void __wctdm_setcard(struct wctdm *wc, int card)
@@ -1079,12 +1129,12 @@ DAHDI_IRQ_HANDLER(wctdm_interrupt)
 	int x;
 	int mode;
 
-	ints = inb(wc->ioaddr + WC_INTSTAT);
+	ints = wctdm_inb(wc, WC_INTSTAT);
 
 	if (!ints)
 		return IRQ_NONE;
 
-	outb(ints, wc->ioaddr + WC_INTSTAT);
+	wctdm_outb(wc, WC_INTSTAT, ints);
 
 	if (ints & 0x10) {
 		/* Stop DMA, wait for watchdog */
@@ -2396,10 +2446,10 @@ static int wctdm_hardware_init(struct wctdm *wc)
 	int failed;
 
 	/* Signal Reset */
-	outb(0x01, wc->ioaddr + WC_CNTL);
+	wctdm_outb(wc, WC_CNTL, 0x01);
 
 	/* Check Freshmaker chip */
-	x=inb(wc->ioaddr + WC_CNTL);
+	x = wctdm_inb(wc, WC_CNTL);
 	ver = __wctdm_getcreg(wc, WC_VER);
 	failed = 0;
 	if (ver != 0x59) {
@@ -2432,44 +2482,44 @@ static int wctdm_hardware_init(struct wctdm *wc)
 	}
 
 	/* Reset PCI Interface chip and registers (and serial) */
-	outb(0x06, wc->ioaddr + WC_CNTL);
+	wctdm_outb(wc, WC_CNTL, 0x06);
 	/* Setup our proper outputs for when we switch for our "serial" port */
 	wc->ios = BIT_CS | BIT_SCLK | BIT_SDI;
 
-	outb(wc->ios, wc->ioaddr + WC_AUXD);
+	wctdm_outb(wc, WC_AUXD, wc->ios);
 
 	/* Set all to outputs except AUX 5, which is an input */
-	outb(0xdf, wc->ioaddr + WC_AUXC);
+	wctdm_outb(wc, WC_AUXC, 0xdf);
 
 	/* Select alternate function for AUX0 */
-	outb(0x4, wc->ioaddr + WC_AUXFUNC);
+	wctdm_outb(wc, WC_AUXFUNC, 0x4);
 	
 	/* Wait 1/4 of a sec */
 	wait_just_a_bit(HZ/4);
 
 	/* Back to normal, with automatic DMA wrap around */
-	outb(0x30 | 0x01, wc->ioaddr + WC_CNTL);
+	wctdm_outb(wc, WC_CNTL, 0x30 | 0x01);
 	
 	/* Make sure serial port and DMA are out of reset */
-	outb(inb(wc->ioaddr + WC_CNTL) & 0xf9, wc->ioaddr + WC_CNTL);
+	wctdm_outb(wc, WC_CNTL, wctdm_inb(wc, WC_CNTL) & 0xf9);
 	
 	/* Configure serial port for MSB->LSB operation */
-	outb(0xc1, wc->ioaddr + WC_SERCTL);
+	wctdm_outb(wc, WC_SERCTL, 0xc1);
 
 	/* Delay FSC by 0 so it's properly aligned */
-	outb(0x0, wc->ioaddr + WC_FSCDELAY);
+	wctdm_outb(wc, WC_FSCDELAY, 0x0);
 
 	/* Setup DMA Addresses */
-	outl(wc->writedma,                    wc->ioaddr + WC_DMAWS);		/* Write start */
-	outl(wc->writedma + DAHDI_CHUNKSIZE * 4 - 4, wc->ioaddr + WC_DMAWI);		/* Middle (interrupt) */
-	outl(wc->writedma + DAHDI_CHUNKSIZE * 8 - 4, wc->ioaddr + WC_DMAWE);			/* End */
+	wctdm_outl(wc, WC_DMAWS, wc->writedma);		/* Write start */
+	wctdm_outl(wc, WC_DMAWI, wc->writedma + DAHDI_CHUNKSIZE * 4 - 4);	/* Middle (interrupt) */
+	wctdm_outl(wc, WC_DMAWE, wc->writedma + DAHDI_CHUNKSIZE * 8 - 4);	/* End */
 	
-	outl(wc->readdma,                    	 wc->ioaddr + WC_DMARS);	/* Read start */
-	outl(wc->readdma + DAHDI_CHUNKSIZE * 4 - 4, 	 wc->ioaddr + WC_DMARI);	/* Middle (interrupt) */
-	outl(wc->readdma + DAHDI_CHUNKSIZE * 8 - 4, wc->ioaddr + WC_DMARE);	/* End */
+	wctdm_outl(wc, WC_DMARS, wc->readdma);		/* Read start */
+	wctdm_outl(wc, WC_DMARI, wc->readdma + DAHDI_CHUNKSIZE * 4 - 4);	/* Middle (interrupt) */
+	wctdm_outl(wc, WC_DMARE, wc->readdma + DAHDI_CHUNKSIZE * 8 - 4);	/* End */
 	
 	/* Clear interrupts */
-	outb(0xff, wc->ioaddr + WC_INTSTAT);
+	wctdm_outb(wc, WC_INTSTAT, 0xff);
 
 	/* Wait 1/4 of a second more */
 	wait_just_a_bit(HZ/4);
@@ -2521,43 +2571,43 @@ static int wctdm_hardware_init(struct wctdm *wc)
 static void wctdm_enable_interrupts(struct wctdm *wc)
 {
 	/* Enable interrupts (we care about all of them) */
-	outb(0x3f, wc->ioaddr + WC_MASK0);
+	wctdm_outb(wc, WC_MASK0, 0x3f);
 	/* No external interrupts */
-	outb(0x00, wc->ioaddr + WC_MASK1);
+	wctdm_outb(wc, WC_MASK1, 0x00);
 }
 
 static void wctdm_restart_dma(struct wctdm *wc)
 {
 	/* Reset Master and TDM */
-	outb(0x01, wc->ioaddr + WC_CNTL);
-	outb(0x01, wc->ioaddr + WC_OPER);
+	wctdm_outb(wc, WC_CNTL, 0x01);
+	wctdm_outb(wc, WC_OPER, 0x01);
 }
 
 static void wctdm_start_dma(struct wctdm *wc)
 {
 	/* Reset Master and TDM */
-	outb(0x0f, wc->ioaddr + WC_CNTL);
+	wctdm_outb(wc, WC_CNTL, 0x0f);
 	set_current_state(TASK_INTERRUPTIBLE);
 	schedule_timeout(1);
-	outb(0x01, wc->ioaddr + WC_CNTL);
-	outb(0x01, wc->ioaddr + WC_OPER);
+	wctdm_outb(wc, WC_CNTL, 0x01);
+	wctdm_outb(wc, WC_OPER, 0x01);
 }
 
 static void wctdm_stop_dma(struct wctdm *wc)
 {
-	outb(0x00, wc->ioaddr + WC_OPER);
+	wctdm_outb(wc, WC_OPER, 0x00);
 }
 
 static void wctdm_reset_tdm(struct wctdm *wc)
 {
 	/* Reset TDM */
-	outb(0x0f, wc->ioaddr + WC_CNTL);
+	wctdm_outb(wc, WC_CNTL, 0x0f);
 }
 
 static void wctdm_disable_interrupts(struct wctdm *wc)	
 {
-	outb(0x00, wc->ioaddr + WC_MASK0);
-	outb(0x00, wc->ioaddr + WC_MASK1);
+	wctdm_outb(wc, WC_MASK0, 0x00);
+	wctdm_outb(wc, WC_MASK1, 0x00);
 }
 
 static int __devinit wctdm_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
@@ -2615,8 +2665,8 @@ static int __devinit wctdm_init_one(struct pci_dev *pdev, const struct pci_devic
 			if (wctdm_initialize(wc)) {
 				printk(KERN_NOTICE "wctdm: Unable to intialize FXS\n");
 				/* Set Reset Low */
-				x=inb(wc->ioaddr + WC_CNTL);
-				outb((~0x1)&x, wc->ioaddr + WC_CNTL);
+				x = wctdm_inb(wc, WC_CNTL);
+				wctdm_outb(wc, WC_CNTL, (~0x1)&x);
 				/* Free Resources */
 				free_irq(pdev->irq, wc);
 				if (wc->freeregion)
@@ -2645,8 +2695,8 @@ static int __devinit wctdm_init_one(struct pci_dev *pdev, const struct pci_devic
 
 			if (wctdm_hardware_init(wc)) {
 				/* Set Reset Low */
-				x=inb(wc->ioaddr + WC_CNTL);
-				outb((~0x1)&x, wc->ioaddr + WC_CNTL);
+				x = wctdm_inb(wc, WC_CNTL);
+				wctdm_outb(wc, WC_CNTL, (~0x1)&x);
 				/* Free Resources */
 				free_irq(pdev->irq, wc);
 				if (wc->freeregion)
@@ -2708,7 +2758,7 @@ static void __devexit wctdm_remove_one(struct pci_dev *pdev)
 		free_irq(pdev->irq, wc);
 
 		/* Reset PCI chip and registers */
-		outb(0x0e, wc->ioaddr + WC_CNTL);
+		wctdm_outb(wc, WC_CNTL, 0x0e);
 
 		/* Release span, possibly delayed */
 		if (!wc->usecount)
@@ -2737,6 +2787,8 @@ static struct pci_device_id wctdm_pci_tbl[] = {
 	{ 0 }
 };
 
+#if defined(__FreeBSD__)
+#else /* !__FreeBSD__ */
 MODULE_DEVICE_TABLE(pci, wctdm_pci_tbl);
 
 static struct pci_driver wctdm_driver = {
@@ -2827,3 +2879,4 @@ MODULE_LICENSE("GPL v2");
 
 module_init(wctdm_init);
 module_exit(wctdm_cleanup);
+#endif /* !__FreeBSD__ */
