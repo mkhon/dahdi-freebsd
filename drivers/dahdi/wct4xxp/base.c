@@ -3213,7 +3213,6 @@ DAHDI_IRQ_HANDLER(t4_interrupt_gen2)
 	res = FILTER_HANDLED;
 #endif
 	if (unlikely(test_bit(T4_CHECK_VPM, &wc->checkflag))) {
-		DPRINTF(wc->dev, "scheduling filter thread\n");
 #if defined(__FreeBSD__)
 		res |= FILTER_SCHEDULE_THREAD;
 #else
