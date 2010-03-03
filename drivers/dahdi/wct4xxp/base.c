@@ -3070,7 +3070,6 @@ static void t4_isr_bh(unsigned long data)
 {
 	struct t4 *wc = (struct t4 *)data;
 
-	DPRINTF(wc->dev, "%s\n", __FUNCTION__);
 #ifdef VPM_SUPPORT
 	if (wc->vpm) {
 		if (test_and_clear_bit(T4_CHECK_VPM, &wc->checkflag)) {
