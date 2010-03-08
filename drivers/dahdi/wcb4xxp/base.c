@@ -44,10 +44,7 @@
 
 #define mmiowb()
 
-#define printk_ratelimit()	1
-
 #define DPRINTF(dev, fmt, args...)	device_rlprintf(10, dev, fmt, ##args)
-
 #else /* !__FreeBSD__ */
 #include <linux/autoconf.h>
 #include <linux/init.h>
@@ -2965,12 +2962,12 @@ static void
 b4xxp_release_intr(struct b4xxp *b4)
 {
 	if (b4->irq_handle != NULL) {
-		bus_teardown_intr(b4->dev, b4->irq_res, b4->irq_handle);
+		bus_teardown_intr(b4->pdev->dev, b4->irq_res, b4->irq_handle);
 		b4->irq_handle = NULL;
 	}
 
 	if (b4->irq_res != NULL) {
-		bus_release_resource(b4->dev, SYS_RES_IRQ, b4->irq_rid, b4->irq_res);
+		bus_release_resource(b4->pdev->dev, SYS_RES_IRQ, b4->irq_rid, b4->irq_res);
 		b4->irq_res = NULL;
 	}
 }
@@ -2983,15 +2980,15 @@ b4xxp_release_resources(struct b4xxp *b4)
 
 	/* release I/O range */
 	if (b4->io_res != NULL) {
-		bus_deactivate_resource(b4->dev, SYS_RES_IOPORT, b4->io_rid, b4->mem_res);
-		bus_release_resource(b4->dev, SYS_RES_IOPORT, b4->io_rid, b4->io_res);
+		bus_deactivate_resource(b4->pdev->dev, SYS_RES_IOPORT, b4->io_rid, b4->mem_res);
+		bus_release_resource(b4->pdev->dev, SYS_RES_IOPORT, b4->io_rid, b4->io_res);
 		b4->io_res = NULL;
 	}
 
 	/* release memory window */
 	if (b4->mem_res != NULL) {
-		bus_deactivate_resource(b4->dev, SYS_RES_MEMORY, b4->mem_rid, b4->mem_res);
-		bus_release_resource(b4->dev, SYS_RES_MEMORY, b4->mem_rid, b4->mem_res);
+		bus_deactivate_resource(b4->pdev->dev, SYS_RES_MEMORY, b4->mem_rid, b4->mem_res);
+		bus_release_resource(b4->pdev->dev, SYS_RES_MEMORY, b4->mem_rid, b4->mem_res);
 		b4->mem_res = NULL;
 	}
 }
@@ -3002,17 +2999,17 @@ b4xxp_setup_intr(struct b4xxp *b4)
 	int error;
 
 	b4->irq_res = bus_alloc_resource_any(
-	     b4->dev, SYS_RES_IRQ, &b4->irq_rid, RF_SHAREABLE | RF_ACTIVE);
+	     b4->pdev->dev, SYS_RES_IRQ, &b4->irq_rid, RF_SHAREABLE | RF_ACTIVE);
 	if (b4->irq_res == NULL) {
-		device_printf(b4->dev, "Can't allocate irq resource\n");
+		device_printf(b4->pdev->dev, "Can't allocate irq resource\n");
 		return -ENXIO;
 	}
 
 	error = bus_setup_intr(
-	    b4->dev, b4->irq_res, INTR_TYPE_CLK | INTR_MPSAFE, b4xxp_interrupt, NULL,
+	    b4->pdev->dev, b4->irq_res, INTR_TYPE_CLK | INTR_MPSAFE, b4xxp_interrupt, NULL,
 	    b4, &b4->irq_handle);
 	if (error) {
-		device_printf(b4->dev, "Can't setup interrupt handler (error %d)\n", error);
+		device_printf(b4->pdev->dev, "Can't setup interrupt handler (error %d)\n", error);
 		return -ENXIO;
 	}
 
@@ -3071,7 +3068,9 @@ b4xxp_device_attach(device_t dev)
 
 	dt = (struct devtype *) id->driver_data;
 	b4 = device_get_softc(dev);
-	b4->dev = b4->pdev = dev;
+	b4->pdev = &b4->_dev;
+	b4->pdev->dev = dev;
+	b4->dev = &b4->pdev->dev;
 
         /* allocate I/O resource */
 	b4->io_rid = PCIR_BAR(0);

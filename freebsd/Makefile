@@ -2,7 +2,6 @@
 
 SUBDIR=\
 	dahdi\
-	dahdi_dummy\
 	dahdi_dynamic\
 	dahdi_dynamic_loc\
 	dahdi_dynamic_eth\

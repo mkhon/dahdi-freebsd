@@ -6,7 +6,7 @@
  * written by Jim Dixon <jim@lambdatel.com>.
  *
  * Copyright (C) 2001 Jim Dixon / Zapata Telephony.
- * Copyright (C) 2001 - 2008 Digium, Inc.
+ * Copyright (C) 2001 - 2010 Digium, Inc.
  *
  * All rights reserved.
  *
@@ -47,11 +47,6 @@
 #include <dahdi/compat/types.h>
 #include <dahdi/compat/list.h>
 #include <dahdi/compat/bsd.h>
-
-#define dahdi_pci_get_bus(dev)	pci_get_bus(dev)
-#define dahdi_pci_get_slot(dev)	pci_get_slot(dev)
-#define dahdi_pci_get_irq(dev)	pci_get_irq(dev)
-
 #else /* !__FreeBSD */
 #include <linux/version.h>
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,18)
@@ -742,6 +737,18 @@ enum {
 	DAHDI_FLAGBIT_HDLC56	= 20,	/*!< Sets the given channel (if in HDLC mode) to use 56K HDLC instead of 64K  */
 };
 
+struct dahdi_count {
+	__u32 fe;		/*!< Framing error counter */
+	__u32 cv;		/*!< Coding violations counter */
+	__u32 bpv;		/*!< Bipolar Violation counter */
+	__u32 crc4;		/*!< CRC4 error counter */
+	__u32 ebit;		/*!< current E-bit error count */
+	__u32 fas;		/*!< current FAS error count */
+	__u32 be;		/*!< current bit error count */
+	__u32 prbs;		/*!< current PRBS detected pattern */
+	__u32 errsec;		/*!< errored seconds */
+};
+
 /* map flagbits to flag masks */
 #define	DAHDI_FLAG(x)	(1 << (DAHDI_FLAGBIT_ ## x))
 
@@ -800,10 +807,7 @@ struct dahdi_span {
 	int txlevel;			/*!< Tx level */
 	int rxlevel;			/*!< Rx level */
 	int syncsrc;			/*!< current sync src (gets copied here) */
-	unsigned int bpvcount;		/*!< BPV counter */
-	unsigned int crc4count;	        /*!< CRC4 error counter */
-	unsigned int ebitcount;		/*!< current E-bit error count */
-	unsigned int fascount;		/*!< current FAS error count */
+	struct dahdi_count count;	/*!< Performance and Error counters */
 
 	int maintstat;			/*!< Maintenance state */
 	wait_queue_head_t maintq;	/*!< Maintenance queue */
@@ -1009,7 +1013,7 @@ struct dahdi_dynamic_driver {
 	/*! Flush any pending messages */
 	int (*flush)(void);
 
-	struct dahdi_dynamic_driver *next;
+	struct list_head list;
 };
 
 /*! \brief Receive a dynamic span message */
@@ -1222,9 +1226,16 @@ static inline short dahdi_txtone_nextsample(struct dahdi_chan *ss)
 /*! Maximum audio mask */
 #define DAHDI_FORMAT_AUDIO_MASK	((1 << 16) - 1)
 
-#if defined(__FreeBSD__) || LINUX_VERSION_CODE < KERNEL_VERSION(2,6,14)
-#define kzalloc(a, b) kcalloc(1, a, b)
-#endif
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 31)
+#define KERN_CONT ""
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 26)
+#define clamp(x, low, high) min (max (low, x), high)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 25)
+
+/* Some distributions backported fatal_signal_pending so we'll use a macro to
+ * override the inline functino definition. */
+#define fatal_signal_pending(p) \
+	(signal_pending((p)) && sigismember(&(p)->pending.signal, SIGKILL))
 
 #if !defined(__FreeBSD__) && LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 18)
 static inline void list_replace(struct list_head *old, struct list_head *new)
@@ -1234,7 +1245,30 @@ static inline void list_replace(struct list_head *old, struct list_head *new)
         new->prev = old->prev;
         new->prev->next = new;
 }
-#endif
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 14)
+#define kzalloc(a, b) kcalloc(1, a, b)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 12)
+#define synchronize_rcu() synchronize_kernel()
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 11)
+static inline unsigned long
+wait_for_completion_timeout(struct completion *x, unsigned long timeout)
+{
+	/* There is a race condition here.  If x->done is reset to 0
+	 * before the call to wait_for_completion after this thread wakes.
+	 */
+	timeout = wait_event_timeout(x->wait, x->done, timeout);
+	if (timeout)
+		wait_for_completion(x);
+
+	return timeout;
+}
+#endif /* 2.6.11 */
+#endif /* 2.6.12 */
+#endif /* 2.6.14 */
+#endif /* 2.6.18 */
+#endif /* 2.6.25 */
+#endif /* 2.6.26 */
+#endif /* 2.6.31 */
 
 #ifndef DMA_BIT_MASK
 #define DMA_BIT_MASK(n)	(((n) == 64) ? ~0ULL : ((1ULL<<(n))-1))

@@ -6,7 +6,7 @@
  * Matthew Fredrickson <creslin@digium.com>, and
  * Michael Spiceland <mspiceland@digium.com>
  * 
- * Copyright (C) 2007-2009 Digium, Inc.
+ * Copyright (C) 2007-2010 Digium, Inc.
  *
  * All rights reserved.
  *
@@ -29,11 +29,19 @@
 #ifndef __VOICEBUS_H__
 #define __VOICEBUS_H__
 
-#define VOICEBUS_DEFAULT_LATENCY	3
-#define VOICEBUS_DEFAULT_MAXLATENCY	25
-#define VOICEBUS_MAXLATENCY_BUMP	6
+#include <linux/interrupt.h>
 
-#define VOICEBUS_SFRAME_SIZE 1004
+
+#ifdef VOICEBUS_NET_DEBUG
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+#endif
+
+#define VOICEBUS_DEFAULT_LATENCY	3U
+#define VOICEBUS_DEFAULT_MAXLATENCY	25U
+#define VOICEBUS_MAXLATENCY_BUMP	6U
+
+#define VOICEBUS_SFRAME_SIZE 1004U
 
 /*! The number of descriptors in both the tx and rx descriptor ring. */
 #define DRING_SIZE	(1 << 7)  /* Must be a power of 2 */
@@ -44,20 +52,23 @@
  * of supported kernels. */
 #undef CONFIG_VOICEBUS_SYSFS
 
-#define INTERRUPT 0	/* Run the deferred processing in the ISR. */
-#define TASKLET   1	/* Run in a tasklet. */
-#define TIMER	  2	/* Run in a system timer. */
-#define WORKQUEUE 3	/* Run in a workqueue. */
+/* Do not generate interrupts on this interface, but instead just poll it */
+#undef CONFIG_VOICEBUS_TIMER
 
-#ifndef VOICEBUS_DEFERRED
-#define VOICEBUS_DEFERRED INTERRUPT
-#endif
+/* Define this in order to create a debugging network interface. */
+#undef VOICEBUS_NET_DEBUG
 
 struct voicebus;
 
+struct vbb {
+	u8 data[VOICEBUS_SFRAME_SIZE];
+	struct list_head entry;
+};
+
 struct voicebus_operations {
-	void (*handle_receive)(struct voicebus *vb, void *vbb);
-	void (*handle_transmit)(struct voicebus *vb, void *vbb);
+	void (*handle_receive)(struct voicebus *vb, struct list_head *buffers);
+	void (*handle_transmit)(struct voicebus *vb, struct list_head *buffers);
+	void (*handle_error)(struct voicebus *vb);
 };
 
 /**
@@ -73,47 +84,122 @@ struct voicebus_descriptor_list {
 	unsigned int	padding;
 };
 
+/* Bit definitions for struct voicebus.flags */
+#define VOICEBUS_STOP				1
+#define VOICEBUS_STOPPED			2
+#define VOICEBUS_LATENCY_LOCKED			3
+#define VOICEBUS_NORMAL_MODE			4
+#define VOICEBUS_USERMODE			5
+
 /**
  * struct voicebus - Represents physical interface to voicebus card.
  *
+ * @tx_complete: only used in the tasklet to temporarily hold complete tx
+ *		 buffers.
  */
 struct voicebus {
 	struct pci_dev		*pdev;
 	spinlock_t		lock;
 	struct voicebus_descriptor_list rxd;
 	struct voicebus_descriptor_list txd;
-	void			*idle_vbb;
+	u8			*idle_vbb;
 	dma_addr_t		idle_vbb_dma_addr;
 	const int		*debug;
-	u32			iobase;
-#if VOICEBUS_DEFERRED == WORKQUEUE
-	struct workqueue_struct *workqueue;
-	struct work_struct	workitem;
-#elif VOICEBUS_DEFERRED == TASKLET
+	void __iomem 		*iobase;
 	struct tasklet_struct 	tasklet;
-#elif VOICEBUS_DEFERRED == TIMER
+
+#if defined(CONFIG_VOICEBUS_TIMER)
 	struct timer_list	timer;
 #endif
+
+	struct work_struct	underrun_work;
 	const struct voicebus_operations *ops;
 	struct completion	stopped_completion;
 	unsigned long		flags;
 	unsigned int		min_tx_buffer_count;
 	unsigned int		max_latency;
-	void			*vbb_stash[DRING_SIZE];
-	unsigned int		count;
+	struct list_head	tx_complete;
+
+#ifdef VOICEBUS_NET_DEBUG
+	struct sk_buff_head captured_packets;
+	struct net_device *netdev;
+	struct net_device_stats net_stats;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 24)
+	struct napi_struct napi;
+#endif
+	atomic_t tx_seqnum;
+	atomic_t rx_seqnum;
+#endif
 };
 
-int voicebus_init(struct voicebus *vb, const char *board_name);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+extern kmem_cache_t *voicebus_vbb_cache;
+#else
+extern struct kmem_cache *voicebus_vbb_cache;
+#endif
+
+int __voicebus_init(struct voicebus *vb, const char *board_name,
+		    int normal_mode);
 void voicebus_release(struct voicebus *vb);
 int voicebus_start(struct voicebus *vb);
 int voicebus_stop(struct voicebus *vb);
-void *voicebus_alloc(struct voicebus* vb);
-void voicebus_free(struct voicebus *vb, void *vbb);
-int voicebus_transmit(struct voicebus *vb, void *vbb);
+int voicebus_transmit(struct voicebus *vb, struct vbb *vbb);
 int voicebus_set_minlatency(struct voicebus *vb, unsigned int milliseconds);
 int voicebus_current_latency(struct voicebus *vb);
-void voicebus_lock_latency(struct voicebus *vb);
-void voicebus_unlock_latency(struct voicebus *vb);
-int voicebus_is_latency_locked(const struct voicebus *vb);
- 
+
+static inline int voicebus_init(struct voicebus *vb, const char *board_name)
+{
+	return __voicebus_init(vb, board_name, 1);
+}
+
+static inline int
+voicebus_no_idle_init(struct voicebus *vb, const char *board_name)
+{
+	return __voicebus_init(vb, board_name, 0);
+}
+
+/**
+ * voicebus_lock_latency() - Do not increase the latency during underruns.
+ *
+ */
+static inline void voicebus_lock_latency(struct voicebus *vb)
+{
+	set_bit(VOICEBUS_LATENCY_LOCKED, &vb->flags);
+}
+
+/**
+ * voicebus_unlock_latency() - Bump up the latency during underruns.
+ *
+ */
+static inline void voicebus_unlock_latency(struct voicebus *vb)
+{
+	clear_bit(VOICEBUS_LATENCY_LOCKED, &vb->flags);
+}
+
+/**
+ * voicebus_is_latency_locked() - Return 1 if latency is currently locked.
+ *
+ */
+static inline int voicebus_is_latency_locked(const struct voicebus *vb)
+{
+	return test_bit(VOICEBUS_LATENCY_LOCKED, &vb->flags);
+}
+
+static inline void voicebus_set_normal_mode(struct voicebus *vb)
+{
+	set_bit(VOICEBUS_NORMAL_MODE, &vb->flags);
+}
+
+/**
+ * voicebus_set_max_latency() - Set the maximum number of milliseconds the latency will be able to grow to.
+ */
+static inline void
+voicebus_set_maxlatency(struct voicebus *vb, unsigned int max_latency)
+{
+	spin_lock_bh(&vb->lock);
+	vb->max_latency = clamp(max_latency,
+				vb->min_tx_buffer_count,
+				VOICEBUS_DEFAULT_MAXLATENCY);
+	spin_unlock_bh(&vb->lock);
+}
 #endif /* __VOICEBUS_H__ */

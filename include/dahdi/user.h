@@ -60,6 +60,9 @@
 #define DAHDI_CONFIG_HDB3	(1 << 9)			/* HDB3 instead of AMI (line coding) */
 #define DAHDI_CONFIG_CRC4	(1 << 10)			/* CRC4 framing */
 #define DAHDI_CONFIG_NOTOPEN	(1 << 16)
+/* These apply to BRI */
+#define DAHDI_CONFIG_NTTE	(1 << 11)			/* To enable NT mode, set this bit to 1, for TE this should be 0 */
+#define DAHDI_CONFIG_TERM	(1 << 12)			/* To enable Termination resistance set this bit to 1 */
 
 /* Signalling types */
 #define DAHDI_SIG_BROKEN	(1 << 31)			/* The port is broken and/or failed initialization */
@@ -327,9 +330,19 @@ enum {
 #define DAHDI_MAINT_NONE		0	/* Normal Mode */
 #define DAHDI_MAINT_LOCALLOOP		1	/* Local Loopback */
 #define DAHDI_MAINT_REMOTELOOP		2	/* Remote Loopback */
+#define DAHDI_MAINT_NETWORKLINELOOP	2	/* Remote Loopback */
 #define DAHDI_MAINT_LOOPUP		3	/* send loopup code */
 #define DAHDI_MAINT_LOOPDOWN		4	/* send loopdown code */
 #define DAHDI_MAINT_LOOPSTOP		5	/* stop sending loop codes */
+#define DAHDI_MAINT_FAS_DEFECT		6	/* insert a FAS defect */
+#define DAHDI_MAINT_MULTI_DEFECT	7	/* insert a Multiframe defect */
+#define DAHDI_MAINT_CRC_DEFECT		8	/* insert a FAS defect */
+#define DAHDI_MAINT_CAS_DEFECT		9	/* insert a FAS defect */
+#define DAHDI_MAINT_PRBS_DEFECT		10	/* insert a FAS defect */
+#define DAHDI_MAINT_BIPOLAR_DEFECT	11	/* insert a FAS defect */
+#define DAHDI_MAINT_PRBS		12	/* enable the PRBS gen/mon */
+#define DAHDI_MAINT_NETWORKPAYLOADLOOP	13	/* Remote Loopback */
+#define DAHDI_RESET_COUNTERS		14	/* clear the error counters */
 
 /* Flag Value for IOMUX, read avail */
 #define DAHDI_IOMUX_READ	1
@@ -533,6 +546,41 @@ struct dahdi_spaninfo {
 	int	alarms;		/* alarms status */
 	int	txlevel;	/* what TX level is set to */
 	int	rxlevel;	/* current RX level */
+
+	int	bpvcount;	/* current BPV count */
+	int	crc4count;	/* current CRC4 error count */
+	int	ebitcount;	/* current E-bit error count */
+	int	fascount;	/* current FAS error count */
+	__u32	fecount;	/* Framing error counter */
+	__u32	cvcount;	/* Coding violations counter */
+	__u32	becount;	/* current bit error count */
+	__u32	prbs;		/* current PRBS detected pattern */
+	__u32	errsec;		/* errored seconds */
+
+	int	irqmisses;	/* current IRQ misses */
+	int	syncsrc;	/* span # of current sync source,
+				   or 0 for free run */
+	int	numchans;	/* number of configured channels on this span */
+	int	totalchans;	/* total number of channels on the span */
+	int	totalspans;	/* total number of spans in entire system */
+	int	lbo;		/* line build out */
+	int	lineconfig;	/* framing/coding */
+	char 	lboname[40];	/* line build out in text form */
+	char	location[40];	/* span's device location in system */
+	char	manufacturer[40]; /* manufacturer of span's device */
+	char	devicetype[40];	/* span's device type */
+	int	irq;		/* span's device IRQ */
+	int	linecompat;	/* signaling modes possible on this span */
+	char	spantype[6];	/* type of span in text form */
+} __attribute__((packed));
+
+struct dahdi_spaninfo_v1 {
+	int	spanno;		/* span number */
+	char	name[20];	/* Name */
+	char	desc[40];	/* Description */
+	int	alarms;		/* alarms status */
+	int	txlevel;	/* what TX level is set to */
+	int	rxlevel;	/* current RX level */
 	int	bpvcount;	/* current BPV count */
 	int	crc4count;	/* current CRC4 error count */
 	int	ebitcount;	/* current E-bit error count */
@@ -552,14 +600,14 @@ struct dahdi_spaninfo {
 	int	linecompat;	/* signaling modes possible on this span */
 	char	spantype[6];	/* type of span in text form */
 };
-
-#define DAHDI_SPANSTAT			_IOWR(DAHDI_CODE, 10, struct dahdi_spaninfo)
+#define DAHDI_SPANSTAT	   _IOWR(DAHDI_CODE, 10, struct dahdi_spaninfo)
+#define DAHDI_SPANSTAT_V1  _IOWR(DAHDI_CODE, 10, struct dahdi_spaninfo_v1)
 
 /*
  * Set Maintenance Mode
  */
 struct dahdi_maintinfo {
-	int	spanno;		/* span number 1-2 */
+	int	spanno;		/* span number */
 	int	command;	/* command */
 };
 

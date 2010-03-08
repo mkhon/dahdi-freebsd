@@ -47,6 +47,8 @@ ifeq (yes,$(HAS_KSRC))
   HOTPLUG_FIRMWARE:=$(shell if grep -q '^CONFIG_FW_LOADER=[ym]' $(KCONFIG); then echo "yes"; else echo "no"; fi)
 endif
 
+UDEV_DIR:=/etc/udev/rules.d
+
 MODULE_ALIASES:=wcfxs wctdm8xxp wct2xxp
 
 INST_HEADERS:=kernel.h user.h fasthdlc.h wctdm_user.h dahdi_config.h
@@ -54,10 +56,6 @@ INST_HEADERS:=kernel.h user.h fasthdlc.h wctdm_user.h dahdi_config.h
 DAHDI_BUILD_ALL:=m
 
 KMAKE=$(MAKE) -C $(KSRC) SUBDIRS=$(PWD)/drivers/dahdi DAHDI_INCLUDE=$(PWD)/include DAHDI_MODULES_EXTRA="$(DAHDI_MODULES_EXTRA)" HOTPLUG_FIRMWARE=$(HOTPLUG_FIRMWARE)
-
-ifneq (,$(wildcard $(DESTDIR)/etc/udev/rules.d))
-  DYNFS:=yes
-endif
 
 ROOT_PREFIX:=
 
@@ -139,40 +137,12 @@ uninstall-include:
 	-rmdir $(DESTDIR)/usr/include/dahdi
 
 install-devices:
-ifndef DYNFS
-	mkdir -p $(DESTDIR)/dev/dahdi
-	rm -f $(DESTDIR)/dev/dahdi/ctl
-	rm -f $(DESTDIR)/dev/dahdi/channel
-	rm -f $(DESTDIR)/dev/dahdi/pseudo
-	rm -f $(DESTDIR)/dev/dahdi/timer
-	rm -f $(DESTDIR)/dev/dahdi/transcode
-	rm -f $(DESTDIR)/dev/dahdi/253
-	rm -f $(DESTDIR)/dev/dahdi/252
-	rm -f $(DESTDIR)/dev/dahdi/251
-	rm -f $(DESTDIR)/dev/dahdi/250
-	mknod $(DESTDIR)/dev/dahdi/ctl c 196 0
-	mknod $(DESTDIR)/dev/dahdi/transcode c 196 250
-	mknod $(DESTDIR)/dev/dahdi/timer c 196 253
-	mknod $(DESTDIR)/dev/dahdi/channel c 196 254
-	mknod $(DESTDIR)/dev/dahdi/pseudo c 196 255
-	N=1; \
-	while [ $$N -lt 250 ]; do \
-		rm -f $(DESTDIR)/dev/dahdi/$$N; \
-		mknod $(DESTDIR)/dev/dahdi/$$N c 196 $$N; \
-		N=$$[$$N+1]; \
-	done
-else # DYNFS
-	install -d $(DESTDIR)/etc/udev/rules.d
-	build_tools/genudevrules > $(DESTDIR)/etc/udev/rules.d/dahdi.rules
-	install -m 644 drivers/dahdi/xpp/xpp.rules $(DESTDIR)/etc/udev/rules.d/
-endif
+	install -d $(DESTDIR)$(UDEV_DIR)
+	build_tools/genudevrules > $(DESTDIR)$(UDEV_DIR)/dahdi.rules
+	install -m 644 drivers/dahdi/xpp/xpp.rules $(DESTDIR)$(UDEV_DIR)/
 
 uninstall-devices:
-ifndef DYNFS
-	-rm -rf $(DESTDIR)/dev/dahdi
-else # DYNFS
-	rm -f $(DESTDIR)/etc/udev/rules.d/dahdi.rules
-endif
+	rm -f $(DESTDIR)$(UDEV_DIR)/dahdi.rules
 
 install-modules: modules
 ifndef DESTDIR

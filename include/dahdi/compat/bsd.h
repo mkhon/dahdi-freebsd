@@ -167,15 +167,17 @@ strncat(char * __restrict dst, const char * __restrict src, size_t n);
 #define KERN_INFO	"<6>"	/* informational			*/
 #define KERN_DEBUG	"<7>"	/* debug-level messages			*/
 
-#define dev_err(dev, fmt, args...)	device_printf(dev, fmt, ##args)
-#define dev_warn(dev, fmt, args...)	device_printf(dev, fmt, ##args)
-#define dev_notice(dev, fmt, args...)	device_printf(dev, fmt, ##args)
-#define dev_info(dev, fmt, args...)	device_printf(dev, fmt, ##args)
-#define dev_dbg(dev, fmt, args...)	device_printf(dev, fmt, ##args)
+#define dev_err(dev, fmt, args...)	device_printf(*(dev), fmt, ##args)
+#define dev_warn(dev, fmt, args...)	device_printf(*(dev), fmt, ##args)
+#define dev_notice(dev, fmt, args...)	device_printf(*(dev), fmt, ##args)
+#define dev_info(dev, fmt, args...)	device_printf(*(dev), fmt, ##args)
+#define dev_dbg(dev, fmt, args...)	device_printf(*(dev), fmt, ##args)
 
 #define pr_info(fmt, args...)		printf(fmt, ##args)
 
 #define printk(fmt, args...)		printf(fmt, ##args)
+
+int printk_ratelimit(void);
 
 #define GFP_KERNEL	0
 #define GFP_ATOMIC	0
@@ -184,6 +186,7 @@ MALLOC_DECLARE(M_DAHDI);
 
 #define kmalloc(size, flags)	malloc((size), M_DAHDI, M_NOWAIT)
 #define kcalloc(n, size, flags)	malloc((n) * (size), M_DAHDI, M_NOWAIT | M_ZERO)
+#define kzalloc(a, b)		kcalloc(1, (a), (b))
 #define kfree(p)		free(p, M_DAHDI)
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
@@ -219,8 +222,14 @@ static inline unsigned long _jiffies(void)
 #define jiffies			ticks
 #endif
 #define HZ			hz
+
 #define udelay(usec)		DELAY(usec)
 #define mdelay(msec)		DELAY((msec) * 1000)
+#if defined(msleep)
+#undef msleep
+#endif
+#define msleep(msec)		mdelay(msec)
+
 #define time_after(a, b)	((a) > (b))
 #define time_after_eq(a, b)	((a) >= (b))
 
@@ -239,5 +248,13 @@ struct pci_device_id {
 	uint32_t class, class_mask;	/* (class,subclass,prog-if) triplet */
 	unsigned long driver_data;	/* Data private to the driver */
 };
+
+struct pci_dev {
+	device_t dev;
+};
+
+#define dahdi_pci_get_bus(pci_dev)	pci_get_bus((pci_dev)->dev)
+#define dahdi_pci_get_slot(pci_dev)	pci_get_slot((pci_dev)->dev)
+#define dahdi_pci_get_irq(pci_dev)	pci_get_irq((pci_dev)->dev)
 
 #endif /* _DAHDI_COMPAT_BSD_H_ */

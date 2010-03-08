@@ -1,7 +1,7 @@
 /*
  * DAHDI Telephony Interface to VPMADT032 Firmware Loader
  *
- * Copyright (C) 2008-2009 Digium, Inc. All rights reserved.
+ * Copyright (C) 2008-2010 Digium, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -75,19 +75,23 @@ static void init_private_context(struct private_context *ctx)
 	init_completion(&ctx->done);
 }
 
-static void handle_receive(struct voicebus *vb, void *vbb)
+static void handle_receive(struct voicebus *vb, struct list_head *buffers)
 {
 	struct private_context *ctx = pci_get_drvdata(vb->pdev);
-	__vpmadt032_receive(ctx->pvt, vbb);
-	if (__vpmadt032_done(ctx->pvt))
-		complete(&ctx->done);
+	struct vbb *vbb;
+	list_for_each_entry(vbb, buffers, entry) {
+		__vpmadt032_receive(ctx->pvt, vbb->data);
+		if (__vpmadt032_done(ctx->pvt))
+			complete(&ctx->done);
+	}
 }
 
-static void handle_transmit(struct voicebus *vb, void *vbb)
+static void handle_transmit(struct voicebus *vb, struct list_head *buffers)
 {
+	struct vbb *vbb;
 	struct private_context *ctx = pci_get_drvdata(vb->pdev);
-	__vpmadt032_transmit(ctx->pvt, vbb);
-	voicebus_transmit(ctx->vb, vbb);
+	list_for_each_entry(vbb, buffers, entry)
+		__vpmadt032_transmit(ctx->pvt, vbb->data);
 }
 
 static const struct voicebus_operations loader_operations = {
@@ -101,28 +105,34 @@ static int vpmadt032_load_firmware(struct voicebus *vb)
 	struct private_context *ctx;
 	const struct voicebus_operations *old;
 	void *old_drvdata;
+	int id;
 	might_sleep();
 	ctx = kzalloc(sizeof(struct private_context), GFP_KERNEL);
 	if (!ctx)
 		return -ENOMEM;
 	init_private_context(ctx);
 	ctx->vb = vb;
-	ret = __vpmadt032_start_load(
-			0, vb->pdev->vendor << 16 | vb->pdev->device,
-			&ctx->pvt);
+
+	if (0x8007 == vb->pdev->device || 0x8008 == vb->pdev->device)
+		id = vb->pdev->vendor << 16 | 0x2400;
+	else
+		id = vb->pdev->vendor << 16 | vb->pdev->device;
+
+	ret = __vpmadt032_start_load(0, id, &ctx->pvt);
 	if (ret)
 		goto error_exit;
 	old_drvdata = pci_get_drvdata(vb->pdev);
 	pci_set_drvdata(vb->pdev, ctx);
 	old = vb->ops;
 	vb->ops = &loader_operations;
-	wait_for_completion(&ctx->done);
+	if (!wait_for_completion_timeout(&ctx->done, HZ*20))
+		ret = -EIO;
 	vb->ops = old;
 	pci_set_drvdata(vb->pdev, old_drvdata);
 	__vpmadt032_cleanup(ctx->pvt);
 error_exit:
 	kfree(ctx);
-	return 0;
+	return ret;
 }
 
 static struct vpmadt_loader loader = {

@@ -435,9 +435,10 @@ struct b4xxp {
 	char *variety;
 	int chiprev;				/* revision of HFC-4S */
 
+	struct pci_dev *pdev;			/* Pointer to PCI device */
 #if defined(__FreeBSD__)
-	device_t dev;				/* device */
-	device_t pdev;				/* device */
+	struct pci_dev _dev;
+	device_t *dev;				/* device */
 
 	struct resource *io_res;		/* resource for I/O range */
 	int io_rid;
@@ -449,7 +450,6 @@ struct b4xxp {
 	int irq_rid;
 	void *irq_handle;
 #else
-	struct pci_dev *pdev;			/* Pointer to PCI device */
 	struct device *dev;			/* kernel dev struct (from pdev->dev) */
 	void __iomem *addr;			/* I/O address (memory mapped) */
 	void __iomem *ioaddr;			/* I/O address (index based) */

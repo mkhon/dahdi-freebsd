@@ -134,20 +134,6 @@ del_timer(struct timer_list *t)
 	del_timer_sync(t);
 }
 
-int
-request_module(const char *fmt, ...)
-{
-	va_list ap;
-	char modname[128];
-	int fileid;
-
-	va_start(ap, fmt);
-	vsnprintf(modname, sizeof(modname), fmt, ap);
-	va_end(ap);
-
-	return kern_kldload(curthread, modname, &fileid);
-}
-
 void
 rlprintf(int pps, const char *fmt, ...)
 {
@@ -198,4 +184,27 @@ strncat(char * __restrict dst, const char * __restrict src, size_t n)
 		*d = 0;
 	}
 	return (dst);
+}
+
+int
+printk_ratelimit(void)
+{
+	static struct timeval last_printk;
+	static int count;
+
+	return ppsratecheck(&last_printk, &count, 10);
+}
+
+int
+request_module(const char *fmt, ...)
+{
+	va_list ap;
+	char modname[128];
+	int fileid;
+
+	va_start(ap, fmt);
+	vsnprintf(modname, sizeof(modname), fmt, ap);
+	va_end(ap);
+
+	return kern_kldload(curthread, modname, &fileid);
 }

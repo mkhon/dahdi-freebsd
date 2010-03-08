@@ -8,7 +8,7 @@
  *            Matthew Fredrickson <creslin@digium.com>
  *            William Meadows <wmeadows@digium.com>
  *
- * Copyright (C) 2007-2009, Digium, Inc.
+ * Copyright (C) 2007-2010, Digium, Inc.
  *
  * All rights reserved.
  *
@@ -77,8 +77,6 @@
 #define TYPE_T1	1
 #define TYPE_E1	2
 
-#define module_printk(fmt, args...) printk(KERN_INFO "%s: " fmt, te12xp_driver.name, ## args)
-#define debug_printk(level, fmt, args...) if (debug >= level) printk(KERN_DEBUG "%s (%s): " fmt, te12xp_driver.name, __FUNCTION__, ## args)
 extern spinlock_t ifacelock;
 
 struct command {
@@ -141,5 +139,12 @@ struct t1 {
 
 #define t1_info(t1, format, arg...)         \
 	dev_info(&t1->vb.pdev->dev , format , ## arg)
+
+/* Maintenance Mode Registers */
+#define LIM0		0x36
+#define LIM0_LL		(1<<1)
+#define LIM1		0x37
+#define LIM1_RL 	(1<<1)
+#define LIM1_JATT	(1<<2)
 
 #endif
