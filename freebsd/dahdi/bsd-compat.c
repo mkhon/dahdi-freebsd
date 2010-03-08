@@ -135,6 +135,65 @@ del_timer(struct timer_list *t)
 }
 
 void
+init_completion(struct completion *c)
+{
+	cv_init(&c->cv, "DAHDI completion cv");
+	mtx_init(&c->lock, "DAHDI completion lock", "condvar", MTX_DEF);
+}
+
+void
+destroy_completion(struct completion *c)
+{
+	cv_destroy(&c->cv);
+	mtx_destroy(&c->lock);
+}
+
+int
+wait_for_completion_timeout(struct completion *c, unsigned long timeout)
+{
+	int res;
+
+	mtx_lock(&c->lock);
+	res = cv_timedwait(&c->cv, &c->lock, timeout);
+	mtx_unlock(&c->lock);
+	if (res == 0)
+		return 1;
+
+	/* Signal timeout */
+	return 0;
+}
+
+void
+complete(struct completion *c)
+{
+	cv_signal(&c->cv);
+}
+
+void
+_sema_init(struct semaphore *s, int value)
+{
+	sema_init(&s->sema, value, "DAHDI semaphore");
+}
+
+void
+_sema_destroy(struct semaphore *s)
+{
+	sema_destroy(&s->sema);
+}
+
+void
+down_interruptible(struct semaphore *s)
+{
+	sema_wait(&s->sema);
+}
+
+void
+up(struct semaphore *s)
+{
+	sema_post(&s->sema);
+}
+
+void
 rlprintf(int pps, const char *fmt, ...)
 {
 	va_list ap;

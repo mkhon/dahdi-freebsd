@@ -2,9 +2,12 @@
 #define _DAHDI_COMPAT_BSD_H_
 
 #include <sys/callout.h>
+#include <sys/condvar.h>
+#include <sys/endian.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/mutex.h>
+#include <sys/sema.h>
 #include <sys/sx.h>
 #include <sys/taskqueue.h>
 #include <machine/atomic.h>
@@ -15,6 +18,9 @@ struct module;
 
 #define LINUX_VERSION_CODE	-1
 #define KERNEL_VERSION(x, y, z)	0
+
+#define cpu_to_le32(x)	htole32(x)
+#define le32_to_cpu(x)	le32toh(x)
 
 #define copy_from_user(to, from, n)	(bcopy((from), (to), (n)), 0)
 #define copy_to_user(to, from, n)	(bcopy((from), (to), (n)), 0)
@@ -137,6 +143,26 @@ void add_timer(struct timer_list *t);
 void del_timer(struct timer_list *t);
 void del_timer_sync(struct timer_list *t);
 
+struct completion {
+	struct cv cv;
+	struct mtx lock;
+};
+
+#define INIT_COMPLETION(c)
+void init_completion(struct completion *c);
+void destroy_completion(struct completion *c);
+int wait_for_completion_timeout(struct completion *c, unsigned long timeout);
+void complete(struct completion *c);
+
+struct semaphore {
+	struct sema sema;
+};
+
+void _sema_init(struct semaphore *s, int value);
+void _sema_destroy(struct semaphore *s);
+void down_interruptible(struct semaphore *s);
+void up(struct semaphore *s);
+
 void rlprintf(int pps, const char *fmt, ...)
 	__printflike(2, 3);
 
@@ -225,6 +251,7 @@ static inline unsigned long _jiffies(void)
 
 #define udelay(usec)		DELAY(usec)
 #define mdelay(msec)		DELAY((msec) * 1000)
+
 #if defined(msleep)
 #undef msleep
 #endif
@@ -232,6 +259,7 @@ static inline unsigned long _jiffies(void)
 
 #define time_after(a, b)	((a) > (b))
 #define time_after_eq(a, b)	((a) >= (b))
+#define time_before(a, b)	((a) < (b))
 
 #define try_module_get(m)	(1)
 #define module_put(m)		((void) (m))
