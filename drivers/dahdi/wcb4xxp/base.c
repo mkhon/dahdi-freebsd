@@ -2980,14 +2980,12 @@ b4xxp_release_resources(struct b4xxp *b4)
 
 	/* release I/O range */
 	if (b4->io_res != NULL) {
-		bus_deactivate_resource(b4->pdev->dev, SYS_RES_IOPORT, b4->io_rid, b4->mem_res);
 		bus_release_resource(b4->pdev->dev, SYS_RES_IOPORT, b4->io_rid, b4->io_res);
 		b4->io_res = NULL;
 	}
 
 	/* release memory window */
 	if (b4->mem_res != NULL) {
-		bus_deactivate_resource(b4->pdev->dev, SYS_RES_MEMORY, b4->mem_rid, b4->mem_res);
 		bus_release_resource(b4->pdev->dev, SYS_RES_MEMORY, b4->mem_rid, b4->mem_res);
 		b4->mem_res = NULL;
 	}

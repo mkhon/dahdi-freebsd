@@ -4539,6 +4539,7 @@ t4_unregister(struct t4 *wc)
 		destroy_workqueue(wc->workq);
 	}
 #endif			
+	spin_lock_destroy(&wc->reglock);
 }
 
 
@@ -4591,7 +4592,6 @@ t4_release_resources(struct t4 *wc)
 
 	/* release memory window */
 	if (wc->mem_res != NULL) {
-		bus_deactivate_resource(wc->dev->dev, SYS_RES_MEMORY, wc->mem_rid, wc->mem_res);
 		bus_release_resource(wc->dev->dev, SYS_RES_MEMORY, wc->mem_rid, wc->mem_res);
 		wc->mem_res = NULL;
 	}
