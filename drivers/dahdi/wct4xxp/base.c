@@ -4684,7 +4684,7 @@ t4_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr
 
 	res = bus_dma_tag_create(NULL, 8, 0,
 	    BUS_SPACE_MAXADDR_32BIT, BUS_SPACE_MAXADDR, NULL, NULL,
-	    size, 1, size, BUS_DMA_ALLOCNOW , NULL, NULL, ptag);
+	    size, 1, size, BUS_DMA_ALLOCNOW, NULL, NULL, ptag);
 	if (res)
 		return res;
 
