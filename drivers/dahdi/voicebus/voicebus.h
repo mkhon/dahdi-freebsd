@@ -29,7 +29,11 @@
 #ifndef __VOICEBUS_H__
 #define __VOICEBUS_H__
 
+#if defined(__FreeBSD__)
+#include <machine/bus.h>
+#else
 #include <linux/interrupt.h>
+#endif /* __FreeBSD__ */
 
 
 #ifdef VOICEBUS_NET_DEBUG
@@ -63,6 +67,10 @@ struct voicebus;
 struct vbb {
 	u8 data[VOICEBUS_SFRAME_SIZE];
 	struct list_head entry;
+	__le32 paddr;
+#if defined(__FreeBSD__)
+	bus_dmamap_t dma_map;
+#endif
 };
 
 struct voicebus_operations {
@@ -79,7 +87,13 @@ struct voicebus_descriptor_list {
 	unsigned int 	head;
 	unsigned int 	tail;
 	void  		*pending[DRING_SIZE];
+#if defined(__FreeBSD__)
+	bus_dma_tag_t	dma_tag;
+	bus_dmamap_t	dma_map;
+	uint32_t	desc_dma;
+#else
 	dma_addr_t	desc_dma;
+#endif
 	atomic_t 	count;
 	unsigned int	padding;
 };
@@ -99,13 +113,31 @@ struct voicebus_descriptor_list {
  */
 struct voicebus {
 	struct pci_dev		*pdev;
+#if defined(__FreeBSD__)
+	struct pci_dev		_dev;
+
+	struct resource *	irq_res;	/* resource for irq */
+	int			irq_rid;
+	void *			irq_handle;
+
+	struct resource *	mem_res;	/* resource for memory I/O */
+	int			mem_rid;
+#else
+	void __iomem 		*iobase;
+#endif
 	spinlock_t		lock;
 	struct voicebus_descriptor_list rxd;
 	struct voicebus_descriptor_list txd;
 	u8			*idle_vbb;
+#if defined(__FreeBSD__)
+	bus_dma_tag_t		vbb_dma_tag;
+	bus_dma_tag_t		idle_vbb_dma_tag;
+	bus_dmamap_t		idle_vbb_dma_map;
+	uint32_t		idle_vbb_dma_addr;
+#else
 	dma_addr_t		idle_vbb_dma_addr;
+#endif
 	const int		*debug;
-	void __iomem 		*iobase;
 	struct tasklet_struct 	tasklet;
 
 #if defined(CONFIG_VOICEBUS_TIMER)
@@ -132,11 +164,13 @@ struct voicebus {
 #endif
 };
 
+#if !defined(__FreeBSD__)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 extern kmem_cache_t *voicebus_vbb_cache;
 #else
 extern struct kmem_cache *voicebus_vbb_cache;
 #endif
+#endif /* !__FreeBSD__ */
 
 int __voicebus_init(struct voicebus *vb, const char *board_name,
 		    int normal_mode);
@@ -146,6 +180,8 @@ int voicebus_stop(struct voicebus *vb);
 int voicebus_transmit(struct voicebus *vb, struct vbb *vbb);
 int voicebus_set_minlatency(struct voicebus *vb, unsigned int milliseconds);
 int voicebus_current_latency(struct voicebus *vb);
+struct vbb *voicebus_alloc(struct voicebus *vb, int malloc_flags);
+void voicebus_free(struct voicebus *vb, struct vbb *);
 
 static inline int voicebus_init(struct voicebus *vb, const char *board_name)
 {

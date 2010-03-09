@@ -24,9 +24,11 @@
  * this program for more details.
  */
 
+#if !defined(__FreeBSD__)
 #include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
+#endif /* !__FreeBSD__ */
 
 #include <dahdi/kernel.h>
 

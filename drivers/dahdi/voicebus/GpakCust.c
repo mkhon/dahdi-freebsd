@@ -30,6 +30,10 @@
  * this program for more details.
  */
 
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/bus.h>
+#else /* !__FreeBSD__ */
 #include <linux/version.h>
 #include <linux/types.h>
 #include <linux/delay.h>
@@ -39,6 +43,7 @@
 #else
 #include <asm/semaphore.h>
 #endif
+#endif /* !__FreeBSD__ */
 
 #include <dahdi/kernel.h>
 #include <dahdi/user.h>
@@ -82,12 +87,17 @@ static struct vpmadt032_cmd *vpmadt032_get_free_cmd(struct vpmadt032 *vpm)
 		if (unlikely(!cmd))
 			return NULL;
 		memset(cmd, 0, sizeof(*cmd));
+#if defined(__FreeBSD__)
+		init_completion(&cmd->complete);
+#endif
 	} else {
 		cmd = list_entry(vpm->free_cmds.next, struct vpmadt032_cmd, node);
 		list_del_init(&cmd->node);
 		spin_unlock_irqrestore(&vpm->list_lock, flags);
 	}
+#if !defined(__FreeBSD__)
 	init_completion(&cmd->complete);
+#endif
 	return cmd;
 }
 
@@ -390,7 +400,7 @@ static void update_channel_config(struct vpmadt032 *vpm, unsigned int channel,
  * the hardware can take some time while messages are sent to the VPMADT032
  * module and the driver waits for the responses.
  */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+#if !defined(__FreeBSD__) && LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 static void vpmadt032_bh(void *data)
 {
 	struct vpmadt032 *vpm = data;
@@ -535,7 +545,7 @@ vpmadt032_alloc(struct vpmadt032_options *options, const char *board_name)
 	INIT_LIST_HEAD(&vpm->free_cmds);
 	INIT_LIST_HEAD(&vpm->pending_cmds);
 	INIT_LIST_HEAD(&vpm->active_cmds);
-	sema_init(&vpm->sem, 1);
+	_sema_init(&vpm->sem, 1);
 	vpm->curpage = 0x80;
 	vpm->dspid = -1;
 
@@ -660,7 +670,7 @@ vpmadt032_init(struct vpmadt032 *vpm, struct voicebus *vb)
 		goto failed_exit;
 	}
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20)
+#if !defined(__FreeBSD__) && LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20)
 	INIT_WORK(&vpm->work, vpmadt032_bh, vpm);
 #else
 	INIT_WORK(&vpm->work, vpmadt032_bh);
@@ -703,7 +713,7 @@ void vpmadt032_free(struct vpmadt032 *vpm)
 	unsigned long flags;
 	struct vpmadt032_cmd *cmd;
 	struct change_order *order;
-	LIST_HEAD(local_list);
+	_LIST_HEAD(local_list);
 
 	BUG_ON(!vpm);
 	BUG_ON(!vpm->wq);
@@ -720,6 +730,7 @@ void vpmadt032_free(struct vpmadt032 *vpm)
 	while (!list_empty(&local_list)) {
 		cmd = list_entry(local_list.next, struct vpmadt032_cmd, node);
 		list_del(&cmd->node);
+		destroy_completion(&cmd->complete);
 		kfree(cmd);
 	}
 
@@ -737,6 +748,9 @@ void vpmadt032_free(struct vpmadt032 *vpm)
 	write_lock(&ifacelock);
 	ifaces[vpm->dspid] = NULL;
 	write_unlock(&ifacelock);
+	_sema_destroy(&vpm->sem);
+	spin_lock_destroy(&vpm->change_list_lock);
+	spin_lock_destroy(&vpm->list_lock);
 	kfree(vpm);
 }
 EXPORT_SYMBOL(vpmadt032_free);
