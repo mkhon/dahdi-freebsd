@@ -43,6 +43,7 @@
 #include <sys/selinfo.h>
 #include <sys/taskqueue.h>
 #include <sys/uio.h>
+#include <sys/libkern.h>
 
 #include <dahdi/compat/types.h>
 #include <dahdi/compat/list.h>

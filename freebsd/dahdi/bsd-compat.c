@@ -36,10 +36,16 @@
 
 #include <dahdi/compat/bsd.h>
 
+/*
+ * Tasklet API
+ */
 static void
 tasklet_run(void *context, int pending)
 {
 	struct tasklet_struct *t = (struct tasklet_struct *) context;
+
+	if (atomic_read(&t->disable_count))
+		return;
 	t->func(t->data);
 }
 
@@ -49,6 +55,7 @@ tasklet_init(struct tasklet_struct *t, void (*func)(unsigned long), unsigned lon
 	TASK_INIT(&t->task, 0, tasklet_run, t);
 	t->func = func;
 	t->data = data;
+	t->disable_count = 0;
 }
 
 void
@@ -60,7 +67,13 @@ tasklet_hi_schedule(struct tasklet_struct *t)
 void
 tasklet_disable(struct tasklet_struct *t)
 {
-	// nothing to do
+	atomic_inc(&t->disable_count);
+}
+
+void
+tasklet_enable(struct tasklet_struct *t)
+{
+	atomic_dec(&t->disable_count);
 }
 
 void
@@ -69,6 +82,9 @@ tasklet_kill(struct tasklet_struct *t)
 	taskqueue_drain(taskqueue_fast, &t->task);
 }
 
+/*
+ * Timer API
+ */
 static void
 run_timer(void *arg)
 {
@@ -134,6 +150,9 @@ del_timer(struct timer_list *t)
 	del_timer_sync(t);
 }
 
+/*
+ * Completion API
+ */
 void
 init_completion(struct completion *c)
 {
@@ -169,6 +188,9 @@ complete(struct completion *c)
 	cv_signal(&c->cv);
 }
 
+/*
+ * Semaphore API
+ */
 void
 _sema_init(struct semaphore *s, int value)
 {
@@ -181,10 +203,11 @@ _sema_destroy(struct semaphore *s)
 	sema_destroy(&s->sema);
 }
 
-void
+int
 down_interruptible(struct semaphore *s)
 {
 	sema_wait(&s->sema);
+	return 0;
 }
 
 void
@@ -193,6 +216,69 @@ up(struct semaphore *s)
 	sema_post(&s->sema);
 }
 
+/*
+ * Workqueue API
+ */
+void
+work_run(void *context, int pending)
+{
+	struct work_struct *work = (struct work_struct *) context;
+	work->func(work);
+}
+
+void
+schedule_work(struct work_struct *work)
+{
+	taskqueue_enqueue_fast(taskqueue_fast, &work->task);
+}
+
+void
+cancel_work_sync(struct work_struct *work)
+{
+	taskqueue_drain(taskqueue_fast, &work->task);
+}
+
+struct workqueue_struct *
+create_singlethread_workqueue(const char *name)
+{
+	int res;
+	struct workqueue_struct *wq;
+
+	wq = malloc(sizeof(*wq), M_DAHDI, M_NOWAIT);
+	if (wq == NULL)
+		return NULL;
+
+	wq->tq = taskqueue_create_fast(name, M_NOWAIT, taskqueue_thread_enqueue, &wq->tq);
+	if (wq->tq == NULL) {
+		free(wq, M_DAHDI);
+		return NULL;
+	}
+
+	res = taskqueue_start_threads(&wq->tq, 1, PI_NET, "%s taskq", name);
+	if (res) {
+		destroy_workqueue(wq);
+		return NULL;
+	}
+
+	return wq;
+}
+
+void
+destroy_workqueue(struct workqueue_struct *wq)
+{
+	taskqueue_free(wq->tq);
+	free(wq, M_DAHDI);
+}
+
+void
+queue_work(struct workqueue_struct *wq, struct work_struct *work)
+{
+	taskqueue_enqueue(wq->tq, &work->task);
+}
+
+/*
+ * Logging API
+ */
 void
 rlprintf(int pps, const char *fmt, ...)
 {
@@ -222,6 +308,36 @@ device_rlprintf(int pps, device_t dev, const char *fmt, ...)
 	}
 }
 
+int
+printk_ratelimit(void)
+{
+	static struct timeval last_printk;
+	static int count;
+
+	return ppsratecheck(&last_printk, &count, 10);
+}
+
+/*
+ * Kernel module API
+ */
+int
+request_module(const char *fmt, ...)
+{
+	va_list ap;
+	char modname[128];
+	int fileid;
+
+	va_start(ap, fmt);
+	vsnprintf(modname, sizeof(modname), fmt, ap);
+	va_end(ap);
+
+	return kern_kldload(curthread, modname, &fileid);
+}
+
+/*
+ * Misc API
+ */
+
 /*
  * Concatenate src on the end of dst.  At most strlen(dst)+n+1 bytes
  * are written at dst (at most n+1 bytes being appended).  Return dst.
@@ -243,27 +359,4 @@ strncat(char * __restrict dst, const char * __restrict src, size_t n)
 		*d = 0;
 	}
 	return (dst);
-}
-
-int
-printk_ratelimit(void)
-{
-	static struct timeval last_printk;
-	static int count;
-
-	return ppsratecheck(&last_printk, &count, 10);
-}
-
-int
-request_module(const char *fmt, ...)
-{
-	va_list ap;
-	char modname[128];
-	int fileid;
-
-	va_start(ap, fmt);
-	vsnprintf(modname, sizeof(modname), fmt, ap);
-	va_end(ap);
-
-	return kern_kldload(curthread, modname, &fileid);
 }
