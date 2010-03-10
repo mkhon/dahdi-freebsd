@@ -13,8 +13,10 @@ SUBDIR=\
 	dahdi_echocan_sec2\
 	dahdi_fw_oct6114_064\
 	dahdi_fw_oct6114_128\
+	dahdi_voicebus\
 	ng_dahdi_netdev\
 	wcb4xxp\
-	wct4xxp
+	wct4xxp\
+	wctdm24xxp
 
 .include <bsd.subdir.mk>
