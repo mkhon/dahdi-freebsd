@@ -2556,7 +2556,9 @@ static void t4_receiveprep(struct t4 *wc, int irq)
 		if (debug & DEBUG_MAIN)
 			printk(KERN_DEBUG "TE%dXXP: Double/missed interrupt detected\n", wc->numspans);
 	}
+#if defined(__FreeBSD__)
 	bus_dmamap_sync(wc->read_dma_tag, wc->read_dma_map, BUS_DMASYNC_POSTREAD);
+#endif
 	for (x=0;x<DAHDI_CHUNKSIZE;x++) {
 		for (z=0;z<24;z++) {
 			/* All T1/E1 channels */
@@ -2668,11 +2670,15 @@ static void workq_handlespan(void *data)
 {
 	struct t4_span *ts = data;
 	struct t4 *wc = ts->owner;
-	
+
+#if defined(__FreeBSD__)
 	bus_dmamap_sync(wc->read_dma_tag, wc->read_dma_map, BUS_DMASYNC_POSTREAD);
+#endif
 	__receive_span(ts);
 	__transmit_span(ts);
+#if defined(__FreeBSD__)
 	bus_dmamap_sync(wc->write_dma_tag, wc->write_dma_map, BUS_DMASYNC_PREWRITE);
+#endif
 	atomic_dec(&wc->worklist);
 	if (!atomic_read(&wc->worklist))
 		t4_pci_out(wc, WC_INTR, 0);
@@ -2683,10 +2689,14 @@ static void t4_prep_gen2(struct t4 *wc)
 	int x;
 	for (x=0;x<wc->numspans;x++) {
 		if (wc->tspans[x]->span.flags & DAHDI_FLAG_RUNNING) {
+#if defined(__FreeBSD__)
 			bus_dmamap_sync(wc->read_dma_tag, wc->read_dma_map, BUS_DMASYNC_POSTREAD);
+#endif
 			__receive_span(wc->tspans[x]);
 			__transmit_span(wc->tspans[x]);
+#if defined(__FreeBSD__)
 			bus_dmamap_sync(wc->write_dma_tag, wc->write_dma_map, BUS_DMASYNC_PREWRITE);
+#endif
 		}
 	}
 }
@@ -2742,7 +2752,9 @@ static void t4_transmitprep(struct t4 *wc, int irq)
 		/* Advance pointer by 4 TDM frame lengths */
 		writechunk += 32;
 	}
+#if defined(__FreeBSD__)
 	bus_dmamap_sync(wc->write_dma_tag, wc->write_dma_map, BUS_DMASYNC_PREWRITE);
+#endif
 }
 #endif
 
