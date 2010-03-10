@@ -370,6 +370,9 @@ vb_initialize_descriptors(struct voicebus *vb, struct voicebus_descriptor_list *
 		d->des1 = des1;
 	}
 	d->des1 |= cpu_to_le32(END_OF_RING);
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_PREWRITE);
+#endif
 	atomic_set(&dl->count, 0);
 	return 0;
 }
@@ -440,6 +443,9 @@ vb_initialize_tx_descriptors(struct voicebus *vb)
 		d->buffer1 = 0;
 	}
 	d->des1 |= cpu_to_le32(END_OF_RING);
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_PREWRITE);
+#endif
 	atomic_set(&dl->count, 0);
 	return 0;
 }
@@ -559,6 +565,9 @@ vb_cleanup_tx_descriptors(struct voicebus *vb)
 	unsigned long flags;
 
 	spin_lock_irqsave(&vb->lock, flags);
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_POSTREAD);
+#endif
 	for (i = 0; i < DRING_SIZE; ++i) {
 		d = vb_descriptor(dl, i);
 		if (d->buffer1 && (d->buffer1 != vb->idle_vbb_dma_addr)) {
@@ -577,6 +586,9 @@ vb_cleanup_tx_descriptors(struct voicebus *vb)
 			SET_OWNED(d);
 		}
 	}
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_PREWRITE);
+#endif
 
 	dl->head = dl->tail = 0;
 	spin_unlock_irqrestore(&vb->lock, flags);
@@ -592,6 +604,9 @@ vb_cleanup_rx_descriptors(struct voicebus *vb)
 	unsigned long flags;
 
 	spin_lock_irqsave(&vb->lock, flags);
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_POSTREAD);
+#endif
 	for (i = 0; i < DRING_SIZE; ++i) {
 		d = vb_descriptor(dl, i);
 		if (d->buffer1) {
@@ -603,6 +618,9 @@ vb_cleanup_rx_descriptors(struct voicebus *vb)
 		}
 		d->des0 &= ~OWN_BIT;
 	}
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_PREWRITE);
+#endif
 	dl->head = 0;
 	dl->tail = 0;
 	atomic_set(&dl->count, 0);
@@ -644,7 +662,7 @@ __vb_setctl(struct voicebus *vb, u32 addr, u32 val)
 {
 #if defined(__FreeBSD__)
 	bus_space_write_4(rman_get_bustag(vb->mem_res), rman_get_bushandle(vb->mem_res),
-	    addr, cpu_to_le32(val));
+	    addr, val);
 #else
 	wmb();
 	writel(val, vb->iobase + addr);
@@ -808,6 +826,9 @@ vb_submit_rxb(struct voicebus *vb, struct vbb *vbb)
 
 	d = vb_descriptor(dl, tail);
 
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_POSTREAD);
+#endif
 	if (unlikely(d->buffer1)) {
 		/* Do not overwrite a buffer that is still in progress. */
 		WARN_ON(1);
@@ -819,6 +840,9 @@ vb_submit_rxb(struct voicebus *vb, struct vbb *vbb)
 	dl->tail = (++tail) & DRING_MASK;
 	d->buffer1 = voicebus_map(vb, vbb, DMA_FROM_DEVICE);
 	SET_OWNED(d); /* That's it until the hardware is done with it. */
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_PREWRITE);
+#endif
 	atomic_inc(&dl->count);
 	return 0;
 }
@@ -834,6 +858,10 @@ int voicebus_transmit(struct voicebus *vb, struct vbb *vbb)
 
 	d = vb_descriptor(dl, dl->tail);
 
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_POSTREAD);
+	bus_dmamap_sync(vb->vbb_dma_tag, vbb->dma_map, BUS_DMASYNC_PREWRITE);
+#endif
 	if (unlikely((d->buffer1 != vb->idle_vbb_dma_addr) && d->buffer1)) {
 		if (printk_ratelimit())
 			dev_warn(&vb->pdev->dev, "Dropping tx buffer buffer\n");
@@ -848,6 +876,9 @@ int voicebus_transmit(struct voicebus *vb, struct vbb *vbb)
 	d->buffer1 = voicebus_map(vb, vbb, DMA_TO_DEVICE);
 	dl->tail = (++(dl->tail)) & DRING_MASK;
 	SET_OWNED(d); /* That's it until the hardware is done with it. */
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_PREWRITE);
+#endif
 	atomic_inc(&dl->count);
 	return 0;
 }
@@ -1014,6 +1045,9 @@ vb_get_completed_txb(struct voicebus *vb)
 
 	d = vb_descriptor(dl, head);
 
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_POSTREAD);
+#endif
 	if (OWNED(d) || !d->buffer1 || (d->buffer1 == vb->idle_vbb_dma_addr))
 		return NULL;
 
@@ -1030,6 +1064,9 @@ vb_get_completed_txb(struct voicebus *vb)
 	dl->head = (++head) & DRING_MASK;
 	atomic_dec(&dl->count);
 	vb_net_capture_vbb(vb, vbb, 1, d->des0, d->container);
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_PREWRITE);
+#endif
 	return vbb;
 }
 
@@ -1043,6 +1080,9 @@ vb_get_completed_rxb(struct voicebus *vb, u32 *des0)
 
 	d = vb_descriptor(dl, head);
 
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_POSTREAD);
+#endif
 	if ((0 == d->buffer1) || OWNED(d))
 		return NULL;
 
@@ -1055,6 +1095,10 @@ vb_get_completed_rxb(struct voicebus *vb, u32 *des0)
 	vb_net_capture_vbb(vb, vbb, 0, d->des0, d->container);
 #	endif
 	*des0 = le32_to_cpu(d->des0);
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_PREWRITE);
+	bus_dmamap_sync(vb->vbb_dma_tag, vbb->dma_map, BUS_DMASYNC_POSTREAD);
+#endif
 	return vbb;
 }
 
@@ -1440,6 +1484,9 @@ static void vb_tasklet(unsigned long data)
 	while ((vbb = vb_get_completed_txb(vb)))
 		list_add_tail(&vbb->entry, &vb->tx_complete);
 
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_POSTREAD);
+#endif
 	if (unlikely(atomic_read(&dl->count) < 2)) {
 		softunderrun = 1;
 		d = vb_descriptor(dl, dl->head);
@@ -1507,6 +1554,10 @@ static void vb_tasklet(unsigned long data)
 	d = vb_descriptor(dl, dl->tail);
 	if (d->buffer1 != vb->idle_vbb_dma_addr)
 		goto tx_error_exit;
+
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_PREWRITE);
+#endif
 
 	/* Now we can send all our buffers together in a group. */
 	list_for_each_entry(vbb, &buffers, entry)
