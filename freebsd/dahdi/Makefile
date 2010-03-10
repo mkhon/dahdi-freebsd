@@ -4,7 +4,7 @@
 
 KMOD=		dahdi
 SRCS=		dahdi-base.c bsd-compat.c version.h
-SRCS+=		device_if.h bus_if.h
+SRCS+=		device_if.h bus_if.h pci_if.h
 CLEANFILES=	version.h
 INCS=		user.h wctdm_user.h compat/types.h
 

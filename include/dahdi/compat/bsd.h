@@ -362,6 +362,8 @@ struct pci_dev {
 #define dahdi_pci_get_slot(pci_dev)	pci_get_slot((pci_dev)->dev)
 #define dahdi_pci_get_irq(pci_dev)	pci_get_irq((pci_dev)->dev)
 
+struct pci_device_id *dahdi_pci_device_id_lookup(device_t dev, struct pci_device_id *tbl);
+
 /*
  * Time API
  */

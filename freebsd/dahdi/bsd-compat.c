@@ -33,6 +33,8 @@
 #include <sys/systm.h>
 #include <sys/taskqueue.h>
 
+#include <dev/pci/pcireg.h>
+#include <dev/pci/pcivar.h>
 #include <machine/stdarg.h>
 
 #include <dahdi/compat/bsd.h>
@@ -369,6 +371,30 @@ void
 release_firmware(const struct firmware *firmware)
 {
 	firmware_put(firmware, FIRMWARE_UNLOAD);
+}
+
+
+/*
+ * PCI device API
+ */
+struct pci_device_id *
+dahdi_pci_device_id_lookup(device_t dev, struct pci_device_id *tbl)
+{
+	struct pci_device_id *id;
+	uint16_t vendor = pci_get_vendor(dev);
+	uint16_t device = pci_get_device(dev);
+	uint16_t subvendor = pci_get_subvendor(dev);
+	uint16_t subdevice = pci_get_subdevice(dev);
+
+	for (id = tbl; id->vendor != 0; id++) {
+		if ((id->vendor == PCI_ANY_ID || id->vendor == vendor) &&
+		    (id->device == PCI_ANY_ID || id->device == device) &&
+		    (id->subvendor == PCI_ANY_ID || id->subvendor == subvendor) &&
+		    (id->subdevice == PCI_ANY_ID || id->subdevice == subdevice))
+			return id;
+	}
+
+	return NULL;
 }
 
 /*
