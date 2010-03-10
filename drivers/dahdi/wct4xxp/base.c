@@ -41,6 +41,8 @@
 
 #define DPRINTF(dev, fmt, args...)      device_rlprintf(20, dev, fmt, ##args)
 
+#define MODULE_PARAM_PREFIX "dahdi.wct4xxp"
+
 static int
 t4_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr);
 
@@ -387,13 +389,13 @@ struct t4 {
 	uint32_t writedma;
 	bus_dma_tag_t   write_dma_tag;
 	bus_dmamap_t    write_dma_map;
-#else
+#else /* !__FreeBSD__ */
 	dma_addr_t 	readdma;
 	dma_addr_t	writedma;
 	unsigned long memaddr;		/* Base address of card */
 	unsigned long memlen;
 	__iomem volatile unsigned int *membase;	/* Base address of card */
-#endif
+#endif /* !__FreeBSD__ */
 
 	/* Add this for our softlockup protector */
 	unsigned int oct_rw_count;
@@ -3470,11 +3472,11 @@ static void t4_increase_latency(struct t4 *wc, int newlatency)
 	uint32_t writedma;
 	bus_dma_tag_t   write_dma_tag;
 	bus_dmamap_t    write_dma_map;
-#else
+#else /* !__FreeBSD__ */
 	volatile unsigned int *oldalloc;
 	dma_addr_t oldaddr;
 	int oldbufs;
-#endif
+#endif /* !__FreeBSD__ */
 
 	spin_lock_irqsave(&wc->reglock, flags);
 
@@ -3525,9 +3527,9 @@ static void t4_increase_latency(struct t4 *wc, int newlatency)
 #if defined(__FreeBSD__)
 	t4_dma_free(&write_dma_tag, &write_dma_map, &writechunk, &writedma);
 	t4_dma_free(&read_dma_tag, &read_dma_map, &readchunk, &readdma);
-#else /* !__FreeBSD__ */
+#else
 	pci_free_consistent(wc->dev, T4_BASE_SIZE * oldbufs * 2, (void *)oldalloc, oldaddr);
-#endif /* !__FreeBSD__ */
+#endif
 
 	printk("Increased latency to %d\n", newlatency);
 
@@ -4618,44 +4620,6 @@ t4_setup_intr(struct t4 *wc, struct devtype *dt)
 	return (0);
 }
 
-static struct pci_device_id *
-t4_pci_device_id_lookup(device_t dev)
-{
-	struct pci_device_id *id;
-	uint16_t vendor = pci_get_vendor(dev);
-	uint16_t device = pci_get_device(dev);
-	uint16_t subvendor = pci_get_subvendor(dev);
-	uint16_t subdevice = pci_get_subdevice(dev);
-
-	for (id = t4_pci_tbl; id->vendor != 0; id++) {
-		if ((id->vendor == PCI_ANY_ID || id->vendor == vendor) &&
-		    (id->device == PCI_ANY_ID || id->device == device) &&
-		    (id->subvendor == PCI_ANY_ID || id->subvendor == subvendor) &&
-		    (id->subdevice == PCI_ANY_ID || id->subdevice == subdevice))
-			return id;
-	}
-
-	return NULL;
-}
-
-static int
-t4_device_probe(device_t dev)
-{
-        struct pci_device_id *id;
-	struct devtype *dt;
-
-	id = t4_pci_device_id_lookup(dev);
-	if (id == NULL)
-		return ENXIO;
-
-	/* found device */
-	device_printf(dev, "vendor=%x device=%x subvendor=%x\n",
-	    id->vendor, id->device, id->subvendor);
-	dt = (struct devtype *) id->driver_data;
-	device_set_desc(dev, dt->desc);
-	return (0);
-}
-
 static void
 t4_dma_map_addr(void *arg, bus_dma_segment_t *segs, int nseg, int error)
 {
@@ -4718,14 +4682,32 @@ t4_dma_free(bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *pp
 }
 
 static int
+t4_device_probe(device_t dev)
+{
+	struct pci_device_id *id;
+	struct devtype *dt;
+
+	id = dahdi_pci_device_id_lookup(dev, t4_pci_tbl);
+	if (id == NULL)
+		return ENXIO;
+
+	/* found device */
+	device_printf(dev, "vendor=%x device=%x subvendor=%x\n",
+	    id->vendor, id->device, id->subvendor);
+	dt = (struct devtype *) id->driver_data;
+	device_set_desc(dev, dt->desc);
+	return (0);
+}
+
+static int
 t4_device_attach(device_t dev)
 {
 	int res;
-        struct pci_device_id *id;
+	struct pci_device_id *id;
 	struct devtype *dt;
 	struct t4 *wc;
 
-	id = t4_pci_device_id_lookup(dev);
+	id = dahdi_pci_device_id_lookup(dev, t4_pci_tbl);
 	if (id == NULL)
 		return ENXIO;
 
@@ -4775,21 +4757,21 @@ t4_device_detach(device_t dev)
 static int
 t4_device_shutdown(device_t dev)
 {
-	DPRINTF(dev, "wct4xxp shutdown\n");
+	DPRINTF(dev, "%s shutdown\n", device_get_name(dev));
 	return (0);
 }
 
 static int
 t4_device_suspend(device_t dev)
 {
-	DPRINTF(dev, "wct4xxp suspend\n");
+	DPRINTF(dev, "%s suspend\n", device_get_name(dev));
 	return (0);
 }
 
 static int
 t4_device_resume(device_t dev)
 {
-	DPRINTF(dev, "wct4xxp resume\n");
+	DPRINTF(dev, "%s resume\n", device_get_name(dev));
 	return (0);
 }
 
@@ -4815,8 +4797,7 @@ DRIVER_MODULE(wct4xxp, pci, t4_pci_driver, t4_devclass, 0, 0);
 MODULE_DEPEND(wct4xxp, pci, 1, 1, 1);
 MODULE_DEPEND(wct4xxp, dahdi, 1, 1, 1);
 MODULE_DEPEND(wct4xxp, firmware, 1, 1, 1);
-
-#else
+#else /* !__FreeBSD__ */
 static int
 t4_setup_intr(struct t4 *wc, struct devtype *dt)
 {
@@ -4957,6 +4938,7 @@ MODULE_AUTHOR("Digium Incorporated <support@digium.com>");
 MODULE_DESCRIPTION("Wildcard Dual-/Quad-port Digital Card Driver");
 MODULE_ALIAS("wct2xxp");
 MODULE_LICENSE("GPL v2");
+#endif /* !__FreeBSD__ */
 
 module_param(pedanticpci, int, 0600);
 module_param(debug, int, 0600);
@@ -4977,8 +4959,9 @@ module_param(vpmspans, int, 0600);
 module_param(dtmfthreshold, int, 0600);
 #endif
 
+#if !defined(__FreeBSD__)
 MODULE_DEVICE_TABLE(pci, t4_pci_tbl);
 
 module_init(t4_init);
 module_exit(t4_cleanup);
-#endif
+#endif /* !__FreeBSD__ */

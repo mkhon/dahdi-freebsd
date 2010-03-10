@@ -32,6 +32,8 @@
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcivar.h>
 
+#define MODULE_PARAM_PREFIX "dahdi.wcb4xxp"
+
 #ifdef mb
 #undef mb
 #endif
@@ -3014,33 +3016,13 @@ b4xxp_setup_intr(struct b4xxp *b4)
 	return (0);
 }
 
-static struct pci_device_id *
-b4xxp_pci_device_id_lookup(device_t dev)
-{
-	struct pci_device_id *id;
-	uint16_t vendor = pci_get_vendor(dev);
-	uint16_t device = pci_get_device(dev);
-	uint16_t subvendor = pci_get_subvendor(dev);
-	uint16_t subdevice = pci_get_subdevice(dev);
-
-	for (id = b4xx_ids; id->vendor != 0; id++) {
-		if ((id->vendor == PCI_ANY_ID || id->vendor == vendor) &&
-		    (id->device == PCI_ANY_ID || id->device == device) &&
-		    (id->subvendor == PCI_ANY_ID || id->subvendor == subvendor) &&
-		    (id->subdevice == PCI_ANY_ID || id->subdevice == subdevice))
-			return id;
-	}
-
-	return NULL;
-}
-
 static int
 b4xxp_device_probe(device_t dev)
 {
-        struct pci_device_id *id;
+	struct pci_device_id *id;
 	struct devtype *dt;
 
-	id = b4xxp_pci_device_id_lookup(dev);
+	id = dahdi_pci_device_id_lookup(dev, b4xx_ids);
 	if (id == NULL)
 		return ENXIO;
 
@@ -3056,11 +3038,11 @@ static int
 b4xxp_device_attach(device_t dev)
 {
 	int res;
-        struct pci_device_id *id;
+	struct pci_device_id *id;
 	struct devtype *dt;
 	struct b4xxp *b4;
 
-	id = b4xxp_pci_device_id_lookup(dev);
+	id = dahdi_pci_device_id_lookup(dev, b4xx_ids);
 	if (id == NULL)
 		return ENXIO;
 
@@ -3115,21 +3097,21 @@ b4xxp_device_detach(device_t dev)
 static int
 b4xxp_device_shutdown(device_t dev)
 {
-	DPRINTF(dev, "wcb4xxp shutdown\n");
+	DPRINTF(dev, "%s shutdown\n", device_get_name(dev));
 	return (0);
 }
 
 static int
 b4xxp_device_suspend(device_t dev)
 {
-	DPRINTF(dev, "wcb4xxp suspend\n");
+	DPRINTF(dev, "%s suspend\n", device_get_name(dev));
 	return (0);
 }
 
 static int
 b4xxp_device_resume(device_t dev)
 {
-	DPRINTF(dev, "wcb4xxp resume\n");
+	DPRINTF(dev, "%s resume\n", device_get_name(dev));
 	return (0);
 }
 
@@ -3283,20 +3265,24 @@ static void __exit b4xx_exit(void)
 #endif
 	pci_unregister_driver(&b4xx_driver);
 }
+#endif /* !__FreeBSD__ */
 
 module_param(debug, int, S_IRUGO | S_IWUSR);
 module_param(spanfilter, int, S_IRUGO | S_IWUSR);
 #ifdef LOOKBACK_SUPPORTED
 module_param(loopback, int, S_IRUGO | S_IWUSR);
 #endif
+#if !defined(__FreeBSD__)
 module_param(milliwatt, int, S_IRUGO | S_IWUSR);
 module_param(pedanticpci, int, S_IRUGO);
+#endif
 module_param(teignorered, int, S_IRUGO | S_IWUSR);
 module_param(alarmdebounce, int, S_IRUGO | S_IWUSR);
 module_param(vpmsupport, int, S_IRUGO);
 module_param(timer_1_ms, int, S_IRUGO | S_IWUSR);
 module_param(timer_3_ms, int, S_IRUGO | S_IWUSR);
 
+#if !defined(__FreeBSD__)
 MODULE_PARM_DESC(debug, "bitmap: 1=general 2=dtmf 4=regops 8=fops 16=ec 32=st state 64=hdlc 128=alarm");
 MODULE_PARM_DESC(spanfilter, "debug filter for spans. bitmap: 1=port 1, 2=port 2, 4=port 3, 8=port 4");
 #ifdef LOOKBACK_SUPPORTED
