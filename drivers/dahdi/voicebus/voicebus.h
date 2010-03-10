@@ -130,7 +130,6 @@ struct voicebus {
 	struct voicebus_descriptor_list txd;
 	u8			*idle_vbb;
 #if defined(__FreeBSD__)
-	bus_dma_tag_t		vbb_dma_tag;
 	bus_dma_tag_t		idle_vbb_dma_tag;
 	bus_dmamap_t		idle_vbb_dma_map;
 	uint32_t		idle_vbb_dma_addr;
@@ -177,11 +176,11 @@ int __voicebus_init(struct voicebus *vb, const char *board_name,
 void voicebus_release(struct voicebus *vb);
 int voicebus_start(struct voicebus *vb);
 int voicebus_stop(struct voicebus *vb);
+struct vbb *voicebus_alloc(int malloc_flags);
+void voicebus_free(struct vbb *vbb);
 int voicebus_transmit(struct voicebus *vb, struct vbb *vbb);
 int voicebus_set_minlatency(struct voicebus *vb, unsigned int milliseconds);
 int voicebus_current_latency(struct voicebus *vb);
-struct vbb *voicebus_alloc(struct voicebus *vb, int malloc_flags);
-void voicebus_free(struct voicebus *vb, struct vbb *);
 
 static inline int voicebus_init(struct voicebus *vb, const char *board_name)
 {
