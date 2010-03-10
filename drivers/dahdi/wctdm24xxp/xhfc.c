@@ -20,10 +20,17 @@
  * this program for more details.
  */
 
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/bus.h>
+
+#include <net/ppp_defs.h>
+#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/pci.h>
 #include <linux/ppp_defs.h>
 #include <linux/delay.h>
+#endif /* !__FreeBSD__ */
 
 #define FAST_HDLC_NEED_TABLES
 #include <dahdi/kernel.h>
@@ -2356,7 +2363,7 @@ int b400m_dchan(struct dahdi_span *span)
 
 /*
  */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+#if !defined(__FreeBSD__) && LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 static void xhfc_work(void *data)
 {
 	struct b400m *b4 = data;
@@ -2608,7 +2615,7 @@ void b400m_post_init(struct b400m *b4)
 	snprintf(b4->name, sizeof(b4->name) - 1, "b400m-%d",
 		 b4->b400m_no);
 	b4->xhfc_ws = create_singlethread_workqueue(b4->name);
-#	if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+#if	!defined(__FreeBSD__) && if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 	INIT_WORK(&b4->xhfc_wq, xhfc_work, b4);
 #	else
 	INIT_WORK(&b4->xhfc_wq, xhfc_work);
@@ -2634,7 +2641,7 @@ int wctdm_init_b400m(struct wctdm *wc, int card)
 		spin_unlock_irqrestore(&wc->reglock, flags);
 
 		for (i = 0; i < 10; i++)
-			schluffen(&wc->regq);
+			dahdi_schluffen(&wc->regq);
 
 		if (b400m_probe(wc, card) != 0) {
 			spin_lock_irqsave(&wc->reglock, flags);
@@ -2738,6 +2745,10 @@ void wctdm_unload_b400m(struct wctdm *wc, int card)
 		wc->mods[card + 1].bri = NULL;
 		wc->mods[card + 2].bri = NULL;
 		wc->mods[card + 3].bri = NULL;
+
+		spin_lock_destroy(&b4->reglock);
+		destroy_MUTEX(&b4->regsem);
+		destroy_MUTEX(&b4->fifosem);
 
 		msleep(voicebus_current_latency(&wc->vb) << 1);
 		b4_info(b4, "Driver unloaded.\n");

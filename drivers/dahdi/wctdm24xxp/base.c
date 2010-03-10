@@ -37,6 +37,22 @@ Tx Gain - No Pre-Emphasis: -35.99 to 12.00 db
 Tx Gain - W/Pre-Emphasis: -23.99 to 0.00 db
 */
 
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/bus.h>
+#include <sys/firmware.h>
+#include <sys/module.h>
+
+#include <dev/pci/pcivar.h>
+
+typedef int bool;
+
+#define fatal_signal_pending(c) 0
+
+#define MODULE_PARAM_PREFIX "dahdi.wctdm24xxp"
+
+#define DPRINTF(dev, fmt, args...)      device_rlprintf(20, dev, fmt, ##args)
+#else /* !__FreeBSD__ */
 #include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -68,6 +84,7 @@ Tx Gain - W/Pre-Emphasis: -23.99 to 0.00 db
 #else
 #undef USE_ASYNC_INIT
 #endif
+#endif /* !__FreeBSD__ */
 
 #include <dahdi/kernel.h>
 #include <dahdi/wctdm_user.h>
@@ -212,7 +229,7 @@ static inline bool is_digital_span(const struct wctdm_span *wspan)
 }
 
 struct wctdm *ifaces[WC_MAX_IFACES];
-DECLARE_MUTEX(ifacelock);
+struct semaphore ifacelock;
 
 static void wctdm_release(struct wctdm *wc);
 
@@ -228,7 +245,11 @@ static int lowpower = 0;
 static int boostringer = 0;
 static int fastringer = 0;
 static int _opermode = 0;
+#if defined(__FreeBSD__)
+static char opermode[16];
+#else
 static char *opermode = "FCC";
+#endif
 static int fxshonormode = 0;
 static int alawoverride = 0;
 static int fxotxgain = 0;
@@ -299,19 +320,6 @@ static inline int CMD_BYTE(int card, int bit, int altcs)
 
 	return (((((card) & 0x3) * 3 + (bit)) * 7) \
 			+ ((card) >> 2) + (altcs) + ((altcs) ? -21 : 0));
-}
-
-/* sleep in user space until woken up. Equivilant of tsleep() in BSD */
-int schluffen(wait_queue_head_t *q)
-{
-	DECLARE_WAITQUEUE(wait, current);
-	add_wait_queue(q, &wait);
-	current->state = TASK_INTERRUPTIBLE;
-	if (!signal_pending(current)) schedule();
-	current->state = TASK_RUNNING;
-	remove_wait_queue(q, &wait);
-	if (signal_pending(current)) return -ERESTARTSYS;
-	return(0);
 }
 
 static inline int empty_slot(struct wctdm *wc, int card)
@@ -1023,7 +1031,7 @@ static inline int wctdm_setreg_full(struct wctdm *wc, int card, int addr, int va
 		if (inisr)
 			break;
 		if (hit < 0) {
-			if ((ret = schluffen(&wc->regq)))
+			if ((ret = dahdi_schluffen(&wc->regq)))
 				return ret;
 		}
 	} while (hit < 0);
@@ -1058,7 +1066,7 @@ inline int wctdm_getreg(struct wctdm *wc, int card, int addr)
 		}
 		spin_unlock_irqrestore(&wc->reglock, flags);
 		if (hit < 0) {
-			if ((ret = schluffen(&wc->regq)))
+			if ((ret = dahdi_schluffen(&wc->regq)))
 				return ret;
 		}
 	} while (hit < 0);
@@ -1071,7 +1079,7 @@ inline int wctdm_getreg(struct wctdm *wc, int card, int addr)
 		}
 		spin_unlock_irqrestore(&wc->reglock, flags);
 		if (hit > -1) {
-			if ((ret = schluffen(&wc->regq)))
+			if ((ret = dahdi_schluffen(&wc->regq)))
 				return ret;
 		}
 	} while (hit > -1);
@@ -1250,11 +1258,11 @@ static int wait_access(struct wctdm *wc, int card)
     unsigned char data=0;
     int count = 0;
 
-    #define MAX 10 /* attempts */
+    #define MAX_ATTEMPTS 10 /* attempts */
 
 
     /* Wait for indirect access */
-    while (count++ < MAX)
+    while (count++ < MAX_ATTEMPTS)
 	 {
 		data = wctdm_getreg(wc, card, I_STATUS);
 
@@ -1263,7 +1271,7 @@ static int wait_access(struct wctdm *wc, int card)
 
 	 }
 
-    if (count > (MAX-1))
+    if (count > (MAX_ATTEMPTS-1))
 	    dev_notice(&wc->vb.pdev->dev, " ##### Loop error (%02x) #####\n", data);
 
 	return 0;
@@ -2078,7 +2086,7 @@ static void handle_hx8_transmit(struct voicebus *vb, struct list_head *buffers)
 
 	list_for_each_entry_safe(vbb, n, buffers, entry) {
 		list_del(&vbb->entry);
-		kmem_cache_free(voicebus_vbb_cache, vbb);
+		voicebus_free(vbb);
 	}
 }
 
@@ -3640,7 +3648,7 @@ static struct wctdm_span *wctdm_init_span(struct wctdm *wc, int spanno, int chan
 	snprintf(s->span.desc, sizeof(s->span.desc) - 1, "%s Board %d", wc->desc->name, wc->pos + 1);
 	snprintf(s->span.location, sizeof(s->span.location) - 1,
 		 "PCI%s Bus %02d Slot %02d", (wc->flags[0] & FLAG_EXPRESS) ? " Express" : "",
-		 pdev->bus->number, PCI_SLOT(pdev->devfn) + 1);
+		 dahdi_pci_get_bus(pdev), dahdi_pci_get_slot(pdev));
 	s->span.manufacturer = "Digium";
 	strncpy(s->span.devicetype, wc->desc->name, sizeof(s->span.devicetype) - 1);
 
@@ -3685,7 +3693,7 @@ static struct wctdm_span *wctdm_init_span(struct wctdm *wc, int spanno, int chan
 	}
 
 	s->span.channels = chancount;
-	s->span.irq = pdev->irq;
+	s->span.irq = dahdi_pci_get_irq(pdev);
 	s->span.open = wctdm_open;
 	s->span.close = wctdm_close;
 	s->span.ioctl = wctdm_ioctl;
@@ -3820,7 +3828,7 @@ static int wctdm_vpm_init(struct wctdm *wc)
 		}
 
 		for (i=0;i<30;i++) 
-			schluffen(&wc->regq);
+			dahdi_schluffen(&wc->regq);
 
 		/* Put in bypass mode */
 		for (i = 0 ; i < MAX_TDM_CHAN ; i++) {
@@ -4056,7 +4064,7 @@ static int wctdm_identify_modules(struct wctdm *wc)
 
 /* Wait just a bit; this makes sure that cmd_dequeue is emitting SPI commands in the appropriate mode(s). */
 	for (x = 0; x < 10; x++)
-		schluffen(&wc->regq);
+		dahdi_schluffen(&wc->regq);
 
 /* Now that all the cards have been reset, we can stop checking them all if there aren't as many */
 	spin_lock_irqsave(&wc->reglock, flags);
@@ -4122,8 +4130,8 @@ retry:
 					wc->modtype[x] = MOD_TYPE_FXSINIT;
 					spin_unlock_irqrestore(&wc->reglock, flags);
 
-					schluffen(&wc->regq);
-					schluffen(&wc->regq);
+					dahdi_schluffen(&wc->regq);
+					dahdi_schluffen(&wc->regq);
 
 					spin_lock_irqsave(&wc->reglock, flags);
 					wc->modtype[x] = MOD_TYPE_FXS;
@@ -4144,14 +4152,16 @@ retry:
 	return 0;
 }
 
+#if !defined(__FreeBSD__)
 static struct pci_driver wctdm_driver;
+#endif
 
 static void wctdm_back_out_gracefully(struct wctdm *wc)
 {
 	int i;
 	unsigned long flags;
 	struct sframe_packet *frame;
-	LIST_HEAD(local_list);
+	_LIST_HEAD(local_list);
 
 	for (i = 0; i < ARRAY_SIZE(wc->spans); ++i) {
 		if (wc->spans[i] && wc->spans[i]->span.chans)
@@ -4179,7 +4189,13 @@ static void wctdm_back_out_gracefully(struct wctdm *wc)
 		kfree(frame);
 	}
 
+	destroy_MUTEX(&wc->syncsem);
+	spin_lock_init(&wc->reglock);
+	spin_lock_destroy(&wc->frame_list_lock);
+
+#if !defined(__FreeBSD__)
 	kfree(wc);
+#endif
 }
 
 static const struct voicebus_operations voicebus_operations = {
@@ -4218,7 +4234,7 @@ static int hx8_send_command(struct wctdm *wc, const u8 *command,
 	if (count > MAX_COMMAND_LENGTH)
 		return -EINVAL;
 
-	vbb = kmem_cache_alloc(voicebus_vbb_cache, GFP_KERNEL);
+	vbb = voicebus_alloc(GFP_KERNEL);
 	WARN_ON(!vbb);
 	if (!vbb)
 		return -ENOMEM;
@@ -4293,7 +4309,7 @@ static int hx8_get_fpga_version(struct wctdm *wc, u8 *major, u8 *minor)
 static void hx8_cleanup_frame_list(struct wctdm *wc)
 {
 	unsigned long flags;
-	LIST_HEAD(local_list);
+	_LIST_HEAD(local_list);
 	struct sframe_packet *frame;
 
 	spin_lock_irqsave(&wc->frame_list_lock, flags);
@@ -4488,7 +4504,11 @@ static int hx8_reload_application(struct wctdm *wc, const struct ha80000_firmwar
 	return ret;
 }
 
-static void print_hx8_recovery_message(struct device *dev)
+#if !defined(__FreeBSD__)
+typedef struct device device_t;
+#endif
+
+static void print_hx8_recovery_message(device_t *dev)
 {
 	dev_warn(dev, "The firmware may be corrupted.  Please completely "
 		 "power off your system, power on, and then reload the driver "
@@ -4506,8 +4526,9 @@ static int hx8_check_firmware(struct wctdm *wc)
 	u8 major;
 	u8 minor;
 	const struct firmware *fw;
+	int fw_size;
 	const struct ha80000_firmware *ha8_fw;
-	struct device *dev = &wc->vb.pdev->dev;
+	device_t *dev = &wc->vb.pdev->dev;
 	int retries = 10;
 
 	BUG_ON(!is_hx8(wc));
@@ -4548,10 +4569,19 @@ static int hx8_check_firmware(struct wctdm *wc)
 		return 0;
 	}
 	ha8_fw = (const struct ha80000_firmware *)fw->data;
+#if defined(__FreeBSD__)
+	fw_size = fw->datasize;
+#else
+	fw_size = fw->size;
+#endif
 
-	if ((fw->size != sizeof(*ha8_fw)) ||
+	if ((fw_size != sizeof(*ha8_fw)) ||
 	    (0 != memcmp("DIGIUM", ha8_fw->header, sizeof(ha8_fw->header))) ||
+#if defined(__FreeBSD__)
+	    (crc32(ha8_fw, sizeof(*ha8_fw) - sizeof(u32)) !=
+#else
 	    ((crc32(~0, (void *)ha8_fw, sizeof(*ha8_fw) - sizeof(u32)) ^ ~0) !=
+#endif
 	      ha8_fw->chksum)) {
 		dev_warn(dev, "Firmware file is invalid. Skipping load.\n");
 		ret = 0;
@@ -4626,6 +4656,9 @@ struct async_data {
 static int __devinit
 __wctdm_init_one(struct pci_dev *pdev, const struct pci_device_id *ent,
 		 async_cookie_t cookie)
+#elif defined(__FreeBSD__)
+static int
+__wctdm_init_one(device_t dev, const struct pci_device_id *ent)
 #else
 static int __devinit
 __wctdm_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
@@ -4638,9 +4671,13 @@ __wctdm_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	
 	neonmwi_offlimit_cycles = neonmwi_offlimit / MS_PER_HOOKCHECK;
 
+#if defined(__FreeBSD__)
+	wc = device_get_softc(dev);
+#else
 	wc = kzalloc(sizeof(*wc), GFP_KERNEL);
 	if (!wc)
 		return -ENOMEM;
+#endif
 
 	down(&ifacelock);
 	/* \todo this is a candidate for removal... */
@@ -4660,11 +4697,16 @@ __wctdm_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	INIT_LIST_HEAD(&wc->frame_list);
 	spin_lock_init(&wc->frame_list_lock);
 
+#if defined(__FreeBSD__)
+	strlcpy(wc->board_name, device_get_nameunit(dev), sizeof(wc->board_name));
+	wc->vb.pdev = &wc->vb._dev;
+	wc->vb.pdev->dev = dev;
+#else
 	snprintf(wc->board_name, sizeof(wc->board_name)-1, "%s%d", wctdm_driver.name, i);
-
 	pci_set_drvdata(pdev, wc);
-	wc->vb.ops = &voicebus_operations;
 	wc->vb.pdev = pdev;
+#endif
+	wc->vb.ops = &voicebus_operations;
 	wc->vb.debug = &debug;
 
 	if (is_hx8(wc)) {
@@ -4876,11 +4918,7 @@ wctdm_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	return 0;
 }
 #else
-static int __devinit
-wctdm_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
-{
-	return __wctdm_init_one(pdev, ent);
-}
+#define wctdm_init_one(pdev, ent) __wctdm_init_one((pdev), (ent))
 #endif
 
 
@@ -4905,9 +4943,17 @@ static void wctdm_release(struct wctdm *wc)
 	wctdm_back_out_gracefully(wc);
 }
 
+#if defined(__FreeBSD__)
+static void wctdm_remove_one(device_t dev)
+#else
 static void __devexit wctdm_remove_one(struct pci_dev *pdev)
+#endif
 {
+#if defined(__FreeBSD__)
+	struct wctdm *wc = device_get_softc(dev);
+#else
 	struct wctdm *wc = pci_get_drvdata(pdev);
+#endif
 	struct vpmadt032 *vpm = wc->vpmadt032;
 	int i;
 
@@ -4954,6 +5000,7 @@ static struct pci_device_id wctdm_pci_tbl[] = {
 	{ 0 }
 };
 
+#if !defined(__FreeBSD__)
 MODULE_DEVICE_TABLE(pci, wctdm_pci_tbl);
 
 static struct pci_driver wctdm_driver = {
@@ -4962,11 +5009,13 @@ static struct pci_driver wctdm_driver = {
 	.remove = __devexit_p(wctdm_remove_one),
 	.id_table = wctdm_pci_tbl,
 };
+#endif /* !__FreeBSD__ */
 
 static int __init wctdm_init(void)
 {
-	int res;
 	int x;
+
+	init_MUTEX(&ifacelock);
 
 	for (x = 0; x < ARRAY_SIZE(fxo_modes); x++) {
 		if (!strcmp(fxo_modes[x].name, opermode))
@@ -5004,9 +5053,11 @@ static int __init wctdm_init(void)
 
 	b400m_module_init();
 
-	res = dahdi_pci_module(&wctdm_driver);
-	if (res)
+#if !defined(__FreeBSD__)
+	x = dahdi_pci_module(&wctdm_driver);
+	if (x)
 		return -ENODEV;
+#endif
 
 #ifdef USE_ASYNC_INIT
 	async_synchronize_full();
@@ -5016,7 +5067,10 @@ static int __init wctdm_init(void)
 
 static void __exit wctdm_cleanup(void)
 {
+#if !defined(__FreeBSD__)
 	pci_unregister_driver(&wctdm_driver);
+#endif
+	destroy_MUTEX(&ifacelock);
 }
 
 
@@ -5078,6 +5132,107 @@ MODULE_PARM_DESC(timingcable, "Set to 1 for enabling timing cable.  This means t
 module_param(forceload, int, 0600);
 MODULE_PARM_DESC(forceload, "Set to 1 in order to force an FPGA reload after power on (currently only for HA8/HB8 cards).");
 
+#if defined(__FreeBSD__)
+static int
+wctdm_device_probe(device_t dev)
+{
+        struct pci_device_id *id;
+	struct wctdm_desc *wd;
+
+	id = dahdi_pci_device_id_lookup(dev, wctdm_pci_tbl);
+	if (id == NULL)
+		return ENXIO;
+
+	/* found device */
+	device_printf(dev, "vendor=%x device=%x subvendor=%x\n",
+	    id->vendor, id->device, id->subvendor);
+	wd = (struct wctdm_desc *) id->driver_data;
+	device_set_desc(dev, wd->name);
+	return (0);
+}
+
+static int
+wctdm_device_attach(device_t dev)
+{
+	int res;
+        struct pci_device_id *id;
+
+	id = dahdi_pci_device_id_lookup(dev, wctdm_pci_tbl);
+	if (id == NULL)
+		return ENXIO;
+
+	res = wctdm_init_one(dev, id);
+	return -res;
+}
+
+static int
+wctdm_device_detach(device_t dev)
+{
+	wctdm_remove_one(dev);
+	return (0);
+}
+
+static int
+wctdm_device_shutdown(device_t dev)
+{
+	DPRINTF(dev, "%s shutdown\n", device_get_name(dev));
+	return (0);
+}
+
+static int
+wctdm_device_suspend(device_t dev)
+{
+	DPRINTF(dev, "%s suspend\n", device_get_name(dev));
+	return (0);
+}
+
+static int
+wctdm_device_resume(device_t dev)
+{
+	DPRINTF(dev, "%s resume\n", device_get_name(dev));
+	return (0);
+}
+
+static int
+wctdm_modevent(module_t mod __unused, int type, void *data __unused)
+{
+	int res;
+
+	switch (type) {
+	case MOD_LOAD:
+		res = wctdm_init();
+		return -res;
+	case MOD_UNLOAD:
+		wctdm_cleanup();
+		return 0;
+	default:
+		return EOPNOTSUPP;
+	}
+}
+
+static device_method_t wctdm_methods[] = {
+	DEVMETHOD(device_probe,     wctdm_device_probe),
+	DEVMETHOD(device_attach,    wctdm_device_attach),
+	DEVMETHOD(device_detach,    wctdm_device_detach),
+	DEVMETHOD(device_shutdown,  wctdm_device_shutdown),
+	DEVMETHOD(device_suspend,   wctdm_device_suspend),
+	DEVMETHOD(device_resume,    wctdm_device_resume),
+	{ 0, 0 }
+};
+
+static driver_t wctdm_pci_driver = {
+	"wctdm24xxp",
+	wctdm_methods,
+	sizeof(struct wctdm)
+};
+
+static devclass_t wctdm_devclass;
+
+DRIVER_MODULE(wcwctdm24xxp, pci, wctdm_pci_driver, wctdm_devclass, wctdm_modevent, 0);
+MODULE_DEPEND(wcwctdm24xxp, pci, 1, 1, 1);
+MODULE_DEPEND(wcwctdm24xxp, dahdi, 1, 1, 1);
+MODULE_DEPEND(wcwctdm24xxp, firmware, 1, 1, 1);
+#else
 MODULE_DESCRIPTION("Wildcard VoiceBus Analog Card Driver");
 MODULE_AUTHOR("Digium Incorporated <support@digium.com>");
 MODULE_ALIAS("wctdm8xxp");
@@ -5089,3 +5244,4 @@ MODULE_LICENSE("GPL v2");
 
 module_init(wctdm_init);
 module_exit(wctdm_cleanup);
+#endif /* !__FreeBSD__ */
