@@ -62,7 +62,7 @@ tasklet_init(struct tasklet_struct *t, void (*func)(unsigned long), unsigned lon
 void
 tasklet_hi_schedule(struct tasklet_struct *t)
 {
-	taskqueue_enqueue_fast(taskqueue_fast, &t->task);
+	taskqueue_enqueue(taskqueue_fast, &t->task);
 }
 
 void
@@ -238,7 +238,7 @@ work_run(void *context, int pending)
 void
 schedule_work(struct work_struct *work)
 {
-	taskqueue_enqueue_fast(taskqueue_fast, &work->task);
+	taskqueue_enqueue(taskqueue_fast, &work->task);
 }
 
 void
@@ -250,7 +250,7 @@ cancel_work_sync(struct work_struct *work)
 void
 flush_scheduled_work(void)
 {
-	taskqueue_run_fast(taskqueue_fast);
+	taskqueue_run(taskqueue_fast);
 }
 
 struct workqueue_struct *
@@ -288,13 +288,13 @@ destroy_workqueue(struct workqueue_struct *wq)
 void
 queue_work(struct workqueue_struct *wq, struct work_struct *work)
 {
-	taskqueue_enqueue_fast(wq->tq, &work->task);
+	taskqueue_enqueue(wq->tq, &work->task);
 }
 
 void
 flush_workqueue(struct workqueue_struct *wq)
 {
-	taskqueue_run_fast(wq->tq);
+	taskqueue_run(wq->tq);
 }
 
 /*
