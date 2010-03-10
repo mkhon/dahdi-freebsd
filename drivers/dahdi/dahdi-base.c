@@ -148,7 +148,7 @@ MALLOC_DEFINE(M_DAHDI, "dahdi", "DAHDI interface data structures");
 /*
  * FCS lookup table as calculated by genfcstab.
  */
-static u_short fcstab[256] = {
+u_short fcstab[256] = {
 	0x0000,	0x1189,	0x2312,	0x329b,	0x4624,	0x57ad,	0x6536,	0x74bf,
 	0x8c48,	0x9dc1,	0xaf5a,	0xbed3,	0xca6c,	0xdbe5,	0xe97e,	0xf8f7,
 	0x1081,	0x0108,	0x3393,	0x221a,	0x56a5,	0x472c,	0x75b7,	0x643e,
@@ -322,8 +322,8 @@ dahdi_poll_drain(struct pollinfo *sel)
 }
 
 /* sleep in user space until woken up. Equivilant of tsleep() in BSD */
-static int
-schluffen(wait_queue_head_t *q)
+int
+dahdi_schluffen(wait_queue_head_t *q)
 {
 	int rc = tsleep(q, PZERO | PCATCH, "schluffen", 10);
 	switch (rc) {
@@ -407,7 +407,7 @@ dahdi_poll_wakeup(struct pollinfo *sel)
 
 /* sleep in user space until woken up. Equivilant of tsleep() in BSD */
 static int
-schluffen(wait_queue_head_t *q)
+dahdi_schluffen(wait_queue_head_t *q)
 {
 	DECLARE_WAITQUEUE(wait, current);
 
@@ -2370,7 +2370,7 @@ static ssize_t dahdi_chan_read(FOP_READ_ARGS_DECL, int unit)
 			break;
 		if (file->f_flags & O_NONBLOCK)
 			return -EAGAIN;
-		rv = schluffen(&chan->readbufq);
+		rv = dahdi_schluffen(&chan->readbufq);
 		if (rv)
 			return rv;
 	}
@@ -2505,7 +2505,7 @@ static ssize_t dahdi_chan_write(FOP_WRITE_ARGS_DECL, int unit)
 			return -EAGAIN;
 		}
 		/* Wait for something to be available */
-		rv = schluffen(&chan->writebufq);
+		rv = dahdi_schluffen(&chan->writebufq);
 		if (rv) {
 			return rv;
 		}
@@ -4876,7 +4876,7 @@ static int dahdi_ctl_ioctl(struct file *file, unsigned int cmd, unsigned long da
 			spin_unlock_irqrestore(&spans[maint.spanno]->lock, flags);
 			if (rv)
 				return rv;
-			rv = schluffen(&spans[maint.spanno]->maintq);
+			rv = dahdi_schluffen(&spans[maint.spanno]->maintq);
 			if (rv)
 				return rv;
 			spin_lock_irqsave(&spans[maint.spanno]->lock, flags);
@@ -5111,7 +5111,7 @@ dahdi_chanandpseudo_ioctl(struct file *file, unsigned int cmd,
 			i = (chan->outwritebuf > -1);
 			spin_unlock_irqrestore(&chan->lock, flags);
 			if (!i) break; /* skip if none */
-			rv = schluffen(&chan->writebufq);
+			rv = dahdi_schluffen(&chan->writebufq);
 			if (rv) return(rv);
 		   }
 		break;
@@ -5159,7 +5159,7 @@ dahdi_chanandpseudo_ioctl(struct file *file, unsigned int cmd,
 				put_user(ret, (int __user *)data);
 				break; /* get out of loop */
 			   }
-			rv = schluffen(&chan->eventbufq);
+			rv = dahdi_schluffen(&chan->eventbufq);
 			if (rv) return(rv);
 		   }
 		  /* clear IO MUX mask */
@@ -6038,7 +6038,7 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 				if (file->f_flags & O_NONBLOCK)
 					return -EINPROGRESS;
 #if 0
-				rv = schluffen(&chan->txstateq);
+				rv = dahdi_schluffen(&chan->txstateq);
 				if (rv) return rv;
 #endif
 				break;
@@ -6052,7 +6052,7 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 				spin_unlock_irqrestore(&chan->lock, flags);
 				if (file->f_flags & O_NONBLOCK)
 					return -EINPROGRESS;
-				rv = schluffen(&chan->txstateq);
+				rv = dahdi_schluffen(&chan->txstateq);
 				if (rv) return rv;
 				break;
 			case DAHDI_FLASH:
@@ -6065,7 +6065,7 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 				spin_unlock_irqrestore(&chan->lock, flags);
 				if (file->f_flags & O_NONBLOCK)
 					return -EINPROGRESS;
-				rv = schluffen(&chan->txstateq);
+				rv = dahdi_schluffen(&chan->txstateq);
 				if (rv) return rv;
 				break;
 			case DAHDI_RINGOFF:

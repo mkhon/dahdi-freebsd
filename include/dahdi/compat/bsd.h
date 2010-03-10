@@ -42,7 +42,24 @@
  */
 typedef void *wait_queue_head_t;
 #define init_waitqueue_head(q)
-#define wake_up_interruptible(q)	wakeup(q)
+#define wake_up(q)			wakeup_one(q)
+#define wake_up_interruptible(q)	wakeup_one(q)
+#define wake_up_interruptible_all(q)	wakeup(q)
+#define wait_event_timeout(q, condition, timeout)			\
+({									\
+	int __ret = timeout;						\
+	if (!(condition)) {						\
+		for (;;) {						\
+			if (tsleep(&q, 0, "wait_event", (timeout))) {	\
+				__ret = 0;				\
+				break;					\
+			}						\
+			if (condition)					\
+				break;					\
+		}							\
+	}								\
+	__ret;								\
+})
 
 /*
  * Bit API
@@ -197,8 +214,13 @@ struct semaphore {
 
 void _sema_init(struct semaphore *s, int value);
 void _sema_destroy(struct semaphore *s);
+void down(struct semaphore *s);
 int down_interruptible(struct semaphore *s);
+int down_trylock(struct semaphore *s);
 void up(struct semaphore *s);
+
+#define init_MUTEX(s)		_sema_init((s), 1)
+#define destroy_MUTEX(s)	_sema_destroy(s)
 
 /*
  * Workqueue API
@@ -220,6 +242,7 @@ struct work_struct {
 void work_run(void *context, int pending);
 void schedule_work(struct work_struct *work);
 void cancel_work_sync(struct work_struct *work);
+void flush_scheduled_work(void);
 
 struct workqueue_struct {
 	struct taskqueue *tq;
@@ -228,6 +251,7 @@ struct workqueue_struct {
 struct workqueue_struct *create_singlethread_workqueue(const char *name);
 void destroy_workqueue(struct workqueue_struct *wq);
 void queue_work(struct workqueue_struct *wq, struct work_struct *work);
+void flush_workqueue(struct workqueue_struct *wq);
 
 /*
  * Logging and assertions API
@@ -304,6 +328,20 @@ int request_module(const char *fmt, ...);
 
 #define EXPORT_SYMBOL(s)
 
+#define module_param(name, type, mode)	module_param_##type(MODULE_PARAM_PREFIX "." #name, name)
+#define module_param_int(name, var)	TUNABLE_INT((name), &(var))
+#define module_param_uint(name, var)	TUNABLE_INT((name), &(var))
+#define module_param_charp(name, var)	TUNABLE_STR((name), (var), sizeof(var))
+#define MODULE_PARM_DESC(name, desc)
+
+/*
+ * Firmware API
+ */
+struct firmware;
+
+int request_firmware(const struct firmware **firmware_p, const char *name, device_t *device);
+void release_firmware(const struct firmware *firmware);
+
 /*
  * PCI device API
  */
@@ -373,5 +411,7 @@ strncat(char * __restrict dst, const char * __restrict src, size_t n);
 #define unlikely(x)     __builtin_expect(!!(x), 0)
 
 #define DAHDI_IRQ_HANDLER(a)	static int a(void *dev_id)
+
+extern u_short fcstab[256];
 
 #endif /* _DAHDI_COMPAT_BSD_H_ */

@@ -28,6 +28,7 @@
 #include <sys/types.h>
 #include <sys/bus.h>
 #include <sys/callout.h>
+#include <sys/firmware.h>
 #include <sys/syscallsubr.h>
 #include <sys/systm.h>
 #include <sys/taskqueue.h>
@@ -175,11 +176,7 @@ wait_for_completion_timeout(struct completion *c, unsigned long timeout)
 	mtx_lock(&c->lock);
 	res = cv_timedwait(&c->cv, &c->lock, timeout);
 	mtx_unlock(&c->lock);
-	if (res == 0)
-		return 1;
-
-	/* Signal timeout */
-	return 0;
+	return res == 0;
 }
 
 void
@@ -203,11 +200,23 @@ _sema_destroy(struct semaphore *s)
 	sema_destroy(&s->sema);
 }
 
+void
+down(struct semaphore *s)
+{
+	sema_wait(&s->sema);
+}
+
 int
 down_interruptible(struct semaphore *s)
 {
 	sema_wait(&s->sema);
 	return 0;
+}
+
+int
+down_trylock(struct semaphore *s)
+{
+	return sema_trywait(&s->sema) == 0;
 }
 
 void
@@ -236,6 +245,12 @@ void
 cancel_work_sync(struct work_struct *work)
 {
 	taskqueue_drain(taskqueue_fast, &work->task);
+}
+
+void
+flush_scheduled_work(void)
+{
+	taskqueue_run_fast(taskqueue_fast);
 }
 
 struct workqueue_struct *
@@ -273,7 +288,13 @@ destroy_workqueue(struct workqueue_struct *wq)
 void
 queue_work(struct workqueue_struct *wq, struct work_struct *work)
 {
-	taskqueue_enqueue(wq->tq, &work->task);
+	taskqueue_enqueue_fast(wq->tq, &work->task);
+}
+
+void
+flush_workqueue(struct workqueue_struct *wq)
+{
+	taskqueue_run_fast(wq->tq);
 }
 
 /*
@@ -332,6 +353,22 @@ request_module(const char *fmt, ...)
 	va_end(ap);
 
 	return kern_kldload(curthread, modname, &fileid);
+}
+
+/*
+ * Firmware API
+ */
+int
+request_firmware(const struct firmware **firmware_p, const char *name, device_t *device)
+{
+	*firmware_p = firmware_get(name);
+	return *firmware_p == NULL;
+}
+
+void
+release_firmware(const struct firmware *firmware)
+{
+	firmware_put(firmware, FIRMWARE_UNLOAD);
 }
 
 /*

@@ -3923,20 +3923,11 @@ static void t4_vpm450_init(struct t4 *wc)
 	switch ((vpm_capacity = get_vpm450m_capacity(wc))) {
 	case 64:
 #if defined(HOTPLUG_FIRMWARE)
-#if defined(__FreeBSD__)
-		firmware = firmware_get(oct064_firmware);
-		if (firmware == NULL) {
-			device_printf(wc->dev->dev, "VPM450: can not load firmware %s\n",
-			    oct064_firmware);
-			return;
-		}
-#else
 		if ((request_firmware(&firmware, oct064_firmware, &wc->dev->dev) != 0) ||
 		    !firmware) {
 			printk(KERN_NOTICE "VPM450: firmware %s not available from userspace\n", oct064_firmware);
 			return;
 		}
-#endif
 #else
 		embedded_firmware.data = _binary_dahdi_fw_oct6114_064_bin_start;
 		/* Yes... this is weird. objcopy gives us a symbol containing
@@ -3950,20 +3941,11 @@ static void t4_vpm450_init(struct t4 *wc)
 		break;
 	case 128:
 #if defined(HOTPLUG_FIRMWARE)
-#if defined(__FreeBSD__)
-		firmware = firmware_get(oct128_firmware);
-		if (firmware == NULL) {
-			device_printf(wc->dev->dev, "VPM450: can not load firmware %s\n",
-			    oct128_firmware);
-			return;
-		}
-#else
 		if ((request_firmware(&firmware, oct128_firmware, &wc->dev->dev) != 0) ||
 		    !firmware) {
 			printk(KERN_NOTICE "VPM450: firmware %s not available from userspace\n", oct128_firmware);
 			return;
 		}
-#endif
 #else
 		embedded_firmware.data = _binary_dahdi_fw_oct6114_128_bin_start;
 		/* Yes... this is weird. objcopy gives us a symbol containing
@@ -3983,20 +3965,12 @@ static void t4_vpm450_init(struct t4 *wc)
 	if (!(wc->vpm450m = init_vpm450m(wc, laws, wc->numspans, firmware))) {
 		printk(KERN_NOTICE "VPM450: Failed to initialize\n");
 		if (firmware != &embedded_firmware)
-#if defined(__FreeBSD__)
-			firmware_put(firmware, FIRMWARE_UNLOAD);
-#else
 			release_firmware(firmware);
-#endif
 		return;
 	}
 
 	if (firmware != &embedded_firmware)
-#if defined(__FreeBSD__)
-		firmware_put(firmware, FIRMWARE_UNLOAD);
-#else
 		release_firmware(firmware);
-#endif
 
 	if (vpmdtmfsupport == -1) {
 		printk(KERN_NOTICE "VPM450: hardware DTMF disabled.\n");
