@@ -393,7 +393,7 @@ static inline unsigned long _jiffies(void)
 
 #define time_after(a, b)	((a) > (b))
 #define time_after_eq(a, b)	((a) >= (b))
-#define time_before(a, b)	((a) < (b))
+#define time_before(a, b)	time_after((b), (a))
 
 /*
  * Misc API
