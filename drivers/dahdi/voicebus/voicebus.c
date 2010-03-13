@@ -42,6 +42,8 @@
 #include <dev/pci/pcivar.h>
 
 #include <machine/resource.h>
+
+#define DPRINTF(dev, fmt, args...)	device_rlprintf(20, *dev, fmt, ##args)
 #else /* !__FreeBSD__ */
 #include <linux/version.h>
 #include <linux/slab.h>
@@ -210,7 +212,7 @@ voicebus_map(struct vbb *vbb, int direction)
 {
 	int res;
 
-	res = bus_dmamap_load(vbb_dma_tag, vbb->dma_map, vbb, sizeof(*vbb),
+	res = bus_dmamap_load(vbb_dma_tag, vbb->dma_map, vbb->data, sizeof(vbb->data),
 	    vb_dma_map_addr, &vbb->paddr, 0);
 	if (res) {
 		if (printk_ratelimit())
@@ -1320,10 +1322,10 @@ voicebus_release(struct voicebus *vb)
 #endif
 
 	/* Cleanup memory and software resources. */
-	destroy_completion(&vb->stopped_completion);
-	spin_lock_destroy(&vb->lock);
 	vb_free_descriptors(vb, &vb->txd);
 	vb_free_descriptors(vb, &vb->rxd);
+	destroy_completion(&vb->stopped_completion);
+	spin_lock_destroy(&vb->lock);
 	if (vb->idle_vbb_dma_addr) {
 #if defined(__FreeBSD__)
 		vb_dma_free(&vb->idle_vbb_dma_tag, &vb->idle_vbb_dma_map,
