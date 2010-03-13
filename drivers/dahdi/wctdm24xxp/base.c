@@ -246,7 +246,7 @@ static int boostringer = 0;
 static int fastringer = 0;
 static int _opermode = 0;
 #if defined(__FreeBSD__)
-static char opermode[16];
+static char opermode[16] = "FCC";
 #else
 static char *opermode = "FCC";
 #endif
@@ -5231,6 +5231,7 @@ static devclass_t wctdm_devclass;
 DRIVER_MODULE(wcwctdm24xxp, pci, wctdm_pci_driver, wctdm_devclass, wctdm_modevent, 0);
 MODULE_DEPEND(wcwctdm24xxp, pci, 1, 1, 1);
 MODULE_DEPEND(wcwctdm24xxp, dahdi, 1, 1, 1);
+MODULE_DEPEND(wcwctdm24xxp, dahdi_voicebus, 1, 1, 1);
 MODULE_DEPEND(wcwctdm24xxp, firmware, 1, 1, 1);
 #else
 MODULE_DESCRIPTION("Wildcard VoiceBus Analog Card Driver");
