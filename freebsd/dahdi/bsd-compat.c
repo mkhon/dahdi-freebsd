@@ -55,7 +55,7 @@ tasklet_run(void *context, int pending)
 void
 tasklet_init(struct tasklet_struct *t, void (*func)(unsigned long), unsigned long data)
 {
-	TASK_INIT(&t->task, 0, tasklet_run, t);
+	TASK_INIT(&t->task, PI_REALTIME, tasklet_run, t);
 	t->func = func;
 	t->data = data;
 	t->disable_count = 0;
@@ -65,6 +65,7 @@ void
 tasklet_hi_schedule(struct tasklet_struct *t)
 {
 	taskqueue_enqueue(taskqueue_fast, &t->task);
+//	wakeup_one(taskqueue_fast);
 }
 
 void
@@ -231,7 +232,7 @@ up(struct semaphore *s)
  * Workqueue API
  */
 void
-work_run(void *context, int pending)
+_work_run(void *context, int pending)
 {
 	struct work_struct *work = (struct work_struct *) context;
 	work->func(work);
@@ -240,19 +241,21 @@ work_run(void *context, int pending)
 void
 schedule_work(struct work_struct *work)
 {
+	work->tq = taskqueue_fast;
 	taskqueue_enqueue(taskqueue_fast, &work->task);
+//	wakeup_one(taskqueue_fast);
 }
 
 void
 cancel_work_sync(struct work_struct *work)
 {
-	taskqueue_drain(taskqueue_fast, &work->task);
+	taskqueue_drain(work->tq, &work->task);
 }
 
 void
-flush_scheduled_work(void)
+flush_work(struct work_struct *work)
 {
-	taskqueue_run(taskqueue_fast);
+	taskqueue_drain(work->tq, &work->task);
 }
 
 struct workqueue_struct *
@@ -271,7 +274,7 @@ create_singlethread_workqueue(const char *name)
 		return NULL;
 	}
 
-	res = taskqueue_start_threads(&wq->tq, 1, PI_NET, "%s taskq", name);
+	res = taskqueue_start_threads(&wq->tq, 1, PI_REALTIME, "%s taskq", name);
 	if (res) {
 		destroy_workqueue(wq);
 		return NULL;
@@ -290,13 +293,9 @@ destroy_workqueue(struct workqueue_struct *wq)
 void
 queue_work(struct workqueue_struct *wq, struct work_struct *work)
 {
+	work->tq = wq->tq;
 	taskqueue_enqueue(wq->tq, &work->task);
-}
-
-void
-flush_workqueue(struct workqueue_struct *wq)
-{
-	taskqueue_run(wq->tq);
+//	wakeup_one(wq->tq);
 }
 
 /*
