@@ -33,6 +33,7 @@
 #include <sys/bus.h>
 #include <sys/conf.h>
 #include <sys/libkern.h>
+#include <sys/limits.h>
 #include <sys/module.h>
 #include <sys/rman.h>
 
@@ -44,6 +45,10 @@
 #include <machine/resource.h>
 
 #define DPRINTF(dev, fmt, args...)	device_rlprintf(20, *dev, fmt, ##args)
+
+/* XXX do not defer processing to tasklet yet */
+/*#define CONFIG_VOICEBUS_NODEFER*/
+#define CONFIG_VOICEBUS_ITHREAD
 #else /* !__FreeBSD__ */
 #include <linux/version.h>
 #include <linux/slab.h>
@@ -1467,7 +1472,11 @@ static void vb_tasklet(unsigned long data)
 	struct voicebus_descriptor_list *const dl = &vb->txd;
 	struct voicebus_descriptor *d;
 	int behind = 0;
+#if defined(CONFIG_VOICEBUS_ITHREAD) || defined(CONFIG_VOICEBUS_NODEFER)
+	const int DEFAULT_COUNT = INT_MAX;
+#else
 	const int DEFAULT_COUNT = 5;
+#endif
 	int count = DEFAULT_COUNT;
 	u32 des0 = 0;
 
@@ -1483,17 +1492,17 @@ static void vb_tasklet(unsigned long data)
 	while ((vbb = vb_get_completed_txb(vb)))
 		list_add_tail(&vbb->entry, &vb->tx_complete);
 
-#if defined(__FreeBSD__)
-	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_POSTREAD);
-#endif
 	if (unlikely(atomic_read(&dl->count) < 2)) {
 		softunderrun = 1;
 		d = vb_descriptor(dl, dl->head);
 		if (1 == atomic_read(&dl->count)) {
 			unsigned long stop;
 			stop = jiffies + HZ/4;
-			while (OWNED(d) && time_after(stop, jiffies))
-				continue;
+			do {
+#if defined(__FreeBSD__)
+				bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_POSTREAD);
+#endif
+			} while (OWNED(d) && time_after(stop, jiffies));
 			if (time_before(stop, jiffies))
 				goto tx_error_exit;
 
@@ -1505,6 +1514,9 @@ static void vb_tasklet(unsigned long data)
 			behind = 1;
 		} else  {
 			behind = 2;
+#if defined(__FreeBSD__)
+			bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_POSTREAD);
+#endif
 			while (!OWNED(d)) {
 				if (d->buffer1 != vb->idle_vbb_dma_addr)
 					goto tx_error_exit;
@@ -1513,6 +1525,9 @@ static void vb_tasklet(unsigned long data)
 				d = vb_descriptor(dl, dl->head);
 				++behind;
 			}
+#if defined(__FreeBSD__)
+			bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_PREWRITE);
+#endif
 		}
 
 	} else {
@@ -1526,6 +1541,9 @@ static void vb_tasklet(unsigned long data)
 	 * of them. */
 	handle_transmit(vb, &buffers);
 
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_POSTREAD);
+#endif
 	if (unlikely(softunderrun)) {
 		int i;
 		vb_increase_latency(vb, behind, &buffers);
@@ -1649,6 +1667,17 @@ static void handle_hardunderrun(struct work_struct *work)
 	start_packet_processing(vb);
 }
 
+#if defined(CONFIG_VOICEBUS_ITHREAD) || defined(CONFIG_VOICEBUS_NODEFER)
+static void
+vb_intr(void *data)
+{
+	struct voicebus *vb = (struct voicebus *)data;
+
+	if (!atomic_read(&vb->tasklet.disable_count))
+		vb->tasklet.func((long) vb);
+}
+#endif /* VOICEBUS_DEFERRED_ITHREAD */
+
 /*!
  * \brief Interrupt handler for VoiceBus interface.
  *
@@ -1662,6 +1691,7 @@ DAHDI_IRQ_HANDLER(vb_isr)
 {
 	struct voicebus *vb = dev_id;
 	u32 int_status;
+	int res = FILTER_HANDLED;
 
 	int_status = __vb_getctl(vb, SR_CSR5);
 	/* Mask out the reserved bits. */
@@ -1686,7 +1716,13 @@ DAHDI_IRQ_HANDLER(vb_isr)
 		/* ******************************************************** */
 		/* NORMAL INTERRUPT CASE				    */
 		/* ******************************************************** */
+#if defined(CONFIG_VOICEBUS_NODEFER)
+		vb_intr(dev_id);
+#elif defined(CONFIG_VOICEBUS_ITHREAD)
+		res = FILTER_SCHEDULE_THREAD;
+#else
 		tasklet_hi_schedule(&vb->tasklet);
+#endif
 		__vb_setctl(vb, SR_CSR5, TX_COMPLETE_INTERRUPT|RX_COMPLETE_INTERRUPT);
 	} else {
 		if (int_status & FATAL_BUS_ERROR_INTERRUPT)
@@ -1712,7 +1748,7 @@ DAHDI_IRQ_HANDLER(vb_isr)
 	}
 
 #if defined(__FreeBSD__)
-	return FILTER_HANDLED;
+	return res;
 #else
 	return IRQ_HANDLED;
 #endif
@@ -1879,8 +1915,13 @@ __voicebus_init(struct voicebus *vb, const char *board_name, int normal_mode)
 	}
 
 	retval = bus_setup_intr(
-	    vb->pdev->dev, vb->irq_res, INTR_TYPE_CLK | INTR_MPSAFE,
-	    vb_isr, NULL, vb, &vb->irq_handle);
+	    vb->pdev->dev, vb->irq_res, INTR_TYPE_CLK | INTR_MPSAFE, vb_isr,
+#if defined(CONFIG_VOICEBUS_ITHREAD)
+	    vb_intr,
+#else
+	    NULL,
+#endif
+	    vb, &vb->irq_handle);
 	if (retval) {
 		dev_err(&vb->pdev->dev, "Can't setup interrupt handler (error %d)\n", retval);
 		goto cleanup;
