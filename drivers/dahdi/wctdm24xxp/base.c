@@ -2533,10 +2533,6 @@ static int wctdm_init_voicedaa(struct wctdm *wc, int card, int fast, int manual,
 		wctdm_setreg(wc, card, 24, 0x19);
 	}
 	
-	/* Enable ring detector full-wave rectifier mode */
-	wctdm_setreg(wc, card, 18, 2);
-	wctdm_setreg(wc, card, 24, 0);
-	
 	/* Set DC Termination:
 	   Tip/Ring voltage adjust, minimum operational current, current limitation */
 	reg26 |= (fxo_modes[_opermode].dcv << 6);
