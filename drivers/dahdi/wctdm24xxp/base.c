@@ -4966,7 +4966,9 @@ static void __devexit wctdm_remove_one(struct pci_dev *pdev)
 		if (vpm) {
 			clear_bit(VPM150M_DTMFDETECT, &vpm->control);
 			clear_bit(VPM150M_ACTIVE, &vpm->control);
+#if !defined(__FreeBSD__)
 			flush_scheduled_work();
+#endif
 		}
 
 		/* shut down any BRI modules */

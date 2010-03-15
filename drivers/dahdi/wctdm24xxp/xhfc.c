@@ -2124,7 +2124,11 @@ static void b400m_disable_workqueues(struct wctdm *wc)
 			down(&wc->syncsem);
 			b4s[i]->shutdown = 1;
 			up(&wc->syncsem);
+#if defined(__FreeBSD__)
+			flush_work(&b4s[i]->xhfc_wq);
+#else
 			flush_workqueue(b4s[i]->xhfc_ws);
+#endif
 		}
 	}
 }
