@@ -3,7 +3,7 @@
  *
  * Written by Joseph Benden <joe@thrallingpenguin.com>
  *
- * Copyright (C) 2007-2008, Thralling Penguin LLC.
+ * Copyright (C) 2007-2010, Thralling Penguin LLC.
  *
  * All rights reserved.
  *
@@ -11,15 +11,15 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
+ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  */
 
@@ -30,9 +30,6 @@
 #include <sys/module.h>
 
 #include "ng_dahdi_netdev.h"
-
-#define ETH_ALEN ETHER_ADDR_LEN
-#define crc32_le(crc, data, len)	crc32_raw(data, len, crc)
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -95,6 +92,9 @@ static atomic_t shutdown = ATOMIC_INIT(0);
 #if defined(__FreeBSD__)
 static char g_padding[ETHMF_MAX_CHANNELS * 8];
 static char g_padding_ignore[8];
+
+#define ETH_ALEN ETHER_ADDR_LEN
+#define crc32_le(crc, data, len)	crc32_raw(data, len, crc)
 #else
 static struct sk_buff_head skbs;
 #endif
@@ -147,9 +147,33 @@ struct ztdeth {
 };
 
 /**
- * Lock for ethmf_list
+ * Lock for adding and removing items in ethmf_list
  */
-static DEFINE_RWLOCK(ethmf_lock);
+#ifdef DEFINE_SPINLOCK
+static DEFINE_SPINLOCK(ethmf_lock);
+#else
+static spinlock_t ethmf_lock = SPIN_LOCK_UNLOCKED;
+#endif
+
+#if defined(__FreeBSD__)
+static inline void
+rcu_read_lock(void)
+{
+	spin_lock(&ethmf_lock);
+}
+
+static inline void
+rcu_read_unlock(void)
+{
+	spin_unlock(&ethmf_lock);
+}
+
+#define synchronize_rcu()
+
+#define list_add_rcu(e, l)			list_add(e, l)
+#define list_del_rcu(e)				list_del(e)
+#define list_for_each_entry_rcu(e, l, elem)	list_for_each_entry(e, l, elem)
+#endif /* __FreeBSD__ */
 
 /**
  * The active list of all running spans
@@ -191,7 +215,7 @@ static inline void find_ethmf(const unsigned char *addr,
 {
 	struct ztdeth *z;
 
-	list_for_each_entry(z, &ethmf_list, list) {
+	list_for_each_entry_rcu(z, &ethmf_list, list) {
 		if (!atomic_read(&z->delay)) {
 			if (!memcmp(addr, z->addr, ETH_ALEN)
 					&& z->subaddr == subaddr) {
@@ -219,7 +243,7 @@ static inline int ethmf_trx_spans_ready(unsigned int addr_hash, struct ztdeth *(
 	struct ztdeth *t;
 	int span_count = 0, spans_ready = 0;
 
-	list_for_each_entry(t, &ethmf_list, list) {
+	list_for_each_entry_rcu(t, &ethmf_list, list) {
 		if (!atomic_read(&t->delay) && t->addr_hash == addr_hash) {
 			++span_count;
 			if (atomic_read(&t->ready)) {
@@ -228,7 +252,7 @@ static inline int ethmf_trx_spans_ready(unsigned int addr_hash, struct ztdeth *(
 					(*ready_spans)[subaddr] = t;
 					++spans_ready;
 				} else {
-					printk(KERN_ERR "More than %d spans per multi-frame group are not currently supported.", 
+					printk(KERN_ERR "More than %d spans per multi-frame group are not currently supported.",
 						ETHMF_MAX_PER_SPAN_GROUP);
 				}
 			}
@@ -247,7 +271,7 @@ static inline int ethmf_trx_spans_ready(unsigned int addr_hash, struct ztdeth *(
 #if defined(__FreeBSD__)
 static int ztdethmf_rcv(struct net_device *dev, struct ether_header *eh,
 			unsigned char *msg, int msglen)
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,14)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 14)
 static int ztdethmf_rcv(struct sk_buff *skb, struct net_device *dev,
 		struct packet_type *pt, struct net_device *orig_dev)
 #else
@@ -268,7 +292,7 @@ static int ztdethmf_rcv(struct sk_buff *skb, struct net_device *dev,
 	if (msglen < sizeof(*zh))
 		return 0;
 	zh = (struct ztdeth_header *) msg;
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,22)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 22)
 	zh = (struct ztdeth_header *) skb_network_header(skb);
 #else
 	zh = (struct ztdeth_header *) skb->nh.raw;
@@ -295,14 +319,14 @@ static int ztdethmf_rcv(struct sk_buff *skb, struct net_device *dev,
 			skb_linearize(skb, GFP_KERNEL);
 #endif
 		data = (unsigned char *) skb->data;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,9)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 9)
 		src_addr = eth_hdr(skb)->h_source;
 #else
 		src_addr = skb->mac.ethernet->h_source;
 #endif
 #endif /* !__FreeBSD__ */
 
-		read_lock(&ethmf_lock);
+		rcu_read_lock();
 		do {
 			find_ethmf(src_addr, htons(span_index), &z, &span);
 			if (unlikely(!z || !span)) {
@@ -315,8 +339,6 @@ static int ztdethmf_rcv(struct sk_buff *skb, struct net_device *dev,
 			samples = data[(span_index * 6)] & 0xFF;
 			flags = data[((span_index * 6) + 1)] & 0xFF;
 			channels = data[((span_index * 6) + 5)] & 0xFF;
-
-			/* Precomputed defaults for most typical values */
 			rbslen = ((channels + 3) / 4) * 2;
 
 			if (unlikely(samples != 8 || channels > ETHMF_MAX_CHANNELS || channels == 0)) {
@@ -327,7 +349,7 @@ static int ztdethmf_rcv(struct sk_buff *skb, struct net_device *dev,
 
 			if (atomic_dec_and_test(&z->refcnt) == 0) {
 				memcpy(z->rcvbuf, data + 6*span_index, 6); /* TDM Header */
-				/* 
+				/*
 				 * If we ignore channel zero we must skip the first eight bytes and
 				 * ensure that ztdynamic doesn't get confused by this new flag
 				 */
@@ -369,7 +391,7 @@ static int ztdethmf_rcv(struct sk_buff *skb, struct net_device *dev,
 #endif
 			++span_index;
 		} while (!atomic_read(&shutdown) && span_index < num_spans);
-		read_unlock(&ethmf_lock);
+		rcu_read_unlock();
 	}
 
 out:
@@ -388,8 +410,8 @@ static int ztdethmf_notifier(struct notifier_block *block, unsigned long event,
 	switch (event) {
 	case NETDEV_GOING_DOWN:
 	case NETDEV_DOWN:
-		read_lock(&ethmf_lock);
-		list_for_each_entry(z, &ethmf_list, list) {
+		rcu_read_lock();
+		list_for_each_entry_rcu(z, &ethmf_list, list) {
 			/* Note that the device no longer exists */
 			if (z->dev == dev) {
 				z->dev = NULL;
@@ -398,11 +420,11 @@ static int ztdethmf_notifier(struct notifier_block *block, unsigned long event,
 #endif
 			}
 		}
-		read_unlock(&ethmf_lock);
+		rcu_read_unlock();
 		break;
 	case NETDEV_UP:
-		read_lock(&ethmf_lock);
-		list_for_each_entry(z, &ethmf_list, list) {
+		rcu_read_lock();
+		list_for_each_entry_rcu(z, &ethmf_list, list) {
 			/* Now that the device exists again, use it */
 			if (!strcmp(z->ethdev, dev->name)) {
 				z->dev = dev;
@@ -411,7 +433,7 @@ static int ztdethmf_notifier(struct notifier_block *block, unsigned long event,
 #endif
 			}
 		}
-		read_unlock(&ethmf_lock);
+		rcu_read_unlock();
 		break;
 	}
 	return 0;
@@ -432,26 +454,49 @@ static int ztdethmf_transmit(void *pvt, unsigned char *msg, int msglen)
 	unsigned short subaddr;
 	struct net_device *dev;
 	int spans_ready = 0, index = 0;
+#if !defined(__FreeBSD__) && LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 10)
+	static spinlock_t lock = SPIN_LOCK_UNLOCKED;
+	unsigned long flags;
+#endif
 
 	if (atomic_read(&shutdown))
 		return 0;
 
-	read_lock(&ethmf_lock);
+	rcu_read_lock();
+
 	if (unlikely(!z || !z->dev)) {
-		read_unlock(&ethmf_lock);
+		rcu_read_unlock();
 		return 0;
 	}
 
 #if defined(__FreeBSD__)
 	if (atomic_cmpset_int(&z->ready, 0, 1)) {
-#else
-	if (atomic_cmpxchg(&z->ready, 0, 1) == 0) {
-#endif
 		memcpy(z->msgbuf, msg, msglen);
 		z->msgbuf_len = msglen;
 	}
+#else /* !__FreeBSD__ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 10)
+	if (!atomic_read(&z->ready)) {
+		spin_lock_irqsave(&lock, flags);
+		atomic_inc(&z->ready);
+		if (1 == atomic_read(&z->ready)) {
+			memcpy(z->msgbuf, msg, msglen);
+			z->msgbuf_len = msglen;
+		}
+		spin_unlock_irqrestore(&lock, flags);
+	}
+#else
+	if (!atomic_read(&z->ready)) {
+		if (atomic_inc_return(&z->ready) == 1) {
+			memcpy(z->msgbuf, msg, msglen);
+			z->msgbuf_len = msglen;
+		}
+	}
+#endif
+#endif /* !__FreeBSD__ */
 
-	if ((spans_ready = ethmf_trx_spans_ready(z->addr_hash, &ready_spans))) {
+	spans_ready = ethmf_trx_spans_ready(z->addr_hash, &ready_spans);
+	if (spans_ready) {
 		int pad[ETHMF_MAX_SPANS], rbs[ETHMF_MAX_SPANS];
 
 		dev = z->dev;
@@ -479,7 +524,7 @@ static int ztdethmf_transmit(void *pvt, unsigned char *msg, int msglen)
 #if defined(__FreeBSD__)
 		MGETHDR(m, M_DONTWAIT, MT_DATA);
 		if (m == NULL) {
-			read_unlock(&ethmf_lock);
+			rcu_read_unlock();
 			ethmf_errors_inc();
 			return 0;
 		}
@@ -495,7 +540,7 @@ static int ztdethmf_transmit(void *pvt, unsigned char *msg, int msglen)
 		skb = dev_alloc_skb(1112 + dev->hard_header_len
 			+ sizeof(struct ztdeth_header) + 32);
 		if (unlikely(!skb)) {
-			read_unlock(&ethmf_lock);
+			rcu_read_unlock();
 			ethmf_errors_inc();
 			return 0;
 		}
@@ -503,7 +548,8 @@ static int ztdethmf_transmit(void *pvt, unsigned char *msg, int msglen)
 		/* Reserve header space */
 		skb_reserve(skb, dev->hard_header_len
 				+ sizeof(struct ztdeth_header));
-#endif
+#endif /* !__FreeBSD__ */
+
 		/* copy each spans header */
 		for (index = 0; index < spans_ready; index++) {
 			if (!atomic_read(&(ready_spans[index]->no_front_padding))) {
@@ -572,13 +618,13 @@ static int ztdethmf_transmit(void *pvt, unsigned char *msg, int msglen)
 
 		/* Setup protocol type */
 		skb->protocol = __constant_htons(ETH_P_ZTDETH);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,22)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 22)
 		skb_set_network_header(skb, 0);
 #else
 		skb->nh.raw = skb->data;
 #endif
 		skb->dev = dev;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,24)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 24)
 		dev_hard_header(skb, dev, ETH_P_ZTDETH, addr, dev->dev_addr, skb->len);
 #else
 		if (dev->hard_header)
@@ -586,14 +632,17 @@ static int ztdethmf_transmit(void *pvt, unsigned char *msg, int msglen)
 					dev->dev_addr, skb->len);
 #endif
 		/* queue frame for delivery */
-		skb_queue_tail(&skbs, skb);
+		if (dev) {
+			skb_queue_tail(&skbs, skb);
+		}
 #endif /* !__FreeBSD__ */
 #ifdef USE_PROC_FS
 		atomic_inc(&(ethmf_groups[hashaddr_to_index(z->addr_hash)].txframecount));
 		atomic_add(skb->len, &(ethmf_groups[hashaddr_to_index(z->addr_hash)].txbytecount));
 #endif
 	}
-	read_unlock(&ethmf_lock);
+
+	rcu_read_unlock();
 
 	return 0;
 }
@@ -611,8 +660,7 @@ static int ztdethmf_flush(void)
 	return 0;
 }
 
-static struct packet_type ztdethmf_ptype =
-{
+static struct packet_type ztdethmf_ptype = {
 	.type = __constant_htons(ETH_P_ZTDETH),	/* Protocol */
 	.dev  = NULL,				/* Device (NULL = wildcard) */
 	.func = ztdethmf_rcv,			/* Receiver */
@@ -621,12 +669,15 @@ static struct packet_type ztdethmf_ptype =
 static void ztdethmf_destroy(void *pvt)
 {
 	struct ztdeth *z = pvt;
+	unsigned long flags;
 
 	atomic_set(&shutdown, 1);
+	synchronize_rcu();
 
-	write_lock(&ethmf_lock);
-	list_del(&z->list);
-	write_unlock(&ethmf_lock);
+	spin_lock_irqsave(&ethmf_lock, flags);
+	list_del_rcu(&z->list);
+	spin_unlock_irqrestore(&ethmf_lock, flags);
+	synchronize_rcu();
 #if defined(USE_PROC_FS)
 	atomic_dec(&(ethmf_groups[hashaddr_to_index(z->addr_hash)].spans));
 #endif
@@ -651,6 +702,7 @@ static void *ztdethmf_create(struct dahdi_span *span, char *addr)
 	char src[256];
 	char *src_ptr;
 	int x, bufsize, num_matched;
+	unsigned long flags;
 
 	BUG_ON(!span);
 	BUG_ON(!addr);
@@ -669,7 +721,7 @@ static void *ztdethmf_create(struct dahdi_span *span, char *addr)
 	/* set a delay for xmit/recv to workaround Zaptel problems */
 	atomic_set(&z->delay, 4);
 
-	/* create a msg buffer. max of ETHMF_MAX_CHANNELS channels */
+	/* create a msg buffer. MAX OF 31 CHANNELS!!!! */
 	bufsize = ETHMF_MAX_CHANNELS * DAHDI_CHUNKSIZE + ETHMF_MAX_CHANNELS / 4 + 48;
 	z->msgbuf = kmalloc(bufsize, GFP_KERNEL);
 	z->rcvbuf = kmalloc(bufsize, GFP_KERNEL);
@@ -683,18 +735,19 @@ static void *ztdethmf_create(struct dahdi_span *span, char *addr)
 			*src_ptr = ' ';
 		++src_ptr;
 	}
-	if (8 != (num_matched = sscanf(src,
+	num_matched = sscanf(src,
 			"%16s %hhx:%hhx:%hhx:%hhx:%hhx:%hhx %hu",
 			z->ethdev, &z->addr[0], &z->addr[1],
 			&z->addr[2], &z->addr[3], &z->addr[4],
-			&z->addr[5], &z->subaddr))) {
+			&z->addr[5], &z->subaddr);
+	if (8 != num_matched) {
 		printk(KERN_ERR "Only matched %d entries in '%s'\n", num_matched, src);
 		printk(KERN_ERR "Invalid TDMoE Multiframe address: %s\n", addr);
 		kfree(z);
 		return NULL;
 	}
 	z->dev = dev_get_by_name(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,24)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 24)
 		&init_net,
 #endif
 		z->ethdev);
@@ -708,8 +761,8 @@ static void *ztdethmf_create(struct dahdi_span *span, char *addr)
 	z->addr_hash = crc32_le(0, z->addr, ETH_ALEN);
 	z->real_channels = span->channels;
 
-	src[0] ='\0';
-	for (x=0; x<5; x++)
+	src[0] = '\0';
+	for (x = 0; x < 5; x++)
 		sprintf(src + strlen(src), "%02x:", z->dev->dev_addr[x]);
 	sprintf(src + strlen(src), "%02x", z->dev->dev_addr[5]);
 
@@ -720,9 +773,9 @@ static void *ztdethmf_create(struct dahdi_span *span, char *addr)
 	atomic_set(&z->ready, 0);
 	atomic_set(&z->refcnt, 0);
 
-	write_lock(&ethmf_lock);
-	list_add(&z->list, &ethmf_list);
-	write_unlock(&ethmf_lock);
+	spin_lock_irqsave(&ethmf_lock, flags);
+	list_add_rcu(&z->list, &ethmf_list);
+	spin_unlock_irqrestore(&ethmf_lock, flags);
 #if defined(USE_PROC_FS)
 	atomic_inc(&(ethmf_groups[hashaddr_to_index(z->addr_hash)].spans));
 #endif
@@ -758,15 +811,15 @@ static int ethmf_delay_dec(void)
 	struct ztdeth *z;
 	int count_nonzero = 0;
 
-	read_lock(&ethmf_lock);
-	list_for_each_entry(z, &ethmf_list, list) {
+	rcu_read_lock();
+	list_for_each_entry_rcu(z, &ethmf_list, list) {
 		if (atomic_read(&z->delay)) {
 			atomic_dec(&z->delay);
 			++count_nonzero;
 		} else
 			atomic_set(&z->delay, 0);
 	}
-	read_unlock(&ethmf_lock);
+	rcu_read_unlock();
 	return count_nonzero;
 }
 
@@ -796,7 +849,8 @@ static int ztdethmf_proc_read(char *page, char **start, off_t off, int count,
 	int len = 0, i = 0;
 	unsigned int group = 0, c = 0;
 
-	read_lock(&ethmf_lock);
+	rcu_read_lock();
+
 	len += sprintf(page + len, "Errors: %d\n\n", atomic_read(&errcount));
 
 	for (group = 0; group < ETHMF_MAX_GROUPS; ++group) {
@@ -805,9 +859,8 @@ static int ztdethmf_proc_read(char *page, char **start, off_t off, int count,
 			len += sprintf(page + len, "  Spans: %d\n",
 				atomic_read(&(ethmf_groups[group].spans)));
 
-
 			c = 1;
-			list_for_each_entry(z, &ethmf_list, list) {
+			list_for_each_entry_rcu(z, &ethmf_list, list) {
 				if (z->addr_hash == ethmf_groups[group].hash_addr) {
 					if (c == 1) {
 						len += sprintf(page + len,
@@ -842,7 +895,7 @@ static int ztdethmf_proc_read(char *page, char **start, off_t off, int count,
 				break;
 		}
 	}
-	read_unlock(&ethmf_lock);
+	rcu_read_unlock();
 
 	if (len <= off) {
 		off -= len;
@@ -852,7 +905,7 @@ static int ztdethmf_proc_read(char *page, char **start, off_t off, int count,
 	len -= off;
 	if (len > count)
 		len = count;
-	return (len);
+	return len;
 }
 #endif
 
@@ -873,6 +926,7 @@ static int __init ztdethmf_init(void)
 #else
 	skb_queue_head_init(&skbs);
 #endif
+
 #ifdef USE_PROC_FS
 	proc_entry = create_proc_read_entry(ztdethmf_procname, 0444, NULL,
 		ztdethmf_proc_read, NULL);
