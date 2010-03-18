@@ -58,6 +58,7 @@
 #define FOP_WRITE_ARGS_DECL	struct file *file, struct uio *uio, size_t count
 #define FOP_WRITE_ARGS		file, uio, count
 
+#define MODULE_PARAM_PREFIX "dahdi"
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -8909,6 +8910,9 @@ int dahdi_receive(struct dahdi_span *span)
 	return 0;
 }
 
+module_param(debug, int, 0644);
+module_param(deftaps, int, 0644);
+
 #if defined(__FreeBSD__)
 static void
 init_file(struct file *file, struct cdev *dev, int ioflag)
@@ -9068,9 +9072,6 @@ MODULE_LICENSE("GPL v2");
  * in the future, and users are encoruged to to rely on it. */
 MODULE_ALIAS("dahdi_dummy");
 MODULE_VERSION(DAHDI_VERSION);
-
-module_param(debug, int, 0644);
-module_param(deftaps, int, 0644);
 
 static struct file_operations dahdi_fops = {
 	.owner   = THIS_MODULE,

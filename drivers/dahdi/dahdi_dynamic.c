@@ -31,6 +31,8 @@
 #include <sys/module.h>
 #include <sys/mutex.h>
 #include <sys/systm.h>
+
+#define MODULE_PARAM_PREFIX "dahdi.dynamic"
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -839,6 +841,8 @@ static void ztdynamic_cleanup(void)
 	printk(KERN_INFO "DAHDI Dynamic Span support unloaded\n");
 }
 
+module_param(debug, int, 0600);
+
 #if defined(__FreeBSD__)
 static int
 dahdi_dynamic_modevent(module_t mod __unused, int type, void *data __unused)
@@ -858,8 +862,6 @@ DEV_MODULE(dahdi_dynamic, dahdi_dynamic_modevent, NULL);
 MODULE_VERSION(dahdi_dynamic, 1);
 MODULE_DEPEND(dahdi_dynamic, dahdi, 1, 1, 1);
 #else /* !__FreeBSD__ */
-module_param(debug, int, 0600);
-
 MODULE_DESCRIPTION("DAHDI Dynamic Span Support");
 MODULE_AUTHOR("Mark Spencer <markster@digium.com>");
 MODULE_LICENSE("GPL v2");

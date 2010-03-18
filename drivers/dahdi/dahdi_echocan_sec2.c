@@ -46,6 +46,7 @@
 #define module_printk(level, fmt, args...) printf(fmt, ## args)
 #define debug_printk(level, fmt, args...) if (debug >= level) printf("%s: " fmt, __FUNCTION__, ## args)
 
+#define MODULE_PARAM_PREFIX "dahdi.echocan.sec2"
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/slab.h>
@@ -57,11 +58,11 @@
 
 #define module_printk(level, fmt, args...) printk(level "%s: " fmt, THIS_MODULE->name, ## args)
 #define debug_printk(level, fmt, args...) if (debug >= level) printk(KERN_DEBUG "%s (%s): " fmt, THIS_MODULE->name, __FUNCTION__, ## args)
-
-static int debug;
 #endif /* !__FreeBSD__ */
 
 #include <dahdi/kernel.h>
+
+static int debug;
 
 #include "fir.h"
 
@@ -354,6 +355,8 @@ static void __exit mod_exit(void)
 	dahdi_unregister_echocan_factory(&my_factory);
 }
 
+module_param(debug, int, S_IRUGO | S_IWUSR);
+
 #if defined(__FreeBSD__)
 static int
 echocan_sec2_modevent(module_t mod __unused, int type, void *data __unused)
@@ -374,8 +377,6 @@ MODULE_VERSION(dahdi_echocan_sec2, 1);
 MODULE_DEPEND(dahdi_echocan_sec2, dahdi, 1, 1, 1);
 
 #else /* !__FreeBSD__ */
-module_param(debug, int, S_IRUGO | S_IWUSR);
-
 MODULE_DESCRIPTION("DAHDI 'SEC2' Echo Canceler");
 MODULE_AUTHOR("Steve Underwood <steveu@coppice.org>");
 MODULE_LICENSE("GPL");
