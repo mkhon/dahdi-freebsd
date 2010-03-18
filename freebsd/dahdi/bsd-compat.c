@@ -39,6 +39,9 @@
 
 #include <dahdi/compat/bsd.h>
 
+SYSCTL_NODE(, OID_AUTO, dahdi, CTLFLAG_RW, 0, "DAHDI");
+SYSCTL_NODE(_dahdi, OID_AUTO, echocan, CTLFLAG_RW, 0, "DAHDI Echo Cancelers");
+
 /*
  * Tasklet API
  */

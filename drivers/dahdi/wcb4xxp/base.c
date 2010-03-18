@@ -32,8 +32,6 @@
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcivar.h>
 
-#define MODULE_PARAM_PREFIX "dahdi.wcb4xxp"
-
 #ifdef mb
 #undef mb
 #endif
@@ -3136,6 +3134,10 @@ static devclass_t b4xxp_devclass;
 DRIVER_MODULE(wcb4xxp, pci, b4xxp_pci_driver, b4xxp_devclass, 0, 0);
 MODULE_DEPEND(wcb4xxp, pci, 1, 1, 1);
 MODULE_DEPEND(wcb4xxp, dahdi, 1, 1, 1);
+
+SYSCTL_NODE(_dahdi, OID_AUTO, wcb4xxp, CTLFLAG_RW, 0, "DAHDI wcb4xxp");
+#define MODULE_PARAM_PREFIX "dahdi.wcb4xxp"
+#define MODULE_PARAM_PARENT _dahdi_wcb4xxp
 
 #else /* !__FreeBSD__ */
 static int b4xxp_setup_intr(struct b4xxp *b4)

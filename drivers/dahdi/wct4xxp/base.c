@@ -41,8 +41,6 @@
 
 #define DPRINTF(dev, fmt, args...)      device_rlprintf(20, dev, fmt, ##args)
 
-#define MODULE_PARAM_PREFIX "dahdi.wct4xxp"
-
 static int
 t4_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr);
 
@@ -4797,6 +4795,11 @@ DRIVER_MODULE(wct4xxp, pci, t4_pci_driver, t4_devclass, 0, 0);
 MODULE_DEPEND(wct4xxp, pci, 1, 1, 1);
 MODULE_DEPEND(wct4xxp, dahdi, 1, 1, 1);
 MODULE_DEPEND(wct4xxp, firmware, 1, 1, 1);
+
+SYSCTL_NODE(_dahdi, OID_AUTO, wct4xxp, CTLFLAG_RW, 0, "DAHDI wct4xxp");
+#define MODULE_PARAM_PREFIX "dahdi.wct4xxp"
+#define MODULE_PARAM_PARENT _dahdi_wct4xxp
+
 #else /* !__FreeBSD__ */
 static int
 t4_setup_intr(struct t4 *wc, struct devtype *dt)

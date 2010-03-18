@@ -49,8 +49,6 @@ typedef int bool;
 
 #define fatal_signal_pending(c) 0
 
-#define MODULE_PARAM_PREFIX "dahdi.wctdm24xxp"
-
 #define DPRINTF(dev, fmt, args...)      device_rlprintf(20, dev, fmt, ##args)
 #else /* !__FreeBSD__ */
 #include <linux/version.h>
@@ -4998,7 +4996,11 @@ static struct pci_device_id wctdm_pci_tbl[] = {
 	{ 0 }
 };
 
-#if !defined(__FreeBSD__)
+#if defined(__FreeBSD__)
+SYSCTL_NODE(_dahdi, OID_AUTO, wctdm24xxp, CTLFLAG_RW, 0, "DAHDI wctdm24xxp");
+#define MODULE_PARAM_PREFIX "dahdi.wctdm24xxp"
+#define MODULE_PARAM_PARENT _dahdi_wctdm24xxp
+#else /* !__FreeBSD__ */
 MODULE_DEVICE_TABLE(pci, wctdm_pci_tbl);
 
 static struct pci_driver wctdm_driver = {

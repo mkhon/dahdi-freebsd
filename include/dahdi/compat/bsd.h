@@ -9,6 +9,7 @@
 #include <sys/mutex.h>
 #include <sys/sema.h>
 #include <sys/sx.h>
+#include <sys/sysctl.h>
 #include <sys/taskqueue.h>
 #include <machine/atomic.h>
 
@@ -329,11 +330,38 @@ int request_module(const char *fmt, ...);
 
 #define EXPORT_SYMBOL(s)
 
-#define module_param(name, type, mode)	module_param_##type(MODULE_PARAM_PREFIX "." #name, name)
-#define module_param_int(name, var)	TUNABLE_INT((name), &(var))
-#define module_param_uint(name, var)	TUNABLE_INT((name), &(var))
-#define module_param_charp(name, var)	TUNABLE_STR((name), (var), sizeof(var))
+#define _SYSCTL_FLAG(mode)	((mode) & 0200 ? CTLFLAG_RW : CTLFLAG_RD)
+#define module_param(name, type, mode)	module_param_##type(MODULE_PARAM_PREFIX "." #name, name, mode)
+#define module_param_int(name, var, mode)				\
+	TUNABLE_INT((name), &(var));					\
+	SYSCTL_INT(MODULE_PARAM_PARENT, OID_AUTO, var, _SYSCTL_FLAG(mode),\
+		   &(var), 0, MODULE_PARAM_PREFIX "." #name)
+#define module_param_uint(name, var, mode)				\
+	TUNABLE_INT((name), &(var));					\
+	SYSCTL_UINT(MODULE_PARAM_PARENT, OID_AUTO, var, _SYSCTL_FLAG(mode),\
+		   &(var), 0, MODULE_PARAM_PREFIX "." #name)
+#define module_param_charp(name, var, mode)				\
+	TUNABLE_STR((name), (var), sizeof(var));			\
+	SYSCTL_STRING(MODULE_PARAM_PARENT, OID_AUTO, var, _SYSCTL_FLAG(mode),\
+		   var, sizeof(var), MODULE_PARAM_PREFIX "." #name)
 #define MODULE_PARM_DESC(name, desc)
+
+#define S_IRUSR 00400
+#define S_IWUSR 00200
+#define S_IXUSR 00100
+
+#define S_IRGRP 00040
+#define S_IWGRP 00020
+#define S_IXGRP 00010
+
+#define S_IROTH 00004
+#define S_IWOTH 00002
+#define S_IXOTH 00001
+
+#define S_IRUGO         (S_IRUSR|S_IRGRP|S_IROTH)
+
+SYSCTL_DECL(_dahdi);
+SYSCTL_DECL(_dahdi_echocan);
 
 /*
  * Firmware API

@@ -45,8 +45,6 @@
 
 #define module_printk(level, fmt, args...) printf(fmt, ## args)
 #define debug_printk(level, fmt, args...) if (debug >= level) printf("%s: " fmt, __FUNCTION__, ## args)
-
-#define MODULE_PARAM_PREFIX "dahdi.echocan.sec2"
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/slab.h>
@@ -354,6 +352,12 @@ static void __exit mod_exit(void)
 {
 	dahdi_unregister_echocan_factory(&my_factory);
 }
+
+#if defined(__FreeBSD__)
+SYSCTL_NODE(_dahdi_echocan, OID_AUTO, sec2, CTLFLAG_RW, 0, "DAHDI 'SEC2' Echo Canceler");
+#define MODULE_PARAM_PREFIX "dahdi.echocan.sec2"
+#define MODULE_PARAM_PARENT _dahdi_echocan_sec2
+#endif
 
 module_param(debug, int, S_IRUGO | S_IWUSR);
 

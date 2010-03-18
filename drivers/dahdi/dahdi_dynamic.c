@@ -30,9 +30,8 @@
 #include <sys/lock.h>
 #include <sys/module.h>
 #include <sys/mutex.h>
+#include <sys/sysctl.h>
 #include <sys/systm.h>
-
-#define MODULE_PARAM_PREFIX "dahdi.dynamic"
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -840,6 +839,12 @@ static void ztdynamic_cleanup(void)
 	del_timer(&alarmcheck);
 	printk(KERN_INFO "DAHDI Dynamic Span support unloaded\n");
 }
+
+#if defined(__FreeBSD__)
+SYSCTL_NODE(_dahdi, OID_AUTO, dynamic, CTLFLAG_RW, 0, "DAHDI dynamic");
+#define MODULE_PARAM_PREFIX "dahdi.dynamic"
+#define MODULE_PARAM_PARENT _dahdi_dynamic
+#endif
 
 module_param(debug, int, 0600);
 

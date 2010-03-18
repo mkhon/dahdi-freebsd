@@ -59,6 +59,7 @@
 #define FOP_WRITE_ARGS		file, uio, count
 
 #define MODULE_PARAM_PREFIX "dahdi"
+#define MODULE_PARAM_PARENT _dahdi
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
