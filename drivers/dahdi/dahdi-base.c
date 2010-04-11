@@ -9247,15 +9247,17 @@ dahdi_modevent(module_t mod, int cmd, void *arg)
 
 	default:
 		/* we only understand load/unload*/
-		return -EINVAL;
+		return EOPNOTSUPP;
 	}
 }
 
 /* Now declare the module to the system */
 MODULE_VERSION(dahdi, 1);
 DEV_MODULE(dahdi, dahdi_modevent, NULL);
+#ifdef CONFIG_DAHDI_CORE_TIMER
 MODULE_VERSION(dahdi_dummy, 1);
 DEV_MODULE(dahdi_dummy, NULL, NULL);
+#endif
 #else /* !__FreeBSD__ */
 module_init(dahdi_init);
 module_exit(dahdi_cleanup);
