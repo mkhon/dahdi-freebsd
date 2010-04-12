@@ -47,28 +47,6 @@
 
 #include <dahdi/kernel.h>
 
-#if defined(__FreeBSD__)
-static DEFINE_SPINLOCK(dlock);
-
-static inline void
-rcu_read_lock(void)
-{
-	spin_lock(&dlock);
-}
-
-static inline void
-rcu_read_unlock(void)
-{
-	spin_unlock(&dlock);
-}
-
-#define synchronize_rcu()
-
-#define list_add_rcu(e, l)			list_add(e, l)
-#define list_del_rcu(e)				list_del(e)
-#define list_for_each_entry_rcu(e, l, elem)	list_for_each_entry(e, l, elem)
-#endif
-
 /*
  * Tasklets provide better system interactive response at the cost of the
  * possibility of losing a frame of data at very infrequent intervals.  If
@@ -148,7 +126,11 @@ struct dahdi_dynamic {
 };
 
 #ifdef DEFINE_SPINLOCK
+#if defined(__FreeBSD__)
+static DEFINE_RWLOCK(dspan_lock);
+#else
 static DEFINE_SPINLOCK(dspan_lock);
+#endif
 static DEFINE_SPINLOCK(driver_lock);
 #else
 static spinlock_t dspan_lock = SPIN_LOCK_UNLOCKED;
@@ -157,6 +139,25 @@ static spinlock_t driver_lock = SPIN_LOCK_UNLOCKED;
 
 static _LIST_HEAD(dspan_list);
 static _LIST_HEAD(driver_list);
+
+#if defined(__FreeBSD__)
+static inline void
+rcu_read_lock(void)
+{
+	read_lock(&dspan_lock);
+}
+
+static inline void
+rcu_read_unlock(void)
+{
+	read_unlock(&dspan_lock);
+}
+
+#define list_add_rcu(e, l)			list_add(e, l)
+#define list_del_rcu(e)				list_del(e)
+#define _list_temp(e)				__CONCAT(e##_tmp_, __LINE__)
+#define list_for_each_entry_rcu(e, l, elem)	__typeof__(e) _list_temp(e); list_for_each_entry_safe(e, _list_temp(e), l, elem)
+#endif
 
 static int debug = 0;
 
@@ -512,10 +513,9 @@ static int destroy_dynamic(struct dahdi_dynamic_span *zds)
 		return -EBUSY;
 	}
 
-	spin_lock_irqsave(&dspan_lock, flags);
+	write_lock_irqsave(&dspan_lock, flags);
 	list_del_rcu(&z->list);
-	spin_unlock_irqrestore(&dspan_lock, flags);
-	synchronize_rcu();
+	write_unlock_irqrestore(&dspan_lock, flags);
 
 	/* Destroy it */
 	dynamic_destroy(z);
@@ -678,9 +678,9 @@ static int create_dynamic(struct dahdi_dynamic_span *zds)
 		return -EINVAL;
 	}
 
-	spin_lock_irqsave(&dspan_lock, flags);
+	write_lock_irqsave(&dspan_lock, flags);
 	list_add_rcu(&z->list, &dspan_list);
-	spin_unlock_irqrestore(&dspan_lock, flags);
+	write_unlock_irqrestore(&dspan_lock, flags);
 
 	checkmaster();
 
@@ -760,20 +760,16 @@ void dahdi_dynamic_unregister(struct dahdi_dynamic_driver *dri)
 	spin_lock_irqsave(&driver_lock, flags);
 	list_del_rcu(&dri->list);
 	spin_unlock_irqrestore(&driver_lock, flags);
-	synchronize_rcu();
 
-	list_for_each_entry(z, &dspan_list, list) {
+	list_for_each_entry_rcu(z, &dspan_list, list) {
 		if (z->driver == dri) {
-			spin_lock_irqsave(&dspan_lock, flags);
+			write_lock_irqsave(&dspan_lock, flags);
 			list_del_rcu(&z->list);
-			spin_unlock_irqrestore(&dspan_lock, flags);
-			synchronize_rcu();
+			write_unlock_irqrestore(&dspan_lock, flags);
 
-			if (!z->usecount) {
-				spin_unlock_irqrestore(&dlock, flags);
+			if (!z->usecount)
 				dynamic_destroy(z);
-				spin_lock_irqsave(&dlock, flags);
-			} else
+			else
 				z->dead = 1;
 		}
 	}
