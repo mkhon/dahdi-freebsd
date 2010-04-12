@@ -8,7 +8,7 @@ SRCS+=		device_if.h bus_if.h pci_if.h
 CLEANFILES=	version.h
 INCS=		user.h wctdm_user.h compat/types.h
 
-DAHDIVERSION!=	${.CURDIR}/../../build_tools/make_version ${.CURDIR}/../.. dahdi/linux
+DAHDIVERSION!=	${.CURDIR}/../../build_tools/make_version ${.CURDIR}/../.. dahdi/freebsd
 version.h::
 	@DAHDIVERSION="${DAHDIVERSION}" ${.CURDIR}/../../build_tools/make_version_h >${.TARGET}.tmp
 	@if ! cmp -s ${.TARGET}.tmp ${.TARGET}; then mv ${.TARGET}.tmp ${.TARGET}; fi
