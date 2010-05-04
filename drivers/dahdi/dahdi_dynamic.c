@@ -83,6 +83,22 @@
 #define ZTD_FLAG_SIGBITS_PRESENT	(1 << 1)
 #define ZTD_FLAG_LOOPBACK		(1 << 2)
 
+/* signalling frame chunk size */
+#define ZTD_SIG_SIZE(x)			((x) & 0x7)
+
+/* signalling frame status */
+#define ZTD_SIG_STATUS(x)		(((x) >> 4) & 0x7)
+
+/* signalling frame status values */
+#define ZTD_SIG_OK			0
+#define ZTD_SIG_ABORT			1
+#define ZTD_SIG_OVERRUN			2
+#define ZTD_SIG_BADFCS			3
+
+/* signalling frame continuation bit */
+#define ZTD_SIG_CONT			(1 << 7)
+#define ZTD_SIG_IS_LAST(x)		(((x) & ZTD_SIG_CONT) == 0)
+
 #define ERR_NSAMP			(1 << 16)
 #define ERR_NCHAN			(1 << 17)
 #define ERR_LEN				(1 << 18)
@@ -93,6 +109,7 @@ EXPORT_SYMBOL(dahdi_dynamic_receive);
 
 static int ztdynamic_init(void);
 static void ztdynamic_cleanup(void);
+static void ztd_hdlc_xmit(struct dahdi_chan *chan);
 
 #ifdef ENABLE_TASKLETS
 static int taskletrun;
@@ -121,6 +138,10 @@ struct dahdi_dynamic {
 	int timing;
 	int master;
 	unsigned char *msgbuf;
+
+	/* HDLC stuff */
+	struct dahdi_chan *sigchan;
+	atomic_t sigactive;
 
 	struct list_head list;
 };
@@ -252,10 +273,70 @@ static void ztd_sendmessage(struct dahdi_dynamic *z)
 		memcpy(buf, z->chans[x]->writechunk, DAHDI_CHUNKSIZE);
 		buf += DAHDI_CHUNKSIZE;
 		msglen += DAHDI_CHUNKSIZE;
+		if (z->sigchan == z->chans[x])
+			ztd_hdlc_xmit(z->sigchan);
 	}
-	
+
 	z->driver->transmit(z->pvt, z->msgbuf, msglen);
 	
+}
+
+static void
+ztdynamic_receive_hdlc(struct dahdi_chan *chan)
+{
+	unsigned char control = chan->readchunk[0];
+	int size = ZTD_SIG_SIZE(control);
+
+	if (!size)
+		return;
+
+	chan->readchunk[0] = 0;
+	if (debug > 1 && printk_ratelimit()) {
+		printk(KERN_DEBUG "%s: control 0x%02x\n",
+		    __FUNCTION__, control);
+	}
+	if (ZTD_SIG_IS_LAST(control)) {
+		int abort_event = DAHDI_EVENT_NONE;
+
+		switch (ZTD_SIG_STATUS(control)) {
+		case ZTD_SIG_ABORT:
+			abort_event = DAHDI_EVENT_ABORT;
+			break;
+		case ZTD_SIG_OVERRUN:
+			abort_event = DAHDI_EVENT_OVERRUN;
+			break;
+		case ZTD_SIG_BADFCS:
+			abort_event = DAHDI_EVENT_BADFCS;
+			break;
+		}
+
+		if (abort_event != DAHDI_EVENT_NONE) {
+			if (debug) {
+				printk(KERN_DEBUG "%s: dahdi_hdlc_abort(%d)\n",
+				    __FUNCTION__, abort_event);
+			}
+			dahdi_hdlc_abort(chan, DAHDI_EVENT_ABORT);
+			return;
+		}
+	}
+
+	if (debug > 1 && printk_ratelimit()) {
+		printk(KERN_DEBUG "%s: received HDLC frame chunk (%d bytes)\n",
+		    __FUNCTION__, size);
+	}
+	dahdi_hdlc_putbuf(chan, chan->readchunk + 1, size);
+	if (ZTD_SIG_IS_LAST(control)) {
+		static unsigned char fcs[2];
+
+		if (debug > 1 && printk_ratelimit()) {
+			printk(KERN_DEBUG "%s: received complete HDLC frame\n",
+			    __FUNCTION__);
+		}
+
+		/* append dummy FCS */
+		dahdi_hdlc_putbuf(chan, fcs, sizeof(fcs));
+		dahdi_hdlc_finish(chan);
+	}
 }
 
 static void __ztdynamic_run(void)
@@ -268,8 +349,14 @@ static void __ztdynamic_run(void)
 	list_for_each_entry_rcu(z, &dspan_list, list) {
 		if (!z->dead) {
 			for (y=0;y<z->span.channels;y++) {
-				/* Echo cancel double buffered data */
-				dahdi_ec_chunk(z->span.chans[y], z->span.chans[y]->readchunk, z->span.chans[y]->writechunk);
+				struct dahdi_chan *chan = z->span.chans[y];
+
+				if (chan != z->sigchan) {
+					/* Echo cancel double buffered data */
+					dahdi_ec_chunk(chan, chan->readchunk, chan->writechunk);
+				} else {
+					ztdynamic_receive_hdlc(chan);
+				}
 			}
 			dahdi_receive(&z->span);
 			dahdi_transmit(&z->span);
@@ -423,6 +510,7 @@ void dahdi_dynamic_receive(struct dahdi_span *span, unsigned char *msg, int msgl
 		newalarm |= DAHDI_ALARM_YELLOW;
 
 	if (newalarm != span->alarms) {
+		atomic_set(&ztd->sigactive, 0);
 		span->alarms = newalarm;
 		dahdi_alarm_notify(span);
 		checkmaster();
@@ -543,6 +631,24 @@ static int ztd_open(struct dahdi_chan *chan)
 
 static int ztd_chanconfig(struct dahdi_chan *chan, int sigtype)
 {
+	unsigned long flags;
+	struct dahdi_dynamic *z = chan->span->pvt;
+
+	if (!z)
+		return 0;
+
+	/* (re)configure signalling channel */
+	if (sigtype == DAHDI_SIG_HARDHDLC || z->sigchan == chan) {
+		write_lock_irqsave(&dspan_lock, flags);
+		z->sigchan = (sigtype == DAHDI_SIG_HARDHDLC) ? chan : NULL;
+		atomic_set(&z->sigactive, 0);
+		if (debug) {
+			printk(KERN_DEBUG "%s: chan %s(%d): sigchan %p\n",
+			    __FUNCTION__, chan->name, chan->channo, z->sigchan);
+		}
+		write_unlock_irqrestore(&dspan_lock, flags);
+	}
+
 	return 0;
 }
 
@@ -556,6 +662,56 @@ static int ztd_close(struct dahdi_chan *chan)
 			dynamic_destroy(z);
 	}
 	return 0;
+}
+
+static void ztd_hdlc_xmit(struct dahdi_chan *chan)
+{
+	int res;
+	unsigned size = DAHDI_CHUNKSIZE - 1;
+	struct dahdi_dynamic *z = chan->span->pvt;
+
+	chan->writechunk[0] = 0;
+	res = dahdi_hdlc_getbuf(chan, chan->writechunk + 1, &size);
+	if (size == 0) {
+		atomic_set(&z->sigactive, 0);
+		if (debug > 1 && printk_ratelimit())
+			printk(KERN_DEBUG "%s: no more data\n", __FUNCTION__);
+		return;
+	}
+
+	if (debug > 1 && printk_ratelimit()) {
+		printk(KERN_DEBUG "%s: %d bytes of data (res %d)\n",
+		    __FUNCTION__, size, res);
+	}
+	chan->writechunk[0] |= size & 0x7;
+	if (res == 0)
+		chan->writechunk[0] |= ZTD_SIG_CONT;
+}
+
+static void ztd_hdlc_hard_xmit(struct dahdi_chan *chan)
+{
+	struct dahdi_chan *sigchan;
+	struct dahdi_dynamic *z = chan->span->pvt;
+
+	rcu_read_lock();
+	if ((sigchan = z->sigchan) == NULL) {
+		printk(KERN_NOTICE "%s: Invalid (NULL) signalling channel\n",
+		    __FUNCTION__);
+		rcu_read_unlock();
+		return;
+	}
+	rcu_read_unlock();
+
+	if (sigchan != chan || atomic_read(&z->sigactive)) {
+		if (debug > 1 && printk_ratelimit()) {
+			printk(KERN_DEBUG "%s: invalid channel (sigchan %p, chan %p) or transmitter active\n",
+			    __FUNCTION__, sigchan, chan);
+		}
+		return;
+	}
+
+	atomic_set(&z->sigactive, 1);
+	ztd_hdlc_xmit(sigchan);
 }
 
 static int create_dynamic(struct dahdi_dynamic_span *zds)
@@ -626,12 +782,15 @@ static int create_dynamic(struct dahdi_dynamic_span *zds)
 	z->span.open = ztd_open;
 	z->span.close = ztd_close;
 	z->span.chanconfig = ztd_chanconfig;
+	z->span.hdlc_hard_xmit = ztd_hdlc_hard_xmit;
+	z->sigchan = NULL;
+	atomic_set(&z->sigactive, 0);
 	for (x=0; x < z->span.channels; x++) {
 		sprintf(z->chans[x]->name, "DYN/%s/%s/%d", zds->driver, zds->addr, x+1);
 		z->chans[x]->sigcap = DAHDI_SIG_EM | DAHDI_SIG_CLEAR | DAHDI_SIG_FXSLS |
 				      DAHDI_SIG_FXSKS | DAHDI_SIG_FXSGS | DAHDI_SIG_FXOLS |
 				      DAHDI_SIG_FXOKS | DAHDI_SIG_FXOGS | DAHDI_SIG_SF | 
-				      DAHDI_SIG_DACS_RBS | DAHDI_SIG_CAS;
+				      DAHDI_SIG_DACS_RBS | DAHDI_SIG_CAS | DAHDI_SIG_HARDHDLC;
 		z->chans[x]->chanpos = x + 1;
 		z->chans[x]->pvt = z;
 	}
