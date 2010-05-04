@@ -172,7 +172,8 @@ rcu_read_unlock(void)
 
 #define list_add_rcu(e, l)			list_add(e, l)
 #define list_del_rcu(e)				list_del(e)
-#define list_for_each_entry_rcu(e, l, elem)	list_for_each_entry(e, l, elem)
+#define _list_temp(e)				__CONCAT(e##_tmp_, __LINE__)
+#define list_for_each_entry_rcu(e, l, elem)	__typeof__(e) _list_temp(e); list_for_each_entry_safe(e, _list_temp(e), l, elem)
 #endif /* __FreeBSD__ */
 
 /**
