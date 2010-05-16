@@ -415,6 +415,8 @@ static inline unsigned long _jiffies(void)
 #define udelay(usec)		DELAY(usec)
 #define mdelay(msec)		DELAY((msec) * 1000)
 
+#define schedule_timeout(jiff)	pause("dhdslp", jiff)
+
 #if defined(msleep)
 #undef msleep
 #endif
