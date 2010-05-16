@@ -23,6 +23,20 @@
  * this program for more details.
  */
 
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/bus.h>
+#include <sys/module.h>
+#include <sys/rman.h>
+
+#include <machine/bus.h>
+#include <dev/pci/pcireg.h>
+#include <dev/pci/pcivar.h>
+
+#define DPRINTF(dev, fmt, args...)      device_rlprintf(20, dev, fmt, ##args)
+
+#define set_current_state(x)
+#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -32,6 +46,7 @@
 #include <linux/pci.h>
 #include <asm/io.h>
 #include <linux/moduleparam.h>
+#endif /* !__FreeBSD__ */
 
 #include <dahdi/kernel.h>
 
@@ -109,9 +124,15 @@
 #define PEGTIME		50 * 8		/* 50ms peak to peak gets us rings of 10 Hz or more */
 #define PEGCOUNT	5		/* 5 cycles of pegging means RING */
 
+#if defined(__FreeBSD__)
+#define	wcfxo_printk(level, span, fmt, ...)	\
+	printk(KERN_ ## level "%s-%s: %s: " fmt, #level,	\
+		"wcfxo", (span).name, ## __VA_ARGS__)
+#else
 #define	wcfxo_printk(level, span, fmt, ...)	\
 	printk(KERN_ ## level "%s-%s: %s: " fmt, #level,	\
 		THIS_MODULE->name, (span).name, ## __VA_ARGS__)
+#endif
 
 #define wcfxo_notice(span, fmt, ...) \
 	wcfxo_printk(NOTICE, span, fmt, ## __VA_ARGS__)
@@ -134,6 +155,9 @@ static int wecareregs[] =
 };
 
 struct wcfxo {
+#if defined(__FreeBSD__)
+	struct pci_dev _dev;
+#endif
 	struct pci_dev *dev;
 	char *variety;
 	struct dahdi_span span;
@@ -170,9 +194,26 @@ struct wcfxo {
 	unsigned char lasttx[DAHDI_CHUNKSIZE];
 	/* Up to 32 registers of whatever we most recently read */
 	unsigned char readregs[32];
+#if defined(__FreeBSD__)
+	struct resource *io_res;
+	int io_rid;
+
+	struct resource *irq_res;		/* resource for irq */
+	int irq_rid;
+	void *irq_handle;
+
+	uint32_t readdma;
+	bus_dma_tag_t   read_dma_tag;
+	bus_dmamap_t    read_dma_map;
+
+	uint32_t writedma;
+	bus_dma_tag_t   write_dma_tag;
+	bus_dmamap_t    write_dma_map;
+#else /* !__FreeBSD__ */
 	unsigned long ioaddr;
 	dma_addr_t 	readdma;
 	dma_addr_t	writedma;
+#endif /* !__FreeBSD__ */
 	volatile int *writechunk;					/* Double-word aligned write memory */
 	volatile int *readchunk;					/* Double-word aligned read memory */
 #ifdef ZERO_BATT_RING
@@ -210,9 +251,11 @@ static struct wcfxo_desc wcx101p = { "Wildcard X101P",
 static struct wcfxo_desc generic = { "Generic Clone",
 		FLAG_USE_XTAL | FLAG_DOUBLE_CLOCK };
 
+#if !defined(__FreeBSD__)
 static struct wcfxo *ifaces[WC_MAX_IFACES];
 
 static void wcfxo_release(struct wcfxo *wc);
+#endif
 
 static int debug = 0;
 
@@ -240,6 +283,39 @@ static struct fxo_mode {
 										   Greece, Iceland, Ireland, Italy, Luxembourg, Netherlands,
 										   Norway, Portugal, Spain, Sweden, Switzerland, and UK */
 };
+
+static inline u8
+wcfxo_inb(struct wcfxo *wc, int reg)
+{
+#if defined(__FreeBSD__)
+	return bus_space_read_1(rman_get_bustag(wc->io_res),
+	    rman_get_bushandle(wc->io_res), reg);
+#else
+	return inb(wc->ioaddr + reg);
+#endif
+}
+
+static inline void
+wcfxo_outb(struct wcfxo *wc, int reg, u8 value)
+{
+#if defined(__FreeBSD__)
+	bus_space_write_1(rman_get_bustag(wc->io_res),
+	    rman_get_bushandle(wc->io_res), reg, value);
+#else
+	outb(value, wc->ioaddr + reg);
+#endif
+}
+
+static inline void
+wcfxo_outl(struct wcfxo *wc, int reg, u32 value)
+{
+#if defined(__FreeBSD__)
+	bus_space_write_4(rman_get_bustag(wc->io_res),
+	    rman_get_bushandle(wc->io_res), reg, value);
+#else
+	outl(value, wc->ioaddr + reg);
+#endif
+}
 
 static inline void wcfxo_transmitprep(struct wcfxo *wc, unsigned char ints)
 {
@@ -322,6 +398,9 @@ static inline void wcfxo_transmitprep(struct wcfxo *wc, unsigned char ints)
 		wc->regs[x].flags = FLAG_EMPTY;
 	}
 
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(wc->write_dma_tag, wc->write_dma_map, BUS_DMASYNC_PREWRITE);
+#endif
 }
 
 static inline void wcfxo_receiveprep(struct wcfxo *wc, unsigned char ints)
@@ -336,6 +415,9 @@ static inline void wcfxo_receiveprep(struct wcfxo *wc, unsigned char ints)
 		readchunk = wc->readchunk;
 	else
 		readchunk = wc->readchunk + DAHDI_CHUNKSIZE * 2;
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(wc->read_dma_tag, wc->read_dma_map, BUS_DMASYNC_POSTREAD);
+#endif
 
 	/* Keep track of how quickly our peg alternates */
 	wc->pegtimer+=DAHDI_CHUNKSIZE;
@@ -437,13 +519,17 @@ DAHDI_IRQ_HANDLER(wcfxo_interrupt)
 	static int oldcnt = 0;
 #endif
 
-	ints = inb(wc->ioaddr + WC_INTSTAT);
+	ints = wcfxo_inb(wc, WC_INTSTAT);
 
 
 	if (!ints)
+#if defined(__FreeBSD__)
+		return FILTER_STRAY;
+#else
 		return IRQ_NONE;
+#endif
 
-	outb(ints, wc->ioaddr + WC_INTSTAT);
+	wcfxo_outb(wc, WC_INTSTAT, ints);
 
 	if (ints & 0x0c) {  /* if there is a rx interrupt pending */
 #ifdef ENABLE_TASKLETS
@@ -466,12 +552,20 @@ DAHDI_IRQ_HANDLER(wcfxo_interrupt)
 		printk(KERN_INFO "FXO PCI Master abort\n");
 		/* Stop DMA andlet the watchdog start it again */
 		wcfxo_stop_dma(wc);
+#if defined(__FreeBSD__)
+		return FILTER_HANDLED;
+#else
 		return IRQ_RETVAL(1);
+#endif
 	}
 
 	if (ints & 0x20) {
 		printk(KERN_INFO "PCI Target abort\n");
+#if defined(__FreeBSD__)
+		return FILTER_HANDLED;
+#else
 		return IRQ_RETVAL(1);
+#endif
 	}
 	if (1 /* !(wc->report % 0xf) */) {
 		/* Check for BATTERY from register and debounce for 8 ms */
@@ -546,7 +640,11 @@ DAHDI_IRQ_HANDLER(wcfxo_interrupt)
 
 	}
 
+#if defined(__FreeBSD__)
+	return FILTER_HANDLED;
+#else
 	return IRQ_RETVAL(1);
+#endif
 }
 
 static int wcfxo_setreg(struct wcfxo *wc, unsigned char reg, unsigned char value)
@@ -584,9 +682,11 @@ static int wcfxo_close(struct dahdi_chan *chan)
 {
 	struct wcfxo *wc = chan->pvt;
 	wc->usecount--;
+#if !defined(__FreeBSD__)
 	/* If we're dead, release us now */
 	if (!wc->usecount && wc->dead)
 		wcfxo_release(wc);
+#endif /* !__FreeBSD__ */
 	return 0;
 }
 
@@ -641,7 +741,7 @@ static int wcfxo_initialize(struct wcfxo *wc)
 	snprintf(wc->span.desc, sizeof(wc->span.desc) - 1, "%s Board %d", wc->variety, wc->pos + 1);
 	sprintf(wc->chan->name, "WCFXO/%d/%d", wc->pos, 0);
 	snprintf(wc->span.location, sizeof(wc->span.location) - 1,
-		 "PCI Bus %02d Slot %02d", wc->dev->bus->number, PCI_SLOT(wc->dev->devfn) + 1);
+		 "PCI Bus %02d Slot %02d", dahdi_pci_get_bus(wc->dev), dahdi_pci_get_slot(wc->dev) + 1);
 	wc->span.manufacturer = "Digium";
 	dahdi_copy_string(wc->span.devicetype, wc->variety, sizeof(wc->span.devicetype));
 	wc->chan->sigcap = DAHDI_SIG_FXSKS | DAHDI_SIG_FXSLS | DAHDI_SIG_SF;
@@ -649,7 +749,7 @@ static int wcfxo_initialize(struct wcfxo *wc)
 	wc->span.chans = &wc->chan;
 	wc->span.channels = 1;
 	wc->span.hooksig = wcfxo_hooksig;
-	wc->span.irq = wc->dev->irq;
+	wc->span.irq = dahdi_pci_get_irq(wc->dev);
 	wc->span.open = wcfxo_open;
 	wc->span.close = wcfxo_close;
 	wc->span.flags = DAHDI_FLAG_RBS;
@@ -673,13 +773,13 @@ static int wcfxo_hardware_init(struct wcfxo *wc)
 {
 	/* Hardware stuff */
 	/* Reset PCI Interface chip and registers */
-	outb(0x0e, wc->ioaddr + WC_CNTL);
+	wcfxo_outb(wc, WC_CNTL, 0x0e);
 
 	/* Set all to outputs except AUX 4, which is an input */
-	outb(0xef, wc->ioaddr + WC_AUXC);
+	wcfxo_outb(wc, WC_AUXC, 0xef);
 
 	/* Reset the DAA (DAA uses AUX5 for reset) */
-	outb(0x00, wc->ioaddr + WC_AUXD);
+	wcfxo_outb(wc, WC_AUXD, 0x00);
 	set_current_state(TASK_INTERRUPTIBLE);
 	schedule_timeout(1 + HZ / 800);
 
@@ -687,87 +787,87 @@ static int wcfxo_hardware_init(struct wcfxo *wc)
 	if (wc->flags & FLAG_RESET_ON_AUX5) {
 		/* Set hook state to on hook for when we switch.
 		   Make sure reset is high */
-		outb(0x34, wc->ioaddr + WC_AUXD);
+		wcfxo_outb(wc, WC_AUXD, 0x34);
 	} else {
 		/* Set hook state to on hook for when we switch */
-		outb(0x24, wc->ioaddr + WC_AUXD);
+		wcfxo_outb(wc, WC_AUXD, 0x24);
 	}
 
 	/* Back to normal, with automatic DMA wrap around */
-	outb(0x01, wc->ioaddr + WC_CNTL);
+	wcfxo_outb(wc, WC_CNTL, 0x01);
 
 	/* Make sure serial port and DMA are out of reset */
-	outb(inb(wc->ioaddr + WC_CNTL) & 0xf9, wc->ioaddr + WC_CNTL);
+	wcfxo_outb(wc, WC_CNTL, wcfxo_inb(wc, WC_CNTL) & 0xf9);
 
 	/* Configure serial port for MSB->LSB operation */
 	if (wc->flags & FLAG_DOUBLE_CLOCK)
-		outb(0xc1, wc->ioaddr + WC_SERCTL);
+		wcfxo_outb(wc, WC_SERCTL, 0xc1);
 	else
-		outb(0xc0, wc->ioaddr + WC_SERCTL);
+		wcfxo_outb(wc, WC_SERCTL, 0xc0);
 
 	if (wc->flags & FLAG_USE_XTAL) {
 		/* Use the crystal oscillator */
-		outb(0x04, wc->ioaddr + WC_AUXFUNC);
+		wcfxo_outb(wc, WC_AUXFUNC, 0x04);
 	}
 
 	/* Delay FSC by 2 so it's properly aligned */
-	outb(0x2, wc->ioaddr + WC_FSCDELAY);
+	wcfxo_outb(wc, WC_FSCDELAY, 0x2);
 
 	/* Setup DMA Addresses */
-	outl(wc->writedma,                    wc->ioaddr + WC_DMAWS);		/* Write start */
-	outl(wc->writedma + DAHDI_CHUNKSIZE * 8 - 4, wc->ioaddr + WC_DMAWI);		/* Middle (interrupt) */
-	outl(wc->writedma + DAHDI_CHUNKSIZE * 16 - 4, wc->ioaddr + WC_DMAWE);			/* End */
-	
-	outl(wc->readdma,                    	 wc->ioaddr + WC_DMARS);	/* Read start */
-	outl(wc->readdma + DAHDI_CHUNKSIZE * 8 - 4, 	 wc->ioaddr + WC_DMARI);	/* Middle (interrupt) */
-	outl(wc->readdma + DAHDI_CHUNKSIZE * 16 - 4, wc->ioaddr + WC_DMARE);	/* End */
-	
+	wcfxo_outl(wc, WC_DMAWS, wc->writedma);		/* Write start */
+	wcfxo_outl(wc, WC_DMAWI, wc->writedma + DAHDI_CHUNKSIZE * 8 - 4);	/* Middle (interrupt) */
+	wcfxo_outl(wc, WC_DMAWE, wc->writedma + DAHDI_CHUNKSIZE * 16 - 4);	/* End */
+
+	wcfxo_outl(wc, WC_DMARS, wc->readdma);		/* Read start */
+	wcfxo_outl(wc, WC_DMARI, wc->readdma + DAHDI_CHUNKSIZE * 8 - 4);	/* Middle (interrupt) */
+	wcfxo_outl(wc, WC_DMARE, wc->readdma + DAHDI_CHUNKSIZE * 16 - 4);	/* End */
+
 	/* Clear interrupts */
-	outb(0xff, wc->ioaddr + WC_INTSTAT);
+	wcfxo_outb(wc, WC_INTSTAT, 0xff);
 	return 0;
 }
 
 static void wcfxo_enable_interrupts(struct wcfxo *wc)
 {
 	/* Enable interrupts (we care about all of them) */
-	outb(0x3f, wc->ioaddr + WC_MASK0);
+	wcfxo_outb(wc, WC_MASK0, 0x3f);
 	/* No external interrupts */
-	outb(0x00, wc->ioaddr + WC_MASK1);
+	wcfxo_outb(wc, WC_MASK1, 0x00);
 }
 
 static void wcfxo_start_dma(struct wcfxo *wc)
 {
 	/* Reset Master and TDM */
-	outb(0x0f, wc->ioaddr + WC_CNTL);
+	wcfxo_outb(wc, WC_CNTL, 0x0f);
 	set_current_state(TASK_INTERRUPTIBLE);
 	schedule_timeout(1);
-	outb(0x01, wc->ioaddr + WC_CNTL);
-	outb(0x01, wc->ioaddr + WC_OPER);
+	wcfxo_outb(wc, WC_CNTL, 0x01);
+	wcfxo_outb(wc, WC_OPER, 0x01);
 }
 
 static void wcfxo_restart_dma(struct wcfxo *wc)
 {
 	/* Reset Master and TDM */
-	outb(0x01, wc->ioaddr + WC_CNTL);
-	outb(0x01, wc->ioaddr + WC_OPER);
+	wcfxo_outb(wc, WC_CNTL, 0x01);
+	wcfxo_outb(wc, WC_OPER, 0x01);
 }
 
 
 static void wcfxo_stop_dma(struct wcfxo *wc)
 {
-	outb(0x00, wc->ioaddr + WC_OPER);
+	wcfxo_outb(wc, WC_OPER, 0x00);
 }
 
 static void wcfxo_reset_tdm(struct wcfxo *wc)
 {
 	/* Reset TDM */
-	outb(0x0f, wc->ioaddr + WC_CNTL);
+	wcfxo_outb(wc, WC_CNTL, 0x0f);
 }
 
 static void wcfxo_disable_interrupts(struct wcfxo *wc)	
 {
-	outb(0x00, wc->ioaddr + WC_MASK0);
-	outb(0x00, wc->ioaddr + WC_MASK1);
+	wcfxo_outb(wc, WC_MASK0, 0x00);
+	wcfxo_outb(wc, WC_MASK1, 0x00);
 }
 
 static void wcfxo_set_daa_mode(struct wcfxo *wc)
@@ -886,6 +986,7 @@ static int wcfxo_init_daa(struct wcfxo *wc)
 	return 0;
 }
 
+#if !defined(__FreeBSD__)
 static int __devinit wcfxo_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	struct wcfxo *wc;
@@ -974,7 +1075,7 @@ static int __devinit wcfxo_init_one(struct pci_dev *pdev, const struct pci_devic
 		free_irq(pdev->irq, wc);
 
 		/* Reset PCI chip and registers */
-		outb(0x0e, wc->ioaddr + WC_CNTL);
+		wcfxo_outb(wc, WC_CNTL, 0x0e);
 
 		if (wc->freeregion)
 			release_region(wc->ioaddr, 0xff);
@@ -1013,7 +1114,7 @@ static void __devexit wcfxo_remove_one(struct pci_dev *pdev)
 		free_irq(pdev->irq, wc);
 
 		/* Reset PCI chip and registers */
-		outb(0x0e, wc->ioaddr + WC_CNTL);
+		wcfxo_outb(wc, WC_CNTL, 0x0e);
 
 		/* Release span, possibly delayed */
 		if (!wc->usecount)
@@ -1022,6 +1123,7 @@ static void __devexit wcfxo_remove_one(struct pci_dev *pdev)
 			wc->dead = 1;
 	}
 }
+#endif /* !__FreeBSD__ */
 
 static struct pci_device_id wcfxo_pci_tbl[] = {
 	{ 0xe159, 0x0001, 0x8084, PCI_ANY_ID, 0, 0, (unsigned long) &generic },
@@ -1032,6 +1134,293 @@ static struct pci_device_id wcfxo_pci_tbl[] = {
 	{ 0 }
 };
 
+#if defined(__FreeBSD__)
+SYSCTL_NODE(_dahdi, OID_AUTO, wcfxo, CTLFLAG_RW, 0, "DAHDI wcfxo");
+#define MODULE_PARAM_PREFIX "dahdi.wcfxo"
+#define MODULE_PARAM_PARENT _dahdi_wcfxo
+
+static void wcfxo_dma_free(bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr);
+
+static void
+wcfxo_release_resources(struct wcfxo *wc)
+{
+        /* disconnect the interrupt handler */
+	if (wc->irq_handle != NULL) {
+		bus_teardown_intr(wc->dev->dev, wc->irq_res, wc->irq_handle);
+		wc->irq_handle = NULL;
+	}
+
+	if (wc->irq_res != NULL) {
+		bus_release_resource(wc->dev->dev, SYS_RES_IRQ, wc->irq_rid, wc->irq_res);
+		wc->irq_res = NULL;
+	}
+
+	/* release DMA resources */
+	wcfxo_dma_free(&wc->write_dma_tag, &wc->write_dma_map, __DECONST(void **, &wc->writechunk), &wc->writedma);
+	wcfxo_dma_free(&wc->read_dma_tag, &wc->read_dma_map, __DECONST(void **, &wc->readchunk), &wc->readdma);
+
+	/* release memory window */
+	if (wc->io_res != NULL) {
+		bus_release_resource(wc->dev->dev, SYS_RES_IOPORT, wc->io_rid, wc->io_res);
+		wc->io_res = NULL;
+	}
+}
+
+static int
+wcfxo_setup_intr(struct wcfxo *wc)
+{
+	int error;
+
+	wc->irq_res = bus_alloc_resource_any(
+	     wc->dev->dev, SYS_RES_IRQ, &wc->irq_rid, RF_SHAREABLE | RF_ACTIVE);
+	if (wc->irq_res == NULL) {
+		device_printf(wc->dev->dev, "Can't allocate irq resource\n");
+		return -ENXIO;
+	}
+
+	error = bus_setup_intr(
+	    wc->dev->dev, wc->irq_res, INTR_TYPE_CLK | INTR_MPSAFE,
+	    wcfxo_interrupt, NULL, wc, &wc->irq_handle);
+	if (error) {
+		device_printf(wc->dev->dev, "Can't setup interrupt handler (error %d)\n", error);
+		return -ENXIO;
+	}
+
+	return (0);
+}
+
+static void
+wcfxo_dma_map_addr(void *arg, bus_dma_segment_t *segs, int nseg, int error)
+{
+	uint32_t *paddr = arg;
+	*paddr = segs->ds_addr;
+}
+
+static int
+wcfxo_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr)
+{
+	int res;
+
+	res = bus_dma_tag_create(NULL, 8, 0,
+	    BUS_SPACE_MAXADDR_32BIT, BUS_SPACE_MAXADDR, NULL, NULL,
+	    size, 1, size, BUS_DMA_ALLOCNOW, NULL, NULL, ptag);
+	if (res)
+		return res;
+
+	res = bus_dmamem_alloc(*ptag, pvaddr, BUS_DMA_NOWAIT | BUS_DMA_ZERO, pmap);
+	if (res) {
+		bus_dma_tag_destroy(*ptag);
+		*ptag = NULL;
+		return res;
+	}
+
+	res = bus_dmamap_load(*ptag, *pmap, *pvaddr, size, wcfxo_dma_map_addr, ppaddr, 0);
+	if (res) {
+		bus_dmamem_free(*ptag, *pvaddr, *pmap);
+		*pvaddr = NULL;
+
+		bus_dmamap_destroy(*ptag, *pmap);
+		*pmap = NULL;
+
+		bus_dma_tag_destroy(*ptag);
+		*ptag = NULL;
+		return res;
+	}
+
+	return 0;
+}
+
+static void
+wcfxo_dma_free(bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr)
+{
+	if (*ppaddr != 0) {
+		bus_dmamap_unload(*ptag, *pmap);
+		*ppaddr = 0;
+	}
+	if (*pvaddr != NULL) {
+		bus_dmamem_free(*ptag, *pvaddr, *pmap);
+		*pvaddr = NULL;
+
+		bus_dmamap_destroy(*ptag, *pmap);
+		*pmap = NULL;
+	}
+	if (*ptag != NULL) {
+		bus_dma_tag_destroy(*ptag);
+		*ptag = NULL;
+	}
+}
+
+static int
+wcfxo_device_probe(device_t dev)
+{
+	struct pci_device_id *id;
+	struct wcfxo_desc *d;
+
+	id = dahdi_pci_device_id_lookup(dev, wcfxo_pci_tbl);
+	if (id == NULL)
+		return ENXIO;
+
+	/* found device */
+	device_printf(dev, "vendor=%x device=%x subvendor=%x\n",
+	    id->vendor, id->device, id->subvendor);
+	d = (struct wcfxo_desc *) id->driver_data;
+	device_set_desc(dev, d->name);
+	return (0);
+}
+
+static int
+wcfxo_device_attach(device_t dev)
+{
+	int res;
+	struct pci_device_id *id;
+	struct wcfxo_desc *d;
+	struct wcfxo *wc;
+
+	id = dahdi_pci_device_id_lookup(dev, wcfxo_pci_tbl);
+	if (id == NULL)
+		return ENXIO;
+
+	d = (struct wcfxo_desc *) id->driver_data;
+	wc = device_get_softc(dev);
+	wc->dev = &wc->_dev;
+	wc->dev->dev = dev;
+	wc->chan = &wc->_chan;
+	wc->pos = device_get_unit(dev);
+	wc->variety = d->name;
+	wc->flags = d->flags;
+
+        /* allocate IO resource */
+	wc->io_rid = PCIR_BAR(0);
+	wc->io_res = bus_alloc_resource_any(dev, SYS_RES_IOPORT, &wc->io_rid, RF_ACTIVE);
+	if (wc->io_res == NULL) {
+		device_printf(dev, "Can't allocate IO resource\n");
+		return ENXIO;
+	}
+
+	/* enable bus mastering */
+	pci_enable_busmaster(dev);
+
+	res = wcfxo_setup_intr(wc);
+	if (res)
+		goto err;
+
+	/* allocate enough memory for two zt chunks.  Each sample uses
+	   32 bits.  Allocate an extra set just for control too */
+	res = wcfxo_dma_allocate(DAHDI_MAX_CHUNKSIZE * 2 * 2 * 4, &wc->write_dma_tag, &wc->write_dma_map,
+	    __DECONST(void **, &wc->writechunk), &wc->writedma);
+	if (res)
+		goto err;
+
+	res = wcfxo_dma_allocate(DAHDI_MAX_CHUNKSIZE * 2 * 2 * 4, &wc->read_dma_tag, &wc->read_dma_map,
+	    __DECONST(void **, &wc->readchunk), &wc->readdma);
+	if (res)
+		goto err;
+
+	if (wcfxo_initialize(wc) < 0) {
+		res = ENXIO;
+		goto err;
+	}
+
+	wcfxo_hardware_init(wc);
+
+	/* enable interrupts */
+	wcfxo_enable_interrupts(wc);
+
+	/* start DMA */
+	wcfxo_start_dma(wc);
+
+	/* initialize DAA (after it's started) */
+	if (wcfxo_init_daa(wc)) {
+		printk(KERN_NOTICE "Failed to initailize DAA, giving up...\n");
+		res = ENXIO;
+		goto err;
+	}
+	wcfxo_set_daa_mode(wc);
+	printk(KERN_INFO "Found a Wildcard FXO: %s\n", wc->variety);
+	return 0;
+
+err:
+	if (test_bit(DAHDI_FLAGBIT_REGISTERED, &wc->span.flags))
+		dahdi_unregister(&wc->span);
+
+	wcfxo_stop_dma(wc);
+	wcfxo_disable_interrupts(wc);
+
+	/* reset PCI chip and registers */
+	wcfxo_outb(wc, WC_CNTL, 0x0e);
+
+	/* release resources */
+	wcfxo_release_resources(wc);
+	return res;
+}
+
+static int
+wcfxo_device_detach(device_t dev)
+{
+	struct wcfxo *wc = device_get_softc(dev);
+
+	/* Stop any DMA */
+	wcfxo_stop_dma(wc);
+	wcfxo_reset_tdm(wc);
+
+	/* In case hardware is still there */
+	wcfxo_disable_interrupts(wc);
+
+	/* Reset PCI chip and registers */
+	wcfxo_outb(wc, WC_CNTL, 0x0e);
+
+	/* Unregister */
+	dahdi_unregister(&wc->span);
+
+	/* Release resources */
+	wcfxo_release_resources(wc);
+
+	return (0);
+}
+
+static int
+wcfxo_device_shutdown(device_t dev)
+{
+	DPRINTF(dev, "%s shutdown\n", device_get_name(dev));
+	return (0);
+}
+
+static int
+wcfxo_device_suspend(device_t dev)
+{
+	DPRINTF(dev, "%s suspend\n", device_get_name(dev));
+	return (0);
+}
+
+static int
+wcfxo_device_resume(device_t dev)
+{
+	DPRINTF(dev, "%s resume\n", device_get_name(dev));
+	return (0);
+}
+
+static device_method_t wcfxo_methods[] = {
+	DEVMETHOD(device_probe,     wcfxo_device_probe),
+	DEVMETHOD(device_attach,    wcfxo_device_attach),
+	DEVMETHOD(device_detach,    wcfxo_device_detach),
+	DEVMETHOD(device_shutdown,  wcfxo_device_shutdown),
+	DEVMETHOD(device_suspend,   wcfxo_device_suspend),
+	DEVMETHOD(device_resume,    wcfxo_device_resume),
+	{ 0, 0 }
+};
+
+static driver_t wcfxo_pci_driver = {
+	"wcfxo",
+	wcfxo_methods,
+	sizeof(struct wcfxo)
+};
+
+static devclass_t wcfxo_devclass;
+
+DRIVER_MODULE(wcfxo, pci, wcfxo_pci_driver, wcfxo_devclass, 0, 0);
+MODULE_DEPEND(wcfxo, pci, 1, 1, 1);
+MODULE_DEPEND(wcfxo, dahdi, 1, 1, 1);
+#else /* !__FreeBSD__ */
 MODULE_DEVICE_TABLE (pci, wcfxo_pci_tbl);
 
 static struct pci_driver wcfxo_driver = {
@@ -1061,6 +1450,7 @@ static void __exit wcfxo_cleanup(void)
 {
 	pci_unregister_driver(&wcfxo_driver);
 }
+#endif /* !__FreeBSD__ */
 
 module_param(debug, int, 0644);
 module_param(quiet, int, 0444);
@@ -1068,9 +1458,11 @@ module_param(boost, int, 0444);
 module_param(monitor, int, 0444);
 module_param(opermode, int, 0444);
 
+#if !defined(__FreeBSD__)
 MODULE_DESCRIPTION("Wildcard X100P Driver");
 MODULE_AUTHOR("Mark Spencer <markster@digium.com>");
 MODULE_LICENSE("GPL v2");
 
 module_init(wcfxo_init);
 module_exit(wcfxo_cleanup);
+#endif /* !__FreeBSD__ */
