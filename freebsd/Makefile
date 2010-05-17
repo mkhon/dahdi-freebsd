@@ -16,6 +16,7 @@ SUBDIR=\
 	dahdi_voicebus\
 	ng_dahdi_netdev\
 	wcb4xxp\
+	wcfxo\
 	wct4xxp\
 	wctdm24xxp
 
