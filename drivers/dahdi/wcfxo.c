@@ -1125,6 +1125,21 @@ static void __devexit wcfxo_remove_one(struct pci_dev *pdev)
 }
 #endif /* !__FreeBSD__ */
 
+static int
+wcfxo_validate_params(void)
+{
+	int x;
+
+	if ((opermode >= sizeof(fxo_modes) / sizeof(fxo_modes[0])) || (opermode < 0)) {
+		printk(KERN_NOTICE "Invalid/unknown operating mode specified.  Please choose one of:\n");
+		for (x=0;x<sizeof(fxo_modes) / sizeof(fxo_modes[0]); x++)
+			printk(KERN_INFO "%d: %s\n", x, fxo_modes[x].name);
+		return -ENODEV;
+	}
+
+	return 0;
+}
+
 static struct pci_device_id wcfxo_pci_tbl[] = {
 	{ 0xe159, 0x0001, 0x8084, PCI_ANY_ID, 0, 0, (unsigned long) &generic },
 	{ 0xe159, 0x0001, 0x8085, PCI_ANY_ID, 0, 0, (unsigned long) &wcx101p },
@@ -1258,6 +1273,9 @@ wcfxo_device_probe(device_t dev)
 
 	id = dahdi_pci_device_id_lookup(dev, wcfxo_pci_tbl);
 	if (id == NULL)
+		return ENXIO;
+
+	if (wcfxo_validate_params())
 		return ENXIO;
 
 	/* found device */
@@ -1433,13 +1451,11 @@ static struct pci_driver wcfxo_driver = {
 static int __init wcfxo_init(void)
 {
 	int res;
-	int x;
-	if ((opermode >= sizeof(fxo_modes) / sizeof(fxo_modes[0])) || (opermode < 0)) {
-		printk(KERN_NOTICE "Invalid/unknown operating mode specified.  Please choose one of:\n");
-		for (x=0;x<sizeof(fxo_modes) / sizeof(fxo_modes[0]); x++)
-			printk(KERN_INFO "%d: %s\n", x, fxo_modes[x].name);
+
+	res = wcfxo_validate_params();
+	if (res)
 		return -ENODEV;
-	}
+
 	res = dahdi_pci_module(&wcfxo_driver);
 	if (res)
 		return -ENODEV;
