@@ -20,4 +20,8 @@ SUBDIR=\
 	wct4xxp\
 	wctdm24xxp
 
+# the following drivers are ported but not tested on real HW
+#SUBDIR+=\
+#	wctdm
+
 .include <bsd.subdir.mk>

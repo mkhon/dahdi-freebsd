@@ -39,6 +39,9 @@ The following drivers are currently supported on FreeBSD:
 - wct4xxp, including HW echo cancellation support (Octasic)
 - wctdm24xxp
 
+The following drivers are ported to FreeBSD but not tested on real HW:
+- wctdm
+
 Additional notes
 ~~~~~~~~~~~~~~~~
 
