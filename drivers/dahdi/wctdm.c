@@ -24,6 +24,18 @@
  */
 
 #if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/bus.h>
+#include <sys/module.h>
+#include <sys/rman.h>
+
+#include <machine/bus.h>
+#include <dev/pci/pcireg.h>
+#include <dev/pci/pcivar.h>
+
+#define DPRINTF(dev, fmt, args...)      device_rlprintf(20, dev, fmt, ##args)
+
+#define set_current_state(x)
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -206,6 +218,9 @@ enum battery_state {
 };
 
 struct wctdm {
+#if defined(__FreeBSD__)
+	struct pci_dev _dev;
+#endif
 	struct pci_dev *dev;
 	char *variety;
 	struct dahdi_span span;
@@ -269,6 +284,20 @@ struct wctdm {
 	unsigned char reg1shadow[NUM_CARDS];
 
 #if defined(__FreeBSD__)
+	struct resource *io_res;
+	int io_rid;
+
+	struct resource *irq_res;		/* resource for irq */
+	int irq_rid;
+	void *irq_handle;
+
+	uint32_t readdma;
+	bus_dma_tag_t   read_dma_tag;
+	bus_dmamap_t    read_dma_map;
+
+	uint32_t writedma;
+	bus_dma_tag_t   write_dma_tag;
+	bus_dmamap_t    write_dma_map;
 #else /* !__FreeBSD__ */
 	unsigned long ioaddr;
 	dma_addr_t 	readdma;
@@ -292,9 +321,11 @@ static struct wctdm_desc wctdmh = { "Wildcard TDM400P REV H", 0 };
 static struct wctdm_desc wctdmi = { "Wildcard TDM400P REV I", 0 };
 static int acim2tiss[16] = { 0x0, 0x1, 0x4, 0x5, 0x7, 0x0, 0x0, 0x6, 0x0, 0x0, 0x0, 0x2, 0x0, 0x3 };
 
+#if !defined(__FreeBSD__)
 static struct wctdm *ifaces[WC_MAX_IFACES];
 
 static void wctdm_release(struct wctdm *wc);
+#endif
 
 static unsigned int fxovoltage;
 static unsigned int battdebounce;
@@ -402,6 +433,9 @@ static inline void wctdm_transmitprep(struct wctdm *wc, unsigned char ints)
 #endif		
 	}
 
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(wc->write_dma_tag, wc->write_dma_map, BUS_DMASYNC_PREWRITE);
+#endif
 }
 
 #ifdef AUDIO_RINGCHECK
@@ -465,6 +499,10 @@ static inline void wctdm_receiveprep(struct wctdm *wc, unsigned char ints)
 	else
 		/* Read is at interrupt address.  Valid data is available at normal offset */
 		readchunk = wc->readchunk;
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(wc->read_dma_tag, wc->read_dma_map, BUS_DMASYNC_POSTREAD);
+#endif
+
 	for (x=0;x<DAHDI_CHUNKSIZE;x++) {
 #ifdef __BIG_ENDIAN
 		if (wc->cardflag & (1 << 3))
@@ -671,12 +709,12 @@ static int __wait_access(struct wctdm *wc, int card)
     long origjiffies;
     int count = 0;
 
-    #define MAX 6000 /* attempts */
+    #define MAX_ATTEMPTS 6000 /* attempts */
 
 
     origjiffies = jiffies;
     /* Wait for indirect access */
-    while (count++ < MAX)
+    while (count++ < MAX_ATTEMPTS)
 	 {
 		data = __wctdm_getreg(wc, card, I_STATUS);
 
@@ -685,7 +723,7 @@ static int __wait_access(struct wctdm *wc, int card)
 
 	 }
 
-    if(count > (MAX-1)) printk(KERN_NOTICE " ##### Loop error (%02x) #####\n", data);
+    if(count > (MAX_ATTEMPTS-1)) printk(KERN_NOTICE " ##### Loop error (%02x) #####\n", data);
 
 	return 0;
 }
@@ -1132,7 +1170,11 @@ DAHDI_IRQ_HANDLER(wctdm_interrupt)
 	ints = wctdm_inb(wc, WC_INTSTAT);
 
 	if (!ints)
+#if defined(__FreeBSD__)
+		return FILTER_STRAY;
+#else
 		return IRQ_NONE;
+#endif
 
 	wctdm_outb(wc, WC_INTSTAT, ints);
 
@@ -1140,12 +1182,20 @@ DAHDI_IRQ_HANDLER(wctdm_interrupt)
 		/* Stop DMA, wait for watchdog */
 		printk(KERN_INFO "TDM PCI Master abort\n");
 		wctdm_stop_dma(wc);
+#if defined(__FreeBSD__)
+		return FILTER_HANDLED;
+#else
 		return IRQ_RETVAL(1);
+#endif
 	}
 	
 	if (ints & 0x20) {
 		printk(KERN_INFO "PCI Target abort\n");
+#if defined(__FreeBSD__)
+		return FILTER_HANDLED;
+#else
 		return IRQ_RETVAL(1);
+#endif
 	}
 
 	for (x=0;x<4;x++) {
@@ -1245,7 +1295,11 @@ DAHDI_IRQ_HANDLER(wctdm_interrupt)
 		wctdm_transmitprep(wc, ints);
 	}
 
+#if defined(__FreeBSD__)
+	return FILTER_HANDLED;
+#else
 	return IRQ_RETVAL(1);
+#endif
 }
 
 static int wctdm_voicedaa_insane(struct wctdm *wc, int card)
@@ -2155,9 +2209,11 @@ static int wctdm_close(struct dahdi_chan *chan)
 						SLIC_LF_ACTIVE_FWD;
 		fxs->idletxhookstate = idlehookstate;
 	}
+#if !defined(__FreeBSD__)
 	/* If we're dead, release us now */
 	if (!wc->usecount && wc->dead) 
 		wctdm_release(wc);
+#endif /* !__FreeBSD__ */
 	return 0;
 }
 
@@ -2385,7 +2441,7 @@ static int wctdm_initialize(struct wctdm *wc)
 	sprintf(wc->span.name, "WCTDM/%d", wc->pos);
 	snprintf(wc->span.desc, sizeof(wc->span.desc) - 1, "%s Board %d", wc->variety, wc->pos + 1);
 	snprintf(wc->span.location, sizeof(wc->span.location) - 1,
-		 "PCI Bus %02d Slot %02d", wc->dev->bus->number, PCI_SLOT(wc->dev->devfn) + 1);
+		 "PCI Bus %02d Slot %02d", dahdi_pci_get_bus(wc->dev), dahdi_pci_get_slot(wc->dev) + 1);
 	wc->span.manufacturer = "Digium";
 	dahdi_copy_string(wc->span.devicetype, wc->variety, sizeof(wc->span.devicetype));
 	if (alawoverride) {
@@ -2405,7 +2461,7 @@ static int wctdm_initialize(struct wctdm *wc)
 	wc->span.chans = wc->chans;
 	wc->span.channels = NUM_CARDS;
 	wc->span.hooksig = wctdm_hooksig;
-	wc->span.irq = wc->dev->irq;
+	wc->span.irq = dahdi_pci_get_irq(wc->dev);
 	wc->span.open = wctdm_open;
 	wc->span.close = wctdm_close;
 	wc->span.flags = DAHDI_FLAG_RBS;
@@ -2610,6 +2666,7 @@ static void wctdm_disable_interrupts(struct wctdm *wc)
 	wctdm_outb(wc, WC_MASK1, 0x00);
 }
 
+#if !defined(__FreeBSD__)
 static int __devinit wctdm_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	int res;
@@ -2767,42 +2824,11 @@ static void __devexit wctdm_remove_one(struct pci_dev *pdev)
 			wc->dead = 1;
 	}
 }
+#endif /* !__FreeBSD__ */
 
-static struct pci_device_id wctdm_pci_tbl[] = {
-	{ 0xe159, 0x0001, 0xa159, PCI_ANY_ID, 0, 0, (unsigned long) &wctdm },
-	{ 0xe159, 0x0001, 0xe159, PCI_ANY_ID, 0, 0, (unsigned long) &wctdm },
-	{ 0xe159, 0x0001, 0xb100, PCI_ANY_ID, 0, 0, (unsigned long) &wctdme },
-	{ 0xe159, 0x0001, 0xb1d9, PCI_ANY_ID, 0, 0, (unsigned long) &wctdmi },
-	{ 0xe159, 0x0001, 0xb118, PCI_ANY_ID, 0, 0, (unsigned long) &wctdmi },
-	{ 0xe159, 0x0001, 0xb119, PCI_ANY_ID, 0, 0, (unsigned long) &wctdmi },
-	{ 0xe159, 0x0001, 0xa9fd, PCI_ANY_ID, 0, 0, (unsigned long) &wctdmh },
-	{ 0xe159, 0x0001, 0xa8fd, PCI_ANY_ID, 0, 0, (unsigned long) &wctdmh },
-	{ 0xe159, 0x0001, 0xa800, PCI_ANY_ID, 0, 0, (unsigned long) &wctdmh },
-	{ 0xe159, 0x0001, 0xa801, PCI_ANY_ID, 0, 0, (unsigned long) &wctdmh },
-	{ 0xe159, 0x0001, 0xa908, PCI_ANY_ID, 0, 0, (unsigned long) &wctdmh },
-	{ 0xe159, 0x0001, 0xa901, PCI_ANY_ID, 0, 0, (unsigned long) &wctdmh },
-#ifdef TDM_REVH_MATCHALL
-	{ 0xe159, 0x0001, PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &wctdmh },
-#endif
-	{ 0 }
-};
-
-#if defined(__FreeBSD__)
-#else /* !__FreeBSD__ */
-MODULE_DEVICE_TABLE(pci, wctdm_pci_tbl);
-
-static struct pci_driver wctdm_driver = {
-	.name = "wctdm",
-	.probe = wctdm_init_one,
-	.remove =__devexit_p(wctdm_remove_one),
-	.suspend = NULL,
-	.resume = NULL,
-	.id_table = wctdm_pci_tbl,
-};
-
-static int __init wctdm_init(void)
+static int
+wctdm_validate_params(void)
 {
-	int res;
 	int x;
 
 	for (x = 0; x < (sizeof(fxo_modes) / sizeof(fxo_modes[0])); x++) {
@@ -2837,6 +2863,348 @@ static int __init wctdm_init(void)
 	if (battthresh == 0) {
 		battthresh = fxo_modes[_opermode].battthresh;
 	}
+
+	return 0;
+}
+
+static struct pci_device_id wctdm_pci_tbl[] = {
+	{ 0xe159, 0x0001, 0xa159, PCI_ANY_ID, 0, 0, (unsigned long) &wctdm },
+	{ 0xe159, 0x0001, 0xe159, PCI_ANY_ID, 0, 0, (unsigned long) &wctdm },
+	{ 0xe159, 0x0001, 0xb100, PCI_ANY_ID, 0, 0, (unsigned long) &wctdme },
+	{ 0xe159, 0x0001, 0xb1d9, PCI_ANY_ID, 0, 0, (unsigned long) &wctdmi },
+	{ 0xe159, 0x0001, 0xb118, PCI_ANY_ID, 0, 0, (unsigned long) &wctdmi },
+	{ 0xe159, 0x0001, 0xb119, PCI_ANY_ID, 0, 0, (unsigned long) &wctdmi },
+	{ 0xe159, 0x0001, 0xa9fd, PCI_ANY_ID, 0, 0, (unsigned long) &wctdmh },
+	{ 0xe159, 0x0001, 0xa8fd, PCI_ANY_ID, 0, 0, (unsigned long) &wctdmh },
+	{ 0xe159, 0x0001, 0xa800, PCI_ANY_ID, 0, 0, (unsigned long) &wctdmh },
+	{ 0xe159, 0x0001, 0xa801, PCI_ANY_ID, 0, 0, (unsigned long) &wctdmh },
+	{ 0xe159, 0x0001, 0xa908, PCI_ANY_ID, 0, 0, (unsigned long) &wctdmh },
+	{ 0xe159, 0x0001, 0xa901, PCI_ANY_ID, 0, 0, (unsigned long) &wctdmh },
+#ifdef TDM_REVH_MATCHALL
+	{ 0xe159, 0x0001, PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &wctdmh },
+#endif
+	{ 0 }
+};
+
+#if defined(__FreeBSD__)
+SYSCTL_NODE(_dahdi, OID_AUTO, wctdm, CTLFLAG_RW, 0, "DAHDI wctdm");
+#define MODULE_PARAM_PREFIX "dahdi.wctdm"
+#define MODULE_PARAM_PARENT _dahdi_wctdm
+
+static void wctdm_dma_free(bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr);
+
+static void
+wctdm_release_resources(struct wctdm *wc)
+{
+        /* disconnect the interrupt handler */
+	if (wc->irq_handle != NULL) {
+		bus_teardown_intr(wc->dev->dev, wc->irq_res, wc->irq_handle);
+		wc->irq_handle = NULL;
+	}
+
+	if (wc->irq_res != NULL) {
+		bus_release_resource(wc->dev->dev, SYS_RES_IRQ, wc->irq_rid, wc->irq_res);
+		wc->irq_res = NULL;
+	}
+
+	/* release DMA resources */
+	wctdm_dma_free(&wc->write_dma_tag, &wc->write_dma_map, __DECONST(void **, &wc->writechunk), &wc->writedma);
+	wctdm_dma_free(&wc->read_dma_tag, &wc->read_dma_map, __DECONST(void **, &wc->readchunk), &wc->readdma);
+
+	/* release memory window */
+	if (wc->io_res != NULL) {
+		bus_release_resource(wc->dev->dev, SYS_RES_IOPORT, wc->io_rid, wc->io_res);
+		wc->io_res = NULL;
+	}
+}
+
+static int
+wctdm_setup_intr(struct wctdm *wc)
+{
+	int error;
+
+	wc->irq_res = bus_alloc_resource_any(
+	     wc->dev->dev, SYS_RES_IRQ, &wc->irq_rid, RF_SHAREABLE | RF_ACTIVE);
+	if (wc->irq_res == NULL) {
+		device_printf(wc->dev->dev, "Can't allocate irq resource\n");
+		return -ENXIO;
+	}
+
+	error = bus_setup_intr(
+	    wc->dev->dev, wc->irq_res, INTR_TYPE_CLK | INTR_MPSAFE,
+	    wctdm_interrupt, NULL, wc, &wc->irq_handle);
+	if (error) {
+		device_printf(wc->dev->dev, "Can't setup interrupt handler (error %d)\n", error);
+		return -ENXIO;
+	}
+
+	return (0);
+}
+
+static void
+wctdm_dma_map_addr(void *arg, bus_dma_segment_t *segs, int nseg, int error)
+{
+	uint32_t *paddr = arg;
+	*paddr = segs->ds_addr;
+}
+
+static int
+wctdm_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr)
+{
+	int res;
+
+	res = bus_dma_tag_create(NULL, 8, 0,
+	    BUS_SPACE_MAXADDR_32BIT, BUS_SPACE_MAXADDR, NULL, NULL,
+	    size, 1, size, BUS_DMA_ALLOCNOW, NULL, NULL, ptag);
+	if (res)
+		return res;
+
+	res = bus_dmamem_alloc(*ptag, pvaddr, BUS_DMA_NOWAIT | BUS_DMA_ZERO, pmap);
+	if (res) {
+		bus_dma_tag_destroy(*ptag);
+		*ptag = NULL;
+		return res;
+	}
+
+	res = bus_dmamap_load(*ptag, *pmap, *pvaddr, size, wctdm_dma_map_addr, ppaddr, 0);
+	if (res) {
+		bus_dmamem_free(*ptag, *pvaddr, *pmap);
+		*pvaddr = NULL;
+
+		bus_dmamap_destroy(*ptag, *pmap);
+		*pmap = NULL;
+
+		bus_dma_tag_destroy(*ptag);
+		*ptag = NULL;
+		return res;
+	}
+
+	return 0;
+}
+
+static void
+wctdm_dma_free(bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr)
+{
+	if (*ppaddr != 0) {
+		bus_dmamap_unload(*ptag, *pmap);
+		*ppaddr = 0;
+	}
+	if (*pvaddr != NULL) {
+		bus_dmamem_free(*ptag, *pvaddr, *pmap);
+		*pvaddr = NULL;
+
+		bus_dmamap_destroy(*ptag, *pmap);
+		*pmap = NULL;
+	}
+	if (*ptag != NULL) {
+		bus_dma_tag_destroy(*ptag);
+		*ptag = NULL;
+	}
+}
+
+static int
+wctdm_device_probe(device_t dev)
+{
+	struct pci_device_id *id;
+	struct wctdm_desc *d;
+
+	id = dahdi_pci_device_id_lookup(dev, wctdm_pci_tbl);
+	if (id == NULL)
+		return ENXIO;
+
+	if (wctdm_validate_params())
+		return ENXIO;
+
+	/* found device */
+	device_printf(dev, "vendor=%x device=%x subvendor=%x\n",
+	    id->vendor, id->device, id->subvendor);
+	d = (struct wctdm_desc *) id->driver_data;
+	device_set_desc(dev, d->name);
+	return (0);
+}
+
+static int
+wctdm_device_attach(device_t dev)
+{
+	int x, cardcount;
+	int res;
+	struct pci_device_id *id;
+	struct wctdm_desc *d;
+	struct wctdm *wc;
+
+	id = dahdi_pci_device_id_lookup(dev, wctdm_pci_tbl);
+	if (id == NULL)
+		return ENXIO;
+
+	d = (struct wctdm_desc *) id->driver_data;
+	wc = device_get_softc(dev);
+	wc->dev = &wc->_dev;
+	wc->dev->dev = dev;
+	for (x = 0; x < sizeof(wc->chans)/sizeof(wc->chans[0]); ++x) {
+		wc->chans[x] = &wc->_chans[x];
+	}
+	spin_lock_init(&wc->lock);
+	wc->curcard = -1;
+	wc->pos = device_get_unit(dev);
+	wc->variety = d->name;
+	for (x=0; x < NUM_CARDS; x++)
+		wc->flags[x] = d->flags;
+
+        /* allocate IO resource */
+	wc->io_rid = PCIR_BAR(0);
+	wc->io_res = bus_alloc_resource_any(dev, SYS_RES_IOPORT, &wc->io_rid, RF_ACTIVE);
+	if (wc->io_res == NULL) {
+		device_printf(dev, "Can't allocate IO resource\n");
+		return ENXIO;
+	}
+
+	/* enable bus mastering */
+	pci_enable_busmaster(dev);
+
+	res = wctdm_setup_intr(wc);
+	if (res)
+		goto err;
+
+	/* allocate enough memory for two zt chunks.  Each sample uses
+	   32 bits.  Allocate an extra set just for control too */
+	res = wctdm_dma_allocate(DAHDI_MAX_CHUNKSIZE * 2 * 2 * 4, &wc->write_dma_tag, &wc->write_dma_map,
+	    __DECONST(void **, &wc->writechunk), &wc->writedma);
+	if (res)
+		goto err;
+
+	res = wctdm_dma_allocate(DAHDI_MAX_CHUNKSIZE * 2 * 2 * 4, &wc->read_dma_tag, &wc->read_dma_map,
+	    __DECONST(void **, &wc->readchunk), &wc->readdma);
+	if (res)
+		goto err;
+
+	if (wctdm_initialize(wc) < 0) {
+		printk(KERN_NOTICE "wctdm: Unable to intialize FXS\n");
+
+		res = ENXIO;
+		goto err;
+	}
+
+	if (wctdm_hardware_init(wc)) {
+		res = ENXIO;
+		goto err;
+	}
+
+	wctdm_post_initialize(wc);
+
+	/* enable interrupts */
+	wctdm_enable_interrupts(wc);
+
+	/* start DMA */
+	wctdm_start_dma(wc);
+
+	cardcount = 0;
+	for (x = 0; x < NUM_CARDS; x++) {
+		if (wc->cardflag & (1 << x))
+			cardcount++;
+	}
+	printk(KERN_INFO "Found a Wildcard TDM: %s (%d modules)\n", wc->variety, cardcount);
+
+	return 0;
+
+err:
+	/* Set Reset Low */
+	x = wctdm_inb(wc, WC_CNTL);
+	wctdm_outb(wc, WC_CNTL, (~0x1)&x);
+
+	/* Unregister */
+	if (test_bit(DAHDI_FLAGBIT_REGISTERED, &wc->span.flags))
+		dahdi_unregister(&wc->span);
+
+	/* release resources */
+	wctdm_release_resources(wc);
+	return res;
+}
+
+static int
+wctdm_device_detach(device_t dev)
+{
+	struct wctdm *wc = device_get_softc(dev);
+
+	/* Stop any DMA */
+	wctdm_stop_dma(wc);
+	wctdm_reset_tdm(wc);
+
+	/* In case hardware is still there */
+	wctdm_disable_interrupts(wc);
+
+	/* Reset PCI chip and registers */
+	wctdm_outb(wc, WC_CNTL, 0x0e);
+
+	/* Unregister */
+	dahdi_unregister(&wc->span);
+
+	/* Release resources */
+	wctdm_release_resources(wc);
+
+	return (0);
+}
+
+static int
+wctdm_device_shutdown(device_t dev)
+{
+	DPRINTF(dev, "%s shutdown\n", device_get_name(dev));
+	return (0);
+}
+
+static int
+wctdm_device_suspend(device_t dev)
+{
+	DPRINTF(dev, "%s suspend\n", device_get_name(dev));
+	return (0);
+}
+
+static int
+wctdm_device_resume(device_t dev)
+{
+	DPRINTF(dev, "%s resume\n", device_get_name(dev));
+	return (0);
+}
+
+static device_method_t wctdm_methods[] = {
+	DEVMETHOD(device_probe,     wctdm_device_probe),
+	DEVMETHOD(device_attach,    wctdm_device_attach),
+	DEVMETHOD(device_detach,    wctdm_device_detach),
+	DEVMETHOD(device_shutdown,  wctdm_device_shutdown),
+	DEVMETHOD(device_suspend,   wctdm_device_suspend),
+	DEVMETHOD(device_resume,    wctdm_device_resume),
+	{ 0, 0 }
+};
+
+static driver_t wctdm_pci_driver = {
+	"wctdm",
+	wctdm_methods,
+	sizeof(struct wctdm)
+};
+
+static devclass_t wctdm_devclass;
+
+DRIVER_MODULE(wctdm, pci, wctdm_pci_driver, wctdm_devclass, 0, 0);
+MODULE_DEPEND(wctdm, pci, 1, 1, 1);
+MODULE_DEPEND(wctdm, dahdi, 1, 1, 1);
+#else /* !__FreeBSD__ */
+MODULE_DEVICE_TABLE(pci, wctdm_pci_tbl);
+
+static struct pci_driver wctdm_driver = {
+	.name = "wctdm",
+	.probe = wctdm_init_one,
+	.remove =__devexit_p(wctdm_remove_one),
+	.suspend = NULL,
+	.resume = NULL,
+	.id_table = wctdm_pci_tbl,
+};
+
+static int __init wctdm_init(void)
+{
+	int res;
+
+	res = wctdm_validate_params();
+	if (res)
+		return -ENODEV;
 
 	res = dahdi_pci_module(&wctdm_driver);
 	if (res)
