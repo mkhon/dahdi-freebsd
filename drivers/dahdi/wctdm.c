@@ -3141,6 +3141,7 @@ wctdm_device_detach(device_t dev)
 	/* Release resources */
 	wctdm_release_resources(wc);
 
+	spin_lock_destroy(&wc->lock);
 	return (0);
 }
 
