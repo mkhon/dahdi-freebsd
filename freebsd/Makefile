@@ -22,6 +22,8 @@ SUBDIR=\
 
 # the following drivers are ported but not tested on real HW
 #SUBDIR+=\
-#	wctdm
+#	wctdm\
+#	wcte11xp\
+#	wcte12xp
 
 .include <bsd.subdir.mk>
