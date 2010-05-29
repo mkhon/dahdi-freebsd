@@ -143,8 +143,6 @@ static char *dahdi_txlevelnames[] = {
 } ;
 
 #if defined(__FreeBSD__)
-#define DPRINTF(fmt, args...)	rlprintf(10, "%s: " fmt, __FUNCTION__, ##args)
-
 MALLOC_DEFINE(M_DAHDI, "dahdi", "DAHDI interface data structures");
 
 /*

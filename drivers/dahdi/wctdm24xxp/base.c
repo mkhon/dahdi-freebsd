@@ -49,7 +49,6 @@ typedef int bool;
 
 #define fatal_signal_pending(c) 0
 
-#define DPRINTF(dev, fmt, args...)      device_rlprintf(20, dev, fmt, ##args)
 #else /* !__FreeBSD__ */
 #include <linux/version.h>
 #include <linux/kernel.h>
@@ -5141,7 +5140,7 @@ wctdm_device_probe(device_t dev)
 
 	id = dahdi_pci_device_id_lookup(dev, wctdm_pci_tbl);
 	if (id == NULL)
-		return ENXIO;
+		return (ENXIO);
 
 	/* found device */
 	device_printf(dev, "vendor=%x device=%x subvendor=%x\n",
@@ -5159,7 +5158,7 @@ wctdm_device_attach(device_t dev)
 
 	id = dahdi_pci_device_id_lookup(dev, wctdm_pci_tbl);
 	if (id == NULL)
-		return ENXIO;
+		return (ENXIO);
 
 	res = wctdm_init_one(dev, id);
 	return -res;
@@ -5172,26 +5171,6 @@ wctdm_device_detach(device_t dev)
 	return (0);
 }
 
-static int
-wctdm_device_shutdown(device_t dev)
-{
-	DPRINTF(dev, "%s shutdown\n", device_get_name(dev));
-	return (0);
-}
-
-static int
-wctdm_device_suspend(device_t dev)
-{
-	DPRINTF(dev, "%s suspend\n", device_get_name(dev));
-	return (0);
-}
-
-static int
-wctdm_device_resume(device_t dev)
-{
-	DPRINTF(dev, "%s resume\n", device_get_name(dev));
-	return (0);
-}
 
 static int
 wctdm_modevent(module_t mod __unused, int type, void *data __unused)
@@ -5206,7 +5185,7 @@ wctdm_modevent(module_t mod __unused, int type, void *data __unused)
 		wctdm_cleanup();
 		return 0;
 	default:
-		return EOPNOTSUPP;
+		return (EOPNOTSUPP);
 	}
 }
 
@@ -5214,9 +5193,6 @@ static device_method_t wctdm_methods[] = {
 	DEVMETHOD(device_probe,     wctdm_device_probe),
 	DEVMETHOD(device_attach,    wctdm_device_attach),
 	DEVMETHOD(device_detach,    wctdm_device_detach),
-	DEVMETHOD(device_shutdown,  wctdm_device_shutdown),
-	DEVMETHOD(device_suspend,   wctdm_device_suspend),
-	DEVMETHOD(device_resume,    wctdm_device_resume),
 	{ 0, 0 }
 };
 

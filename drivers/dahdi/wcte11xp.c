@@ -1705,7 +1705,7 @@ t1xxp_setup_intr(struct t1 *wc)
 	     wc->dev->dev, SYS_RES_IRQ, &wc->irq_rid, RF_SHAREABLE | RF_ACTIVE);
 	if (wc->irq_res == NULL) {
 		device_printf(wc->dev->dev, "Can't allocate irq resource\n");
-		return -ENXIO;
+		return (ENXIO);
 	}
 
 	error = bus_setup_intr(
@@ -1713,7 +1713,7 @@ t1xxp_setup_intr(struct t1 *wc)
 	    t1xxp_interrupt, NULL, wc, &wc->irq_handle);
 	if (error) {
 		device_printf(wc->dev->dev, "Can't setup interrupt handler (error %d)\n", error);
-		return -ENXIO;
+		return (ENXIO);
 	}
 
 	return (0);

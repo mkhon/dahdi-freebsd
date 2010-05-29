@@ -43,8 +43,6 @@
 #define wmb()
 
 #define mmiowb()
-
-#define DPRINTF(dev, fmt, args...)	device_rlprintf(10, dev, fmt, ##args)
 #else /* !__FreeBSD__ */
 #include <linux/autoconf.h>
 #include <linux/init.h>
@@ -3000,7 +2998,7 @@ b4xxp_setup_intr(struct b4xxp *b4)
 	     b4->pdev->dev, SYS_RES_IRQ, &b4->irq_rid, RF_SHAREABLE | RF_ACTIVE);
 	if (b4->irq_res == NULL) {
 		device_printf(b4->pdev->dev, "Can't allocate irq resource\n");
-		return -ENXIO;
+		return (-ENXIO);
 	}
 
 	error = bus_setup_intr(
@@ -3008,7 +3006,7 @@ b4xxp_setup_intr(struct b4xxp *b4)
 	    b4, &b4->irq_handle);
 	if (error) {
 		device_printf(b4->pdev->dev, "Can't setup interrupt handler (error %d)\n", error);
-		return -ENXIO;
+		return (-ENXIO);
 	}
 
 	return (0);
@@ -3022,7 +3020,7 @@ b4xxp_device_probe(device_t dev)
 
 	id = dahdi_pci_device_id_lookup(dev, b4xx_ids);
 	if (id == NULL)
-		return ENXIO;
+		return (ENXIO);
 
 	/* found device */
 	device_printf(dev, "vendor=%x device=%x subvendor=%x\n",
@@ -3042,7 +3040,7 @@ b4xxp_device_attach(device_t dev)
 
 	id = dahdi_pci_device_id_lookup(dev, b4xx_ids);
 	if (id == NULL)
-		return ENXIO;
+		return (ENXIO);
 
 	dt = (struct devtype *) id->driver_data;
 	b4 = device_get_softc(dev);
@@ -3056,7 +3054,7 @@ b4xxp_device_attach(device_t dev)
 	if (b4->io_res == NULL) {
 		device_printf(dev, "Can't allocate I/O resource\n");
 		b4xxp_release_resources(b4);
-		return ENXIO;
+		return (ENXIO);
 	}
 
         /* allocate memory resource */
@@ -3065,17 +3063,17 @@ b4xxp_device_attach(device_t dev)
 	if (b4->mem_res == NULL) {
 		device_printf(dev, "Can't allocate memory resource\n");
 		b4xxp_release_resources(b4);
-		return ENXIO;
+		return (ENXIO);
 	}
 
 	/* register */
 	res = b4xxp_register(b4, dt);
 	if (res) {
 		b4xxp_release_resources(b4);
-		return -res;
+		return (-res);
 	}
 
-	return 0;
+	return (0);
 }
 
 static int
@@ -3092,34 +3090,10 @@ b4xxp_device_detach(device_t dev)
 	return (0);
 }
 
-static int
-b4xxp_device_shutdown(device_t dev)
-{
-	DPRINTF(dev, "%s shutdown\n", device_get_name(dev));
-	return (0);
-}
-
-static int
-b4xxp_device_suspend(device_t dev)
-{
-	DPRINTF(dev, "%s suspend\n", device_get_name(dev));
-	return (0);
-}
-
-static int
-b4xxp_device_resume(device_t dev)
-{
-	DPRINTF(dev, "%s resume\n", device_get_name(dev));
-	return (0);
-}
-
 static device_method_t b4xxp_methods[] = {
 	DEVMETHOD(device_probe,     b4xxp_device_probe),
 	DEVMETHOD(device_attach,    b4xxp_device_attach),
 	DEVMETHOD(device_detach,    b4xxp_device_detach),
-	DEVMETHOD(device_shutdown,  b4xxp_device_shutdown),
-	DEVMETHOD(device_suspend,   b4xxp_device_suspend),
-	DEVMETHOD(device_resume,    b4xxp_device_resume),
 	{ 0, 0 }
 };
 

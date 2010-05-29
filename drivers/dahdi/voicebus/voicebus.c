@@ -44,8 +44,6 @@
 
 #include <machine/resource.h>
 
-#define DPRINTF(dev, fmt, args...)	device_rlprintf(20, *dev, fmt, ##args)
-
 /* XXX do not defer processing to tasklet yet */
 /*#define CONFIG_VOICEBUS_NODEFER*/
 #define CONFIG_VOICEBUS_ITHREAD
@@ -141,13 +139,13 @@ vb_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr
 	    BUS_SPACE_MAXADDR_32BIT, BUS_SPACE_MAXADDR, NULL, NULL,
 	    size, 1, size, BUS_DMA_ALLOCNOW, NULL, NULL, ptag);
 	if (res)
-		return res;
+		return (res);
 
 	res = bus_dmamem_alloc(*ptag, pvaddr, BUS_DMA_NOWAIT | BUS_DMA_ZERO, pmap);
 	if (res) {
 		bus_dma_tag_destroy(*ptag);
 		*ptag = NULL;
-		return res;
+		return (res);
 	}
 
 	res = bus_dmamap_load(*ptag, *pmap, *pvaddr, size, vb_dma_map_addr, ppaddr, 0);
@@ -160,10 +158,10 @@ vb_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr
 
 		bus_dma_tag_destroy(*ptag);
 		*ptag = NULL;
-		return res;
+		return (res);
 	}
 
-	return 0;
+	return (0);
 }
 
 static void

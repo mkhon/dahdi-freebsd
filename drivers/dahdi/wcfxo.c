@@ -33,8 +33,6 @@
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcivar.h>
 
-#define DPRINTF(dev, fmt, args...)      device_rlprintf(20, dev, fmt, ##args)
-
 #define set_current_state(x)
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
@@ -1190,7 +1188,7 @@ wcfxo_setup_intr(struct wcfxo *wc)
 	     wc->dev->dev, SYS_RES_IRQ, &wc->irq_rid, RF_SHAREABLE | RF_ACTIVE);
 	if (wc->irq_res == NULL) {
 		device_printf(wc->dev->dev, "Can't allocate irq resource\n");
-		return -ENXIO;
+		return (ENXIO);
 	}
 
 	error = bus_setup_intr(
@@ -1198,7 +1196,7 @@ wcfxo_setup_intr(struct wcfxo *wc)
 	    wcfxo_interrupt, NULL, wc, &wc->irq_handle);
 	if (error) {
 		device_printf(wc->dev->dev, "Can't setup interrupt handler (error %d)\n", error);
-		return -ENXIO;
+		return (ENXIO);
 	}
 
 	return (0);
@@ -1220,13 +1218,13 @@ wcfxo_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pva
 	    BUS_SPACE_MAXADDR_32BIT, BUS_SPACE_MAXADDR, NULL, NULL,
 	    size, 1, size, BUS_DMA_ALLOCNOW, NULL, NULL, ptag);
 	if (res)
-		return res;
+		return (res);
 
 	res = bus_dmamem_alloc(*ptag, pvaddr, BUS_DMA_NOWAIT | BUS_DMA_ZERO, pmap);
 	if (res) {
 		bus_dma_tag_destroy(*ptag);
 		*ptag = NULL;
-		return res;
+		return (res);
 	}
 
 	res = bus_dmamap_load(*ptag, *pmap, *pvaddr, size, wcfxo_dma_map_addr, ppaddr, 0);
@@ -1239,10 +1237,10 @@ wcfxo_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pva
 
 		bus_dma_tag_destroy(*ptag);
 		*ptag = NULL;
-		return res;
+		return (res);
 	}
 
-	return 0;
+	return (0);
 }
 
 static void
@@ -1273,10 +1271,10 @@ wcfxo_device_probe(device_t dev)
 
 	id = dahdi_pci_device_id_lookup(dev, wcfxo_pci_tbl);
 	if (id == NULL)
-		return ENXIO;
+		return (ENXIO);
 
 	if (wcfxo_validate_params())
-		return ENXIO;
+		return (ENXIO);
 
 	/* found device */
 	device_printf(dev, "vendor=%x device=%x subvendor=%x\n",
@@ -1296,7 +1294,7 @@ wcfxo_device_attach(device_t dev)
 
 	id = dahdi_pci_device_id_lookup(dev, wcfxo_pci_tbl);
 	if (id == NULL)
-		return ENXIO;
+		return (ENXIO);
 
 	d = (struct wcfxo_desc *) id->driver_data;
 	wc = device_get_softc(dev);
@@ -1312,7 +1310,7 @@ wcfxo_device_attach(device_t dev)
 	wc->io_res = bus_alloc_resource_any(dev, SYS_RES_IOPORT, &wc->io_rid, RF_ACTIVE);
 	if (wc->io_res == NULL) {
 		device_printf(dev, "Can't allocate IO resource\n");
-		return ENXIO;
+		return (ENXIO);
 	}
 
 	/* enable bus mastering */
@@ -1355,7 +1353,7 @@ wcfxo_device_attach(device_t dev)
 	}
 	wcfxo_set_daa_mode(wc);
 	printk(KERN_INFO "Found a Wildcard FXO: %s\n", wc->variety);
-	return 0;
+	return (0);
 
 err:
 	if (test_bit(DAHDI_FLAGBIT_REGISTERED, &wc->span.flags))
@@ -1369,7 +1367,7 @@ err:
 
 	/* release resources */
 	wcfxo_release_resources(wc);
-	return res;
+	return (res);
 }
 
 static int
@@ -1396,34 +1394,10 @@ wcfxo_device_detach(device_t dev)
 	return (0);
 }
 
-static int
-wcfxo_device_shutdown(device_t dev)
-{
-	DPRINTF(dev, "%s shutdown\n", device_get_name(dev));
-	return (0);
-}
-
-static int
-wcfxo_device_suspend(device_t dev)
-{
-	DPRINTF(dev, "%s suspend\n", device_get_name(dev));
-	return (0);
-}
-
-static int
-wcfxo_device_resume(device_t dev)
-{
-	DPRINTF(dev, "%s resume\n", device_get_name(dev));
-	return (0);
-}
-
 static device_method_t wcfxo_methods[] = {
 	DEVMETHOD(device_probe,     wcfxo_device_probe),
 	DEVMETHOD(device_attach,    wcfxo_device_attach),
 	DEVMETHOD(device_detach,    wcfxo_device_detach),
-	DEVMETHOD(device_shutdown,  wcfxo_device_shutdown),
-	DEVMETHOD(device_suspend,   wcfxo_device_suspend),
-	DEVMETHOD(device_resume,    wcfxo_device_resume),
 	{ 0, 0 }
 };
 

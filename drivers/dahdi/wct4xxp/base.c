@@ -39,8 +39,6 @@
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcivar.h>
 
-#define DPRINTF(dev, fmt, args...)      device_rlprintf(20, dev, fmt, ##args)
-
 static int
 t4_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr);
 
@@ -4634,13 +4632,13 @@ t4_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr
 	    BUS_SPACE_MAXADDR_32BIT, BUS_SPACE_MAXADDR, NULL, NULL,
 	    size, 1, size, BUS_DMA_ALLOCNOW, NULL, NULL, ptag);
 	if (res)
-		return res;
+		return (res);
 
 	res = bus_dmamem_alloc(*ptag, pvaddr, BUS_DMA_NOWAIT | BUS_DMA_ZERO, pmap);
 	if (res) {
 		bus_dma_tag_destroy(*ptag);
 		*ptag = NULL;
-		return res;
+		return (res);
 	}
 
 	res = bus_dmamap_load(*ptag, *pmap, *pvaddr, size, t4_dma_map_addr, ppaddr, 0);
@@ -4653,10 +4651,10 @@ t4_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr
 
 		bus_dma_tag_destroy(*ptag);
 		*ptag = NULL;
-		return res;
+		return (res);
 	}
 
-	return 0;
+	return (0);
 }
 
 static void
@@ -4687,7 +4685,7 @@ t4_device_probe(device_t dev)
 
 	id = dahdi_pci_device_id_lookup(dev, t4_pci_tbl);
 	if (id == NULL)
-		return ENXIO;
+		return (ENXIO);
 
 	/* found device */
 	device_printf(dev, "vendor=%x device=%x subvendor=%x\n",
@@ -4707,7 +4705,7 @@ t4_device_attach(device_t dev)
 
 	id = dahdi_pci_device_id_lookup(dev, t4_pci_tbl);
 	if (id == NULL)
-		return ENXIO;
+		return (ENXIO);
 
 	dt = (struct devtype *) id->driver_data;
 	wc = device_get_softc(dev);
@@ -4719,7 +4717,7 @@ t4_device_attach(device_t dev)
 	wc->mem_res = bus_alloc_resource_any(dev, SYS_RES_MEMORY, &wc->mem_rid, RF_ACTIVE);
 	if (wc->mem_res == NULL) {
 		device_printf(dev, "Can't allocate memory resource\n");
-		return ENXIO;
+		return (ENXIO);
 	}
 
 	/* enable bus mastering */
@@ -4729,12 +4727,12 @@ t4_device_attach(device_t dev)
 	res = t4_register(wc, dt, (dt->flags & FLAG_2PORT) ? 2 : 4);
 	if (res) {
 		t4_release_resources(wc);
-		return -res;
+		return (-res);
 	}
 
 	/* launch card */
 	t4_launch(wc);
-	return 0;
+	return (0);
 }
 
 static int
@@ -4752,34 +4750,10 @@ t4_device_detach(device_t dev)
 	return (0);
 }
 
-static int
-t4_device_shutdown(device_t dev)
-{
-	DPRINTF(dev, "%s shutdown\n", device_get_name(dev));
-	return (0);
-}
-
-static int
-t4_device_suspend(device_t dev)
-{
-	DPRINTF(dev, "%s suspend\n", device_get_name(dev));
-	return (0);
-}
-
-static int
-t4_device_resume(device_t dev)
-{
-	DPRINTF(dev, "%s resume\n", device_get_name(dev));
-	return (0);
-}
-
 static device_method_t t4_methods[] = {
 	DEVMETHOD(device_probe,     t4_device_probe),
 	DEVMETHOD(device_attach,    t4_device_attach),
 	DEVMETHOD(device_detach,    t4_device_detach),
-	DEVMETHOD(device_shutdown,  t4_device_shutdown),
-	DEVMETHOD(device_suspend,   t4_device_suspend),
-	DEVMETHOD(device_resume,    t4_device_resume),
 	{ 0, 0 }
 };
 
