@@ -23,6 +23,18 @@
  * this program for more details.
  */
 
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/bus.h>
+#include <sys/module.h>
+#include <sys/rman.h>
+
+#include <machine/bus.h>
+#include <dev/pci/pcireg.h>
+#include <dev/pci/pcivar.h>
+
+#define set_current_state(x)
+#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -32,6 +44,7 @@
 #include <linux/pci.h>
 #include <linux/spinlock.h>
 #include <linux/moduleparam.h>
+#endif /* !__FreeBSD__ */
 
 #include <dahdi/kernel.h>
 
@@ -136,6 +149,9 @@ static int altab[] = {
 #endif
 
 struct t1 {
+#if defined(__FreeBSD__)
+	struct pci_dev _dev;
+#endif
 	struct pci_dev *dev;
 	spinlock_t lock;
 	int spantype;
@@ -146,7 +162,7 @@ struct t1 {
 	int alarmdebounce;
 	/* Our offset for finding channel 1 */
 	int offset;
-	char *variety;
+	const char *variety;
 	unsigned int intcount;
 	int usecount;
 	int clocktimeout;
@@ -168,8 +184,25 @@ struct t1 {
 	unsigned long ioaddr;
 	unsigned short canary;
 	/* T1 signalling */
+#if defined(__FreeBSD__)
+	struct resource *io_res;
+	int io_rid;
+
+	struct resource *irq_res;		/* resource for irq */
+	int irq_rid;
+	void *irq_handle;
+
+	uint32_t readdma;
+	bus_dma_tag_t   read_dma_tag;
+	bus_dmamap_t    read_dma_map;
+
+	uint32_t writedma;
+	bus_dma_tag_t   write_dma_tag;
+	bus_dmamap_t    write_dma_map;
+#else /* !__FreeBSD__ */
 	dma_addr_t 	readdma;
 	dma_addr_t	writedma;
+#endif /* !__FreeBSD__ */
 	volatile unsigned char *writechunk;					/* Double-word aligned write memory */
 	volatile unsigned char *readchunk;					/* Double-word aligned read memory */
 	unsigned char ec_chunk1[32][DAHDI_CHUNKSIZE];
@@ -190,6 +223,39 @@ static int t1e1override = -1;
 static int unchannelized = 0;
 
 static struct t1 *cards[WC_MAX_CARDS];
+
+static inline u8
+t1xxp_inb(struct t1 *wc, int reg)
+{
+#if defined(__FreeBSD__)
+	return bus_space_read_1(rman_get_bustag(wc->io_res),
+	    rman_get_bushandle(wc->io_res), reg);
+#else
+	return inb(wc->ioaddr + reg);
+#endif
+}
+
+static inline void
+t1xxp_outb(struct t1 *wc, int reg, u8 value)
+{
+#if defined(__FreeBSD__)
+	bus_space_write_1(rman_get_bustag(wc->io_res),
+	    rman_get_bushandle(wc->io_res), reg, value);
+#else
+	outb(value, wc->ioaddr + reg);
+#endif
+}
+
+static inline void
+t1xxp_outl(struct t1 *wc, int reg, u32 value)
+{
+#if defined(__FreeBSD__)
+	bus_space_write_4(rman_get_bustag(wc->io_res),
+	    rman_get_bushandle(wc->io_res), reg, value);
+#else
+	outl(value, wc->ioaddr + reg);
+#endif
+}
 
 static inline void start_alarm(struct t1 *wc)
 {
@@ -213,14 +279,14 @@ static inline void __select_framer(struct t1 *wc, int reg)
 	wc->outbyte &= ~BIT_CS;
 	wc->outbyte &= ~BIT_ADDR;
 	wc->outbyte |= (reg & 0xf0) >> 1;
-	outb(wc->outbyte, wc->ioaddr + WC_AUXD);
+	t1xxp_outb(wc, WC_AUXD, wc->outbyte);
 }
 
 static inline void __select_control(struct t1 *wc)
 {
 	if (!(wc->outbyte & BIT_CS)) {
 		wc->outbyte |= BIT_CS;
-		outb(wc->outbyte, wc->ioaddr + WC_AUXD);
+		t1xxp_outb(wc, WC_AUXD, wc->outbyte);
 	}
 }
 
@@ -237,7 +303,7 @@ static int t1xxp_open(struct dahdi_chan *chan)
 static int __control_set_reg(struct t1 *wc, int reg, unsigned char val)
 {
 	__select_control(wc);
-	outb(val, wc->ioaddr + WC_USERREG + ((reg & 0xf) << 2));
+	t1xxp_outb(wc, WC_USERREG + ((reg & 0xf) << 2), val);
 	return 0;
 }
 
@@ -261,7 +327,7 @@ static int __control_get_reg(struct t1 *wc, int reg)
 	   seems to get rid of the problem */
 	__control_set_reg(wc,3,0x69); /* do magic here */
 	/* now get the read byte from the Xilinx part */
-	res = inb(wc->ioaddr + WC_USERREG + ((reg & 0xf) << 2));
+	res = t1xxp_inb(wc, WC_USERREG + ((reg & 0xf) << 2));
 	return res;
 }
 
@@ -280,7 +346,7 @@ static inline unsigned int __t1_framer_in(struct t1 *wc, const unsigned int reg)
 	unsigned char res;
 	__select_framer(wc, reg);
 	/* Get value */
-	res = inb(wc->ioaddr + WC_USERREG + ((reg & 0xf) << 2));
+	res = t1xxp_inb(wc, WC_USERREG + ((reg & 0xf) << 2));
 	return res;
 #if 0
 	unsigned int ret;
@@ -309,7 +375,7 @@ static inline void __t1_framer_out(struct t1 *wc, const unsigned int reg, const 
 		printk(KERN_DEBUG "Writing %02x to address %02x\n", val, reg);
 	__select_framer(wc, reg);
 	/* Send address */
-	outb(val, wc->ioaddr + WC_USERREG + ((reg & 0xf) << 2));
+	t1xxp_outb(wc, WC_USERREG + ((reg & 0xf) << 2), val);
 #if 0
 	__t1_pci_out(wc, WC_LADDR, (unit << 8) | (addr & 0xff));
 	__t1_pci_out(wc, WC_LDATA, value);
@@ -363,36 +429,36 @@ static int t1xxp_close(struct dahdi_chan *chan)
 static void t1xxp_enable_interrupts(struct t1 *wc)
 {
 	/* Clear interrupts */
-	outb(0xff, wc->ioaddr + WC_INTSTAT);
+	t1xxp_outb(wc, WC_INTSTAT, 0xff);
 	/* Enable interrupts (we care about all of them) */
-	outb(0x3c /* 0x3f */, wc->ioaddr + WC_MASK0); 
+	t1xxp_outb(wc, WC_MASK0, 0x3c /* 0x3f */);
 	/* No external interrupts */
-	outb(0x00, wc->ioaddr + WC_MASK1);
+	t1xxp_outb(wc, WC_MASK1, 0x00);
 	if (debug) printk(KERN_DEBUG "Enabled interrupts!\n");
 }
 
 static void t1xxp_start_dma(struct t1 *wc)
 {
 	/* Reset Master and TDM */
-	outb(DELAY | 0x0f, wc->ioaddr + WC_CNTL);
+	t1xxp_outb(wc, WC_CNTL, DELAY | 0x0f);
 	set_current_state(TASK_INTERRUPTIBLE);
 	schedule_timeout(1);
-	outb(DELAY | 0x01, wc->ioaddr + WC_CNTL);
-	outb(0x01, wc->ioaddr + WC_OPER);
+	t1xxp_outb(wc, WC_CNTL, DELAY | 0x01);
+	t1xxp_outb(wc, WC_OPER, 0x01);
 	if (debug) printk(KERN_DEBUG "Started DMA\n");
-	outb(0x03, wc->ioaddr + WC_OPER);
-	outb(0x01, wc->ioaddr + WC_OPER);
+	t1xxp_outb(wc, WC_OPER, 0x03);
+	t1xxp_outb(wc, WC_OPER, 0x01);
 }
 
 static void __t1xxp_stop_dma(struct t1 *wc)
 {
-	outb(0x00, wc->ioaddr + WC_OPER);
+	t1xxp_outb(wc, WC_OPER, 0x00);
 }
 
 static void __t1xxp_disable_interrupts(struct t1 *wc)	
 {
-	outb(0x00, wc->ioaddr + WC_MASK0);
-	outb(0x00, wc->ioaddr + WC_MASK1);
+	t1xxp_outb(wc, WC_MASK0, 0x00);
+	t1xxp_outb(wc, WC_MASK1, 0x00);
 }
 
 static void __t1xxp_set_clear(struct t1 *wc)
@@ -423,12 +489,12 @@ static int t1xxp_ioctl(struct dahdi_chan *chan, unsigned int cmd, unsigned long 
 		wc = chan->pvt;
 		for (x=0;x<NUM_PCI;x++)
 #if 1
-			regs.pci[x] = (inb(wc->ioaddr + (x << 2))) |
-				       (inb(wc->ioaddr + (x << 2) + 1) << 8) |
-					(inb(wc->ioaddr + (x << 2) + 2) << 16) |
-					 (inb(wc->ioaddr + (x << 2) + 3) << 24);
+			regs.pci[x] = (t1xxp_inb(wc, (x << 2))) |
+				       (t1xxp_inb(wc, (x << 2) + 1) << 8) |
+					(t1xxp_inb(wc, (x << 2) + 2) << 16) |
+					 (t1xxp_inb(wc, (x << 2) + 3) << 24);
 #else
-			regs.pci[x] = (inb(wc->ioaddr + x));
+			regs.pci[x] = (t1xxp_inb(wc, x));
 #endif
 
 		for (x=0;x<NUM_REGS;x++)
@@ -970,10 +1036,10 @@ static int t1xxp_software_init(struct t1 *wc)
 	wc->span.manufacturer = "Digium";
 	dahdi_copy_string(wc->span.devicetype, wc->variety, sizeof(wc->span.devicetype));
 	snprintf(wc->span.location, sizeof(wc->span.location) - 1,
-		 "PCI Bus %02d Slot %02d", wc->dev->bus->number, PCI_SLOT(wc->dev->devfn) + 1);
+		 "PCI Bus %02d Slot %02d", dahdi_pci_get_bus(wc->dev), dahdi_pci_get_slot(wc->dev) + 1);
 	wc->span.spanconfig = t1xxp_spanconfig;
 	wc->span.chanconfig = t1xxp_chanconfig;
-	wc->span.irq = wc->dev->irq;
+	wc->span.irq = dahdi_pci_get_irq(wc->dev);
 	wc->span.startup = t1xxp_startup;
 	wc->span.shutdown = t1xxp_shutdown;
 	wc->span.rbsbits = t1xxp_rbsbits;
@@ -1106,10 +1172,10 @@ static void t1xxp_receiveprep(struct t1 *wc, int ints)
 	if (ints & 0x04) {
 		/* Just received first buffer */
 		rxbuf = wc->readchunk;
-		canary = (unsigned int *)(wc->readchunk + DAHDI_CHUNKSIZE * 64 - 4);
+		canary = (volatile unsigned int *)(wc->readchunk + DAHDI_CHUNKSIZE * 64 - 4);
 	} else {
 		rxbuf = wc->readchunk + DAHDI_CHUNKSIZE * 32;
-		canary = (unsigned int *)(wc->readchunk + DAHDI_CHUNKSIZE * 32 - 4);
+		canary = (volatile unsigned int *)(wc->readchunk + DAHDI_CHUNKSIZE * 32 - 4);
 	}
 	oldcan = *canary;
 	if (((oldcan & 0xffff0000) >> 16) != CANARY) {
@@ -1160,7 +1226,7 @@ static void t1xxp_receiveprep(struct t1 *wc, int ints)
 		} 
 	}
 	/* Store the next canary */
-	canary = (unsigned int *)(rxbuf + DAHDI_CHUNKSIZE * 32 - 4);
+	canary = (volatile unsigned int *)(rxbuf + DAHDI_CHUNKSIZE * 32 - 4);
 	*canary = (wc->canary++) | (CANARY << 16);
 	for (x=0;x<wc->span.channels;x++) {
 		dahdi_ec_chunk(wc->chans[x], wc->chans[x]->readchunk, wc->ec_chunk2[x]);
@@ -1323,11 +1389,15 @@ DAHDI_IRQ_HANDLER(t1xxp_interrupt)
 	unsigned long flags;
 	int x;
 
-	ints = inb(wc->ioaddr + WC_INTSTAT);
+	ints = t1xxp_inb(wc, WC_INTSTAT);
 	if (!ints)
+#if defined(__FreeBSD__)
+		return FILTER_STRAY;
+#else
 		return IRQ_NONE;
+#endif
 
-	outb(ints, wc->ioaddr + WC_INTSTAT);
+	t1xxp_outb(wc, WC_INTSTAT, ints);
 
 	if (!wc->intcount) {
 		if (debug) printk(KERN_DEBUG "Got interrupt: 0x%04x\n", ints);
@@ -1374,7 +1444,11 @@ DAHDI_IRQ_HANDLER(t1xxp_interrupt)
 	if (ints & 0x20)
 		printk(KERN_NOTICE "PCI Target abort\n");
 
+#if defined(__FreeBSD__)
+	return FILTER_HANDLED;
+#else
 	return IRQ_RETVAL(1);
+#endif
 }
 
 static int t1xxp_hardware_init(struct t1 *wc)
@@ -1383,37 +1457,37 @@ static int t1xxp_hardware_init(struct t1 *wc)
 	unsigned int x;
 	/* Hardware PCI stuff */
 	/* Reset chip and registers */
-	outb(DELAY | 0x0e, wc->ioaddr + WC_CNTL);
+	t1xxp_outb(wc, WC_CNTL, DELAY | 0x0e);
 	/* Set all outputs to 0 */
-	outb(0x00, wc->ioaddr + WC_AUXD);
+	t1xxp_outb(wc, WC_AUXD, 0x00);
 	/* Set all to outputs except AUX1 (TDO). */
-	outb(0xfd, wc->ioaddr + WC_AUXC);
+	t1xxp_outb(wc, WC_AUXC, 0xfd);
 	/* Configure the serial port: double clock, 20ns width, no inversion,
 	   MSB first */
-	outb(0xc8, wc->ioaddr + WC_SERC);
+	t1xxp_outb(wc, WC_SERC, 0xc8);
 
 	/* Internally delay FSC by one */
-	outb(0x01, wc->ioaddr + WC_FSCDELAY);
+	t1xxp_outb(wc, WC_FSCDELAY, 0x01);
 
 	/* Back to normal, with automatic DMA wrap around */
-	outb(DELAY | 0x01, wc->ioaddr + WC_CNTL);
+	t1xxp_outb(wc, WC_CNTL, DELAY | 0x01);
 	
 	/* Make sure serial port and DMA are out of reset */
-	outb(inb(wc->ioaddr + WC_CNTL) & 0xf9, WC_CNTL);
+	t1xxp_outb(wc, WC_CNTL, t1xxp_inb(wc, WC_CNTL) & 0xf9);
 	
 	/* Setup DMA Addresses */
 	/* Start at writedma */
-	outl(wc->writedma,                    wc->ioaddr + WC_DMAWS);		/* Write start */
+	t1xxp_outl(wc, WC_DMAWS, wc->writedma);		/* Write start */
 	/* First frame */
-	outl(wc->writedma + DAHDI_CHUNKSIZE * 32 - 4, wc->ioaddr + WC_DMAWI);		/* Middle (interrupt) */
+	t1xxp_outl(wc, WC_DMAWI, wc->writedma + DAHDI_CHUNKSIZE * 32 - 4);	/* Middle (interrupt) */
 	/* Second frame */
-	outl(wc->writedma + DAHDI_CHUNKSIZE * 32 * 2 - 4, wc->ioaddr + WC_DMAWE);			/* End */
+	t1xxp_outl(wc, WC_DMAWE, wc->writedma + DAHDI_CHUNKSIZE * 32 * 2 - 4);	/* End */
 	
-	outl(wc->readdma,                    	 wc->ioaddr + WC_DMARS);	/* Read start */
+	t1xxp_outl(wc, WC_DMARS, wc->readdma);		/* Read start */
 	/* First frame */
-	outl(wc->readdma + DAHDI_CHUNKSIZE * 32 - 4, 	 wc->ioaddr + WC_DMARI);	/* Middle (interrupt) */
+	t1xxp_outl(wc, WC_DMARI, wc->readdma + DAHDI_CHUNKSIZE * 32 - 4);	/* Middle (interrupt) */
 	/* Second frame */
-	outl(wc->readdma + DAHDI_CHUNKSIZE * 32 * 2 - 4, wc->ioaddr + WC_DMARE);	/* End */
+	t1xxp_outl(wc, WC_DMARE, wc->readdma + DAHDI_CHUNKSIZE * 32 * 2 - 4);	/* End */
 	
 	if (debug) printk(KERN_DEBUG "Setting up DMA (write/read = %08lx/%08lx)\n", (long)wc->writedma, (long)wc->readdma);
 
@@ -1465,6 +1539,17 @@ static int t1xxp_hardware_init(struct t1 *wc)
 
 }
 
+static void t1xxp_stop_stuff(struct t1 *wc)
+{
+	/* Kill clock */
+	control_set_reg(wc, WC_CLOCK, 0);
+
+	/* Turn off LED's */
+	control_set_reg(wc, WC_LEDTEST, 0);
+
+}
+
+#if !defined(__FreeBSD__)
 static int __devinit t1xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	struct t1 *wc;
@@ -1541,16 +1626,6 @@ static int __devinit t1xxp_init_one(struct pci_dev *pdev, const struct pci_devic
 	return 0;
 }
 
-static void t1xxp_stop_stuff(struct t1 *wc)
-{
-	/* Kill clock */
-	control_set_reg(wc, WC_CLOCK, 0);
-
-	/* Turn off LED's */
-	control_set_reg(wc, WC_LEDTEST, 0);
-
-}
-
 static void __devexit t1xxp_remove_one(struct pci_dev *pdev)
 {
 	struct t1 *wc = pci_get_drvdata(pdev);
@@ -1569,7 +1644,7 @@ static void __devexit t1xxp_remove_one(struct pci_dev *pdev)
 		free_irq(pdev->irq, wc);
 
 		/* Reset PCI chip and registers */
-		outb(DELAY | 0x0e, wc->ioaddr + WC_CNTL);
+		t1xxp_outb(wc, WC_CNTL, DELAY | 0x0e);
 
 		/* Release span, possibly delayed */
 		if (!wc->usecount)
@@ -1578,6 +1653,7 @@ static void __devexit t1xxp_remove_one(struct pci_dev *pdev)
 			wc->dead = 1;
 	}
 }
+#endif /* !__FreeBSD__ */
 
 static struct pci_device_id t1xxp_pci_tbl[] = {
 	{ 0xe159, 0x0001, 0x71fe, PCI_ANY_ID, 0, 0, (unsigned long) "Digium Wildcard TE110P T1/E1 Board" },
@@ -1588,6 +1664,262 @@ static struct pci_device_id t1xxp_pci_tbl[] = {
 	{ 0 }
 };
 
+#if defined(__FreeBSD__)
+SYSCTL_NODE(_dahdi, OID_AUTO, wcte11xp, CTLFLAG_RW, 0, "DAHDI wcte11xp");
+#define MODULE_PARAM_PREFIX "dahdi.wcte11xp"
+#define MODULE_PARAM_PARENT _dahdi_wcte11xp
+
+static void t1xxp_dma_free(bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr);
+
+static void
+t1xxp_release_resources(struct t1 *wc)
+{
+        /* disconnect the interrupt handler */
+	if (wc->irq_handle != NULL) {
+		bus_teardown_intr(wc->dev->dev, wc->irq_res, wc->irq_handle);
+		wc->irq_handle = NULL;
+	}
+
+	if (wc->irq_res != NULL) {
+		bus_release_resource(wc->dev->dev, SYS_RES_IRQ, wc->irq_rid, wc->irq_res);
+		wc->irq_res = NULL;
+	}
+
+	/* release DMA resources */
+	t1xxp_dma_free(&wc->write_dma_tag, &wc->write_dma_map, __DECONST(void **, &wc->writechunk), &wc->writedma);
+	t1xxp_dma_free(&wc->read_dma_tag, &wc->read_dma_map, __DECONST(void **, &wc->readchunk), &wc->readdma);
+
+	/* release memory window */
+	if (wc->io_res != NULL) {
+		bus_release_resource(wc->dev->dev, SYS_RES_IOPORT, wc->io_rid, wc->io_res);
+		wc->io_res = NULL;
+	}
+}
+
+static int
+t1xxp_setup_intr(struct t1 *wc)
+{
+	int error;
+
+	wc->irq_res = bus_alloc_resource_any(
+	     wc->dev->dev, SYS_RES_IRQ, &wc->irq_rid, RF_SHAREABLE | RF_ACTIVE);
+	if (wc->irq_res == NULL) {
+		device_printf(wc->dev->dev, "Can't allocate irq resource\n");
+		return -ENXIO;
+	}
+
+	error = bus_setup_intr(
+	    wc->dev->dev, wc->irq_res, INTR_TYPE_CLK | INTR_MPSAFE,
+	    t1xxp_interrupt, NULL, wc, &wc->irq_handle);
+	if (error) {
+		device_printf(wc->dev->dev, "Can't setup interrupt handler (error %d)\n", error);
+		return -ENXIO;
+	}
+
+	return (0);
+}
+
+static void
+t1xxp_dma_map_addr(void *arg, bus_dma_segment_t *segs, int nseg, int error)
+{
+	uint32_t *paddr = arg;
+	*paddr = segs->ds_addr;
+}
+
+static int
+t1xxp_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr)
+{
+	int res;
+
+	res = bus_dma_tag_create(NULL, 8, 0,
+	    BUS_SPACE_MAXADDR_32BIT, BUS_SPACE_MAXADDR, NULL, NULL,
+	    size, 1, size, BUS_DMA_ALLOCNOW, NULL, NULL, ptag);
+	if (res)
+		return (res);
+
+	res = bus_dmamem_alloc(*ptag, pvaddr, BUS_DMA_NOWAIT | BUS_DMA_ZERO, pmap);
+	if (res) {
+		bus_dma_tag_destroy(*ptag);
+		*ptag = NULL;
+		return (res);
+	}
+
+	res = bus_dmamap_load(*ptag, *pmap, *pvaddr, size, t1xxp_dma_map_addr, ppaddr, 0);
+	if (res) {
+		bus_dmamem_free(*ptag, *pvaddr, *pmap);
+		*pvaddr = NULL;
+
+		bus_dmamap_destroy(*ptag, *pmap);
+		*pmap = NULL;
+
+		bus_dma_tag_destroy(*ptag);
+		*ptag = NULL;
+		return (res);
+	}
+
+	return (0);
+}
+
+static void
+t1xxp_dma_free(bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr)
+{
+	if (*ppaddr != 0) {
+		bus_dmamap_unload(*ptag, *pmap);
+		*ppaddr = 0;
+	}
+	if (*pvaddr != NULL) {
+		bus_dmamem_free(*ptag, *pvaddr, *pmap);
+		*pvaddr = NULL;
+
+		bus_dmamap_destroy(*ptag, *pmap);
+		*pmap = NULL;
+	}
+	if (*ptag != NULL) {
+		bus_dma_tag_destroy(*ptag);
+		*ptag = NULL;
+	}
+}
+
+static int
+t1xxp_device_probe(device_t dev)
+{
+	struct pci_device_id *id;
+
+	id = dahdi_pci_device_id_lookup(dev, t1xxp_pci_tbl);
+	if (id == NULL)
+		return (ENXIO);
+
+	/* found device */
+	device_printf(dev, "vendor=%x device=%x subvendor=%x\n",
+	    id->vendor, id->device, id->subvendor);
+	device_set_desc(dev, (const char *) id->driver_data);
+	return (0);
+}
+
+static int
+t1xxp_device_attach(device_t dev)
+{
+	int res;
+	struct pci_device_id *id;
+	struct t1 *wc;
+	int x;
+	volatile unsigned int *canary;
+
+	id = dahdi_pci_device_id_lookup(dev, t1xxp_pci_tbl);
+	if (id == NULL)
+		return (ENXIO);
+
+	wc = device_get_softc(dev);
+	wc->dev = &wc->_dev;
+	wc->dev->dev = dev;
+	spin_lock_init(&wc->lock);
+	wc->offset = 28;	/* And you thought 42 was the answer */
+	wc->variety = (const char *) id->driver_data;
+
+        /* allocate IO resource */
+	wc->io_rid = PCIR_BAR(0);
+	wc->io_res = bus_alloc_resource_any(dev, SYS_RES_IOPORT, &wc->io_rid, RF_ACTIVE);
+	if (wc->io_res == NULL) {
+		device_printf(dev, "Can't allocate IO resource\n");
+		res = ENXIO;
+		goto err;
+	}
+
+	/* enable bus mastering */
+	pci_enable_busmaster(dev);
+
+	res = t1xxp_setup_intr(wc);
+	if (res)
+		goto err;
+
+	res = t1xxp_dma_allocate(DAHDI_MAX_CHUNKSIZE * 32 * 2, &wc->write_dma_tag, &wc->write_dma_map,
+	    __DECONST(void **, &wc->writechunk), &wc->writedma);
+	if (res)
+		goto err;
+
+	res = t1xxp_dma_allocate(DAHDI_MAX_CHUNKSIZE * 32 * 2, &wc->read_dma_tag, &wc->read_dma_map,
+	    __DECONST(void **, &wc->readchunk), &wc->readdma);
+	if (res)
+		goto err;
+
+	/* initialize canary */
+	canary = (volatile unsigned int *)(wc->readchunk + DAHDI_CHUNKSIZE * 64 - 4);
+	*canary = (CANARY << 16) | (0xffff);
+
+	/* initialize hardware */
+	t1xxp_hardware_init(wc);
+
+	for (x = 0; x < (wc->spantype == TYPE_E1 ? 31 : 24); x++) {
+		if (!(wc->chans[x] = kmalloc(sizeof(*wc->chans[x]), GFP_KERNEL))) {
+			while (x) {
+				kfree(wc->chans[--x]);
+			}
+			goto err;
+		}
+		memset(wc->chans[x], 0, sizeof(*wc->chans[x]));
+	}
+
+	/* Misc. software stuff */
+	if (t1xxp_software_init(wc) < 0) {
+		res = ENXIO;
+		goto err;
+	}
+
+	printk(KERN_INFO "Found a Wildcard: %s\n", wc->variety);
+	return (0);
+
+err:
+	/* release resources */
+	t1xxp_release_resources(wc);
+	spin_lock_destroy(&wc->lock);
+	return (res);
+}
+
+static int
+t1xxp_device_detach(device_t dev)
+{
+	struct t1 *wc = device_get_softc(dev);
+
+	/* Stop any DMA */
+	__t1xxp_stop_dma(wc);
+
+	/* In case hardware is still there */
+	__t1xxp_disable_interrupts(wc);
+
+	t1xxp_stop_stuff(wc);
+
+	/* Reset PCI chip and registers */
+	t1xxp_outb(wc, WC_CNTL, DELAY | 0x0e);
+
+	/* Unregister */
+	dahdi_unregister(&wc->span);
+
+	/* Release resources */
+	t1xxp_release_resources(wc);
+	spin_lock_destroy(&wc->lock);
+
+	return (0);
+}
+
+static device_method_t t1xxp_methods[] = {
+	DEVMETHOD(device_probe,     t1xxp_device_probe),
+	DEVMETHOD(device_attach,    t1xxp_device_attach),
+	DEVMETHOD(device_detach,    t1xxp_device_detach),
+	{ 0, 0 }
+};
+
+static driver_t t1xxp_pci_driver = {
+	"t1xxp",
+	t1xxp_methods,
+	sizeof(struct t1)
+};
+
+static devclass_t t1xxp_devclass;
+
+DRIVER_MODULE(t1xxp, pci, t1xxp_pci_driver, t1xxp_devclass, 0, 0);
+MODULE_DEPEND(t1xxp, pci, 1, 1, 1);
+MODULE_DEPEND(t1xxp, dahdi, 1, 1, 1);
+#else /* !__FreeBSD__ */
 MODULE_DEVICE_TABLE(pci,t1xxp_pci_tbl);
 
 static struct pci_driver t1xxp_driver = {
@@ -1612,6 +1944,7 @@ static void __exit t1xxp_cleanup(void)
 {
 	pci_unregister_driver(&t1xxp_driver);
 }
+#endif /* !__FreeBSD__ */
 
 module_param(alarmdebounce, int, 0600);
 module_param(loopback, int, 0600);
@@ -1621,9 +1954,11 @@ module_param(clockextra, int, 0600);
 module_param(debug, int, 0600);
 module_param(j1mode, int, 0600);
 
+#if !defined(__FreeBSD__)
 MODULE_DESCRIPTION("Wildcard TE110P Driver");
 MODULE_AUTHOR("Mark Spencer <markster@digium.com>");
 MODULE_LICENSE("GPL v2");
 
 module_init(t1xxp_init);
 module_exit(t1xxp_cleanup);
+#endif /* !__FreeBSD__ */
