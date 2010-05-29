@@ -3,7 +3,6 @@
 KMOD=	wct4xxp
 SRCS=	base.c vpm450m.c ${OCTASIC_SRCS}
 SRCS+=	device_if.h bus_if.h pci_if.h
-#CFLAGS=	--param inline-unit-growth=100
 CFLAGS=	-DHOTPLUG_FIRMWARE ${OCTASIC_CFLAGS}
 
 # ${srcdir}/oct612x/octasic-helper objects ${srcdir}
