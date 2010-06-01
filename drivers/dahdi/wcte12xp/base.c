@@ -27,6 +27,18 @@
  * this program for more details.
  */
 
+#if defined(__FreeBSD__)
+#include <sys/param.h>
+#include <sys/bus.h>
+#include <sys/module.h>
+
+#include <vm/uma.h>
+
+#include <dev/pci/pcivar.h>
+
+typedef int bool;
+#define fatal_signal_pending(x)	0
+#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -39,8 +51,9 @@
 #include <linux/workqueue.h>
 #include <linux/delay.h>
 #include <linux/sched.h>
-
 #include <stdbool.h>
+#endif /* !__FreeBSD__ */
+
 #include <dahdi/kernel.h>
 
 #include "wct4xxp/wct4xxp.h"	/* For certain definitions */
@@ -88,8 +101,12 @@ static const struct dahdi_echocan_ops vpm150m_ec_ops = {
 	.echocan_free = echocan_free,
 };
 
+#if defined(__FreeBSD__)
+DEFINE_SPINLOCK(ifacelock);
+#else
 static struct t1 *ifaces[WC_MAX_IFACES];
 spinlock_t ifacelock = SPIN_LOCK_UNLOCKED;
+#endif /* !__FreeBSD__ */
 
 struct t1_desc {
 	const char *name;
@@ -99,6 +116,25 @@ static const struct t1_desc te120p = {"Wildcard TE120P"};
 static const struct t1_desc te122 = {"Wildcard TE122"};
 static const struct t1_desc te121 = {"Wildcard TE121"};
 
+#if defined(__FreeBSD__)
+static uma_zone_t cmd_cache;
+
+static struct command *get_free_cmd(struct t1 *wc)
+{
+	struct command *cmd;
+
+	cmd = uma_zalloc(cmd_cache, M_WAITOK | M_ZERO);
+	if (cmd) {
+		INIT_LIST_HEAD(&cmd->node);
+	}
+	return cmd;
+}
+
+static void free_cmd(struct t1 *wc, struct command *cmd)
+{
+	uma_zfree(cmd_cache, cmd);
+}
+#else /* !__FreeBSD__ */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 static kmem_cache_t *cmd_cache;
 #else
@@ -120,6 +156,7 @@ static void free_cmd(struct t1 *wc, struct command *cmd)
 {
 	kmem_cache_free(cmd_cache, cmd);
 }
+#endif /* !__FreeBSD__ */
 
 static struct command *get_pending_cmd(struct t1 *wc)
 {
@@ -223,7 +260,7 @@ static inline void cmd_decipher(struct t1 *wc, const u8 *readchunk)
 	spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
 }
 
-inline void cmd_decipher_vpmadt032(struct t1 *wc, const u8 *readchunk)
+static inline void cmd_decipher_vpmadt032(struct t1 *wc, const u8 *readchunk)
 {
 	unsigned long flags;
 	struct vpmadt032 *vpm = wc->vpmadt032;
@@ -665,7 +702,7 @@ static void free_wc(struct t1 *wc)
 	unsigned int x;
 	unsigned long flags;
 	struct command *cmd;
-	LIST_HEAD(list);
+	_LIST_HEAD(list);
 
 	for (x = 0; x < (wc->spantype == TYPE_E1 ? 31 : 24); x++) {
 		kfree(wc->chans[x]);
@@ -681,7 +718,12 @@ static void free_wc(struct t1 *wc)
 		list_del(&cmd->node);
 		free_cmd(wc, cmd);
 	}
+#if defined(__FreeBSD__)
+	spin_lock_destroy(&wc->reglock);
+	spin_lock_destroy(&wc->cmd_list_lock);
+#else /* !__FreeBSD__ */
 	kfree(wc);
+#endif /* !__FreeBSD__ */
 }
 
 static void t1_release(struct t1 *wc)
@@ -1245,6 +1287,7 @@ static int t1_software_init(struct t1 *wc)
 	int num;
 	struct pci_dev *pdev = wc->vb.pdev;
 
+#if !defined(__FreeBSD__)
 	/* Find position */
 	for (x = 0; x < sizeof(ifaces) / sizeof(ifaces[0]); x++) {
 		if (ifaces[x] == wc) {
@@ -1255,6 +1298,7 @@ static int t1_software_init(struct t1 *wc)
 
 	if (x == sizeof(ifaces) / sizeof(ifaces[0]))
 		return -1;
+#endif /* !__FreeBSD__ */
 
 	t4_serial_setup(wc);
 
@@ -1265,13 +1309,13 @@ static int t1_software_init(struct t1 *wc)
 	set_span_devicetype(wc);
 
 	snprintf(wc->span.location, sizeof(wc->span.location) - 1,
-		"PCI Bus %02d Slot %02d", pdev->bus->number,
-		PCI_SLOT(pdev->devfn) + 1);
+		"PCI Bus %02d Slot %02d", dahdi_pci_get_bus(pdev),
+		dahdi_pci_get_slot(pdev) + 1);
 
 	wc->span.owner = THIS_MODULE;
 	wc->span.spanconfig = t1xxp_spanconfig;
 	wc->span.chanconfig = t1xxp_chanconfig;
-	wc->span.irq = pdev->irq;
+	wc->span.irq = dahdi_pci_get_irq(pdev);
 	wc->span.startup = t1xxp_startup;
 	wc->span.shutdown = t1xxp_shutdown;
 	wc->span.rbsbits = t1xxp_rbsbits;
@@ -1787,7 +1831,7 @@ static void t1_handle_receive(struct voicebus *vb, struct list_head *buffers)
 		t1_receiveprep(wc, vbb->data);
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+#if !defined(__FreeBSD__) && LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 static void timer_work_func(void *param)
 {
 	struct t1 *wc = param;
@@ -1818,7 +1862,11 @@ static const struct voicebus_operations voicebus_operations = {
 	.handle_transmit = t1_handle_transmit,
 };
 
+#if defined(__FreeBSD__)
+static int te12xp_init_one(device_t dev, const struct pci_device_id *ent)
+#else
 static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
+#endif
 {
 	struct t1 *wc;
 	struct t1_desc *d = (struct t1_desc *) ent->driver_data;
@@ -1826,6 +1874,9 @@ static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_devi
 	int res;
 	unsigned int index = -1;
 
+#if defined(__FreeBSD__)
+	wc = device_get_softc(dev);
+#else /* !__FreeBSD__ */
 	for (x = 0; x < sizeof(ifaces) / sizeof(ifaces[0]); x++) {
 		if (!ifaces[x]) {
 			index = x;
@@ -1845,6 +1896,7 @@ static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_devi
 
 	ifaces[index] = wc;
 	memset(wc, 0, sizeof(*wc));
+#endif /* !__FreeBSD__ */
 	wc->ledstate = -1;
 	spin_lock_init(&wc->reglock);
 	spin_lock_init(&wc->cmd_list_lock);
@@ -1862,23 +1914,25 @@ static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_devi
 	setup_timer(&wc->timer, te12xp_timer, (unsigned long)wc);
 #	endif
 
-#	if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+#	if !defined(__FreeBSD__) && LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 	INIT_WORK(&wc->timer_work, timer_work_func, wc);
 #	else
 	INIT_WORK(&wc->timer_work, timer_work_func);
 #	endif
 
 	snprintf(wc->name, sizeof(wc->name)-1, "wcte12xp%d", index);
-	pci_set_drvdata(pdev, wc);
 	wc->vb.ops = &voicebus_operations;
+#if defined(__FreeBSD__)
+	wc->vb.pdev = &wc->vb._dev;
+	wc->vb.pdev->dev = dev;
+#else /* !__FreeBSD__ */
 	wc->vb.pdev = pdev;
+	pci_set_drvdata(pdev, wc);
+#endif /* !__FreeBSD__ */
 	wc->vb.debug = &debug;
 	res = voicebus_init(&wc->vb, wc->name);
-	if (res) {
-		free_wc(wc);
-		ifaces[index] = NULL;
-		return res;
-	}
+	if (res)
+		goto err;
 	
 	if (VOICEBUS_DEFAULT_LATENCY != latency) {
 		voicebus_set_minlatency(&wc->vb, latency);
@@ -1887,23 +1941,20 @@ static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_devi
 
 	voicebus_lock_latency(&wc->vb);
 	if (voicebus_start(&wc->vb)) {
-		voicebus_release(&wc->vb);
-		free_wc(wc);
-		return -EIO;
+		res = -EIO;
+		goto err;
 	}
 	t1_hardware_post_init(wc);
 
 	for (x = 0; x < (wc->spantype == TYPE_E1 ? 31 : 24); x++) {
 		if (!(wc->chans[x] = kmalloc(sizeof(*wc->chans[x]), GFP_KERNEL))) {
-			free_wc(wc);
-			ifaces[index] = NULL;
-			return -ENOMEM;
+			res = -ENOMEM;
+			goto err;
 		}
 		memset(wc->chans[x], 0, sizeof(*wc->chans[x]));
 		if (!(wc->ec[x] = kmalloc(sizeof(*wc->ec[x]), GFP_KERNEL))) {
-			free_wc(wc);
-			ifaces[index] = NULL;
-			return -ENOMEM;
+			res = -ENOMEM;
+			goto err;
 		}
 		memset(wc->ec[x], 0, sizeof(*wc->ec[x]));
 	}
@@ -1913,11 +1964,27 @@ static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_devi
 	t1_info(wc, "Found a %s\n", wc->variety);
 	voicebus_unlock_latency(&wc->vb);
 	return 0;
+
+err:
+	voicebus_release(&wc->vb);
+	free_wc(wc);
+#if !defined(__FreeBSD__)
+	ifaces[index] = NULL;
+#endif
+	return res;
 }
 
+#if defined(__FreeBSD__)
+static void te12xp_remove_one(device_t dev)
+#else
 static void __devexit te12xp_remove_one(struct pci_dev *pdev)
+#endif
 {
+#if defined(__FreeBSD__)
+	struct t1 *wc = device_get_softc(dev);
+#else
 	struct t1 *wc = pci_get_drvdata(pdev);
+#endif
 #ifdef VPM_SUPPORT
 	unsigned long flags;
 	struct vpmadt032 *vpm = wc->vpmadt032;
@@ -1934,7 +2001,9 @@ static void __devexit te12xp_remove_one(struct pci_dev *pdev)
 #endif
 	clear_bit(INITIALIZED, &wc->bit_flags);
 	del_timer_sync(&wc->timer);
+#if !defined(__FreeBSD__)
 	flush_scheduled_work();
+#endif
 	del_timer_sync(&wc->timer);
 
 	voicebus_release(&wc->vb);
@@ -1956,6 +2025,104 @@ static struct pci_device_id te12xp_pci_tbl[] = {
 	{ 0 }
 };
 
+#if defined(__FreeBSD__)
+SYSCTL_NODE(_dahdi, OID_AUTO, wcte12xp, CTLFLAG_RW, 0, "DAHDI wcte12xp");
+#define MODULE_PARAM_PREFIX "dahdi.wcte12xp"
+#define MODULE_PARAM_PARENT _dahdi_wcte12xp
+
+static int
+te12xp_device_probe(device_t dev)
+{
+        struct pci_device_id *id;
+	struct t1_desc *wd;
+
+	id = dahdi_pci_device_id_lookup(dev, te12xp_pci_tbl);
+	if (id == NULL)
+		return (ENXIO);
+
+	/* found device */
+	device_printf(dev, "vendor=%x device=%x subvendor=%x\n",
+	    id->vendor, id->device, id->subvendor);
+	wd = (struct t1_desc *) id->driver_data;
+	device_set_desc(dev, wd->name);
+	return (0);
+}
+
+static int
+te12xp_device_attach(device_t dev)
+{
+	int res;
+        struct pci_device_id *id;
+
+	id = dahdi_pci_device_id_lookup(dev, te12xp_pci_tbl);
+	if (id == NULL)
+		return (ENXIO);
+
+	res = te12xp_init_one(dev, id);
+	return (-res);
+}
+
+static int
+te12xp_device_detach(device_t dev)
+{
+	te12xp_remove_one(dev);
+	return (0);
+}
+
+static int
+te12xp_init(void)
+{
+	cmd_cache = uma_zcreate("wcte12xp", sizeof(struct command),
+	    NULL, NULL, NULL, NULL, 0, 0);
+	if (cmd_cache == NULL) {
+		printf("wcte12xp: can not allocate UMA zone\n");
+		return (ENXIO);
+	}
+
+	return (0);
+}
+
+static void
+te12xp_cleanup(void)
+{
+	uma_zdestroy(cmd_cache);
+}
+
+static int
+te12xp_modevent(module_t mod __unused, int type, void *data __unused)
+{
+	switch (type) {
+	case MOD_LOAD:
+		return te12xp_init();
+	case MOD_UNLOAD:
+		te12xp_cleanup();
+		return (0);
+	default:
+		return (EOPNOTSUPP);
+	}
+}
+
+static device_method_t te12xp_methods[] = {
+	DEVMETHOD(device_probe,     te12xp_device_probe),
+	DEVMETHOD(device_attach,    te12xp_device_attach),
+	DEVMETHOD(device_detach,    te12xp_device_detach),
+	{ 0, 0 }
+};
+
+static driver_t te12xp_pci_driver = {
+	"te12xp",
+	te12xp_methods,
+	sizeof(struct t1)
+};
+
+static devclass_t te12xp_devclass;
+
+DRIVER_MODULE(te12xp, pci, te12xp_pci_driver, te12xp_devclass, te12xp_modevent, 0);
+MODULE_DEPEND(te12xp, pci, 1, 1, 1);
+MODULE_DEPEND(te12xp, dahdi, 1, 1, 1);
+MODULE_DEPEND(te12xp, dahdi_voicebus, 1, 1, 1);
+MODULE_DEPEND(te12xp, firmware, 1, 1, 1);
+#else /* !__FreeBSD__ */
 MODULE_DEVICE_TABLE(pci, te12xp_pci_tbl);
 
 static struct pci_driver te12xp_driver = {
@@ -1998,6 +2165,7 @@ static void __exit te12xp_cleanup(void)
 	pci_unregister_driver(&te12xp_driver);
 	kmem_cache_destroy(cmd_cache);
 }
+#endif /* !__FreeBSD__ */
 
 module_param(debug, int, S_IRUGO | S_IWUSR);
 module_param(loopback, int, S_IRUGO | S_IWUSR);
@@ -2016,9 +2184,11 @@ module_param(vpmnlpthresh, int, S_IRUGO);
 module_param(vpmnlpmaxsupp, int, S_IRUGO);
 #endif
 
+#if !defined(__FreeBSD__)
 MODULE_DESCRIPTION("Wildcard VoiceBus Digital Card Driver");
 MODULE_AUTHOR("Digium Incorporated <support@digium.com>");
 MODULE_LICENSE("GPL v2");
 
 module_init(te12xp_init);
 module_exit(te12xp_cleanup);
+#endif /* !__FreeBSD__ */
