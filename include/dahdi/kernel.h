@@ -106,9 +106,11 @@
 #define spin_lock_destroy(lock)
 #define _LIST_HEAD(n)	LIST_HEAD(n)
 
-#define dahdi_pci_get_bus(dev)	((dev)->bus->number)
-#define dahdi_pci_get_slot(dev)	(PCI_SLOT((dev)->devfn) + 1)
-#define dahdi_pci_get_irq(dev)	((dev)->irq)
+#define dahdi_pci_get_bus(dev)		((dev)->bus->number)
+#define dahdi_pci_get_slot(dev)		(PCI_SLOT((dev)->devfn))
+#define dahdi_pci_get_irq(dev)		((dev)->irq)
+#define dahdi_pci_get_device(dev)	((dev)->device)
+#define dahdi_pci_get_vendor(dev)	((dev)->vendor)
 #endif /* !__FreeBSD__ */
 
 /*! Default chunk size for conferences and such -- static right now, might make
