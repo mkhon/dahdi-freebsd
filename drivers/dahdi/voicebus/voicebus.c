@@ -121,67 +121,6 @@
 #define DMA_FROM_DEVICE	0
 #define DMA_TO_DEVICE	1
 
-static void
-vb_dma_map_addr(void *arg, bus_dma_segment_t *segs, int nseg, int error)
-{
-	uint32_t *paddr = arg;
-	*paddr = segs->ds_addr;
-}
-
-static int
-vb_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr)
-{
-	int res;
-
-	res = bus_dma_tag_create(NULL, 8, 0,
-	    BUS_SPACE_MAXADDR_32BIT, BUS_SPACE_MAXADDR, NULL, NULL,
-	    size, 1, size, BUS_DMA_ALLOCNOW, NULL, NULL, ptag);
-	if (res)
-		return (res);
-
-	res = bus_dmamem_alloc(*ptag, pvaddr, BUS_DMA_NOWAIT | BUS_DMA_ZERO, pmap);
-	if (res) {
-		bus_dma_tag_destroy(*ptag);
-		*ptag = NULL;
-		return (res);
-	}
-
-	res = bus_dmamap_load(*ptag, *pmap, *pvaddr, size, vb_dma_map_addr, ppaddr, 0);
-	if (res) {
-		bus_dmamem_free(*ptag, *pvaddr, *pmap);
-		*pvaddr = NULL;
-
-		bus_dmamap_destroy(*ptag, *pmap);
-		*pmap = NULL;
-
-		bus_dma_tag_destroy(*ptag);
-		*ptag = NULL;
-		return (res);
-	}
-
-	return (0);
-}
-
-static void
-vb_dma_free(bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr)
-{
-	if (*ppaddr != 0) {
-		bus_dmamap_unload(*ptag, *pmap);
-		*ppaddr = 0;
-	}
-	if (*pvaddr != NULL) {
-		bus_dmamem_free(*ptag, *pvaddr, *pmap);
-		*pvaddr = NULL;
-
-		bus_dmamap_destroy(*ptag, *pmap);
-		*pmap = NULL;
-	}
-	if (*ptag != NULL) {
-		bus_dma_tag_destroy(*ptag);
-		*ptag = NULL;
-	}
-}
-
 static bus_dma_tag_t vbb_dma_tag;
 
 struct vbb *
@@ -214,7 +153,7 @@ voicebus_map(struct vbb *vbb, int direction)
 	int res;
 
 	res = bus_dmamap_load(vbb_dma_tag, vbb->dma_map, vbb->data, sizeof(vbb->data),
-	    vb_dma_map_addr, &vbb->paddr, 0);
+	    dahdi_dma_map_addr, &vbb->paddr, 0);
 	if (res) {
 		if (printk_ratelimit())
 			printf("voicebus: Can't load DMA map\n");
@@ -357,7 +296,7 @@ vb_initialize_descriptors(struct voicebus *vb, struct voicebus_descriptor_list *
 	}
 
 #if defined(__FreeBSD__)
-	i = vb_dma_allocate((sizeof(*d) + dl->padding) * DRING_SIZE,
+	i = dahdi_dma_allocate((sizeof(*d) + dl->padding) * DRING_SIZE,
 	    &dl->dma_tag, &dl->dma_map, (void **) &dl->desc, &dl->desc_dma);
 	if (i) {
 		return i;
@@ -426,7 +365,7 @@ vb_initialize_tx_descriptors(struct voicebus *vb)
 	}
 
 #if defined(__FreeBSD__)
-	i = vb_dma_allocate((sizeof(*d) + dl->padding) * DRING_SIZE,
+	i = dahdi_dma_allocate((sizeof(*d) + dl->padding) * DRING_SIZE,
 	    &dl->dma_tag, &dl->dma_map, (void **) &dl->desc, &dl->desc_dma);
 	if (i) {
 		return i;
@@ -650,7 +589,7 @@ vb_free_descriptors(struct voicebus *vb, struct voicebus_descriptor_list *dl)
 	}
 	vb_cleanup_descriptors(vb, dl);
 #if defined(__FreeBSD__)
-	vb_dma_free(&dl->dma_tag, &dl->dma_map, (void **) &dl->desc, &dl->desc_dma);
+	dahdi_dma_free(&dl->dma_tag, &dl->dma_map, (void **) &dl->desc, &dl->desc_dma);
 #else /* !__FreeBSD__ */
 	pci_free_consistent(
 		vb->pdev,
@@ -1329,7 +1268,7 @@ voicebus_release(struct voicebus *vb)
 	spin_lock_destroy(&vb->lock);
 	if (vb->idle_vbb_dma_addr) {
 #if defined(__FreeBSD__)
-		vb_dma_free(&vb->idle_vbb_dma_tag, &vb->idle_vbb_dma_map,
+		dahdi_dma_free(&vb->idle_vbb_dma_tag, &vb->idle_vbb_dma_map,
 		    (void **) &vb->idle_vbb, &vb->idle_vbb_dma_addr);
 #else /* !__FreeBSD__ */
 		dma_free_coherent(&vb->pdev->dev, VOICEBUS_SFRAME_SIZE,
@@ -1859,7 +1798,7 @@ __voicebus_init(struct voicebus *vb, const char *board_name, int normal_mode)
 #endif
 
 #if defined(__FreeBSD__)
-	retval = vb_dma_allocate(VOICEBUS_SFRAME_SIZE,
+	retval = dahdi_dma_allocate(VOICEBUS_SFRAME_SIZE,
 	    &vb->idle_vbb_dma_tag, &vb->idle_vbb_dma_map, (void **) &vb->idle_vbb, &vb->idle_vbb_dma_addr);
 	if (retval) {
 		dev_err(&vb->pdev->dev, "Can't allocate DMA memory\n");
@@ -1960,7 +1899,7 @@ cleanup:
 	}
 #endif
 
-	vb_dma_free(&vb->idle_vbb_dma_tag, &vb->idle_vbb_dma_map,
+	dahdi_dma_free(&vb->idle_vbb_dma_tag, &vb->idle_vbb_dma_map,
 	    (void **) &vb->idle_vbb, &vb->idle_vbb_dma_addr);
 
 	if (vb->mem_res != NULL) {

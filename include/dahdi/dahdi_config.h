@@ -119,7 +119,7 @@
  * Define CONFIG_DAHDI_CORE_TIMER if you would like dahdi to always provide a
  * timing source regardless of which spans / drivers are configured.
  */
-#define CONFIG_DAHDI_CORE_TIMER
+/* #define CONFIG_DAHDI_CORE_TIMER */
 
 /*
  * Define CONFIG_DAHDI_NO_ECHOCAN_DISABLE to prevent the 2100Hz tone detector

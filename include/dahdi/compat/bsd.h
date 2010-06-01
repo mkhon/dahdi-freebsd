@@ -12,6 +12,7 @@
 #include <sys/sysctl.h>
 #include <sys/taskqueue.h>
 #include <machine/atomic.h>
+#include <machine/bus.h>
 
 #define LINUX_VERSION_CODE	-1
 #define KERNEL_VERSION(x, y, z)	0
@@ -448,5 +449,17 @@ strncat(char * __restrict dst, const char * __restrict src, size_t n);
 #define DAHDI_IRQ_HANDLER(a)	static int a(void *dev_id)
 
 extern u_short fcstab[256];
+
+/*
+ * DMA API
+ */
+void
+dahdi_dma_map_addr(void *arg, bus_dma_segment_t *segs, int nseg, int error);
+
+int
+dahdi_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr);
+
+void
+dahdi_dma_free(bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr);
 
 #endif /* _DAHDI_COMPAT_BSD_H_ */

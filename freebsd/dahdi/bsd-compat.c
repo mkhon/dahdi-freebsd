@@ -375,7 +375,6 @@ release_firmware(const struct firmware *firmware)
 	firmware_put(firmware, FIRMWARE_UNLOAD);
 }
 
-
 /*
  * PCI device API
  */
@@ -424,4 +423,68 @@ strncat(char * __restrict dst, const char * __restrict src, size_t n)
 		*d = 0;
 	}
 	return (dst);
+}
+
+/*
+ * DMA API
+ */
+void
+dahdi_dma_map_addr(void *arg, bus_dma_segment_t *segs, int nseg, int error)
+{
+	uint32_t *paddr = arg;
+	*paddr = segs->ds_addr;
+}
+
+int
+dahdi_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr)
+{
+	int res;
+
+	res = bus_dma_tag_create(NULL, 8, 0,
+	    BUS_SPACE_MAXADDR_32BIT, BUS_SPACE_MAXADDR, NULL, NULL,
+	    size, 1, size, BUS_DMA_ALLOCNOW, NULL, NULL, ptag);
+	if (res)
+		return (res);
+
+	res = bus_dmamem_alloc(*ptag, pvaddr, BUS_DMA_NOWAIT | BUS_DMA_ZERO, pmap);
+	if (res) {
+		bus_dma_tag_destroy(*ptag);
+		*ptag = NULL;
+		return (res);
+	}
+
+	res = bus_dmamap_load(*ptag, *pmap, *pvaddr, size, dahdi_dma_map_addr, ppaddr, 0);
+	if (res) {
+		bus_dmamem_free(*ptag, *pvaddr, *pmap);
+		*pvaddr = NULL;
+
+		bus_dmamap_destroy(*ptag, *pmap);
+		*pmap = NULL;
+
+		bus_dma_tag_destroy(*ptag);
+		*ptag = NULL;
+		return (res);
+	}
+
+	return (0);
+}
+
+void
+dahdi_dma_free(bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr)
+{
+	if (*ppaddr != 0) {
+		bus_dmamap_unload(*ptag, *pmap);
+		*ppaddr = 0;
+	}
+	if (*pvaddr != NULL) {
+		bus_dmamem_free(*ptag, *pvaddr, *pmap);
+		*pvaddr = NULL;
+
+		bus_dmamap_destroy(*ptag, *pmap);
+		*pmap = NULL;
+	}
+	if (*ptag != NULL) {
+		bus_dma_tag_destroy(*ptag);
+		*ptag = NULL;
+	}
 }

@@ -1675,8 +1675,6 @@ SYSCTL_NODE(_dahdi, OID_AUTO, wcte11xp, CTLFLAG_RW, 0, "DAHDI wcte11xp");
 #define MODULE_PARAM_PREFIX "dahdi.wcte11xp"
 #define MODULE_PARAM_PARENT _dahdi_wcte11xp
 
-static void t1xxp_dma_free(bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr);
-
 static void
 t1xxp_release_resources(struct t1 *wc)
 {
@@ -1692,8 +1690,8 @@ t1xxp_release_resources(struct t1 *wc)
 	}
 
 	/* release DMA resources */
-	t1xxp_dma_free(&wc->write_dma_tag, &wc->write_dma_map, __DECONST(void **, &wc->writechunk), &wc->writedma);
-	t1xxp_dma_free(&wc->read_dma_tag, &wc->read_dma_map, __DECONST(void **, &wc->readchunk), &wc->readdma);
+	dahdi_dma_free(&wc->write_dma_tag, &wc->write_dma_map, __DECONST(void **, &wc->writechunk), &wc->writedma);
+	dahdi_dma_free(&wc->read_dma_tag, &wc->read_dma_map, __DECONST(void **, &wc->readchunk), &wc->readdma);
 
 	/* release memory window */
 	if (wc->io_res != NULL) {
@@ -1723,67 +1721,6 @@ t1xxp_setup_intr(struct t1 *wc)
 	}
 
 	return (0);
-}
-
-static void
-t1xxp_dma_map_addr(void *arg, bus_dma_segment_t *segs, int nseg, int error)
-{
-	uint32_t *paddr = arg;
-	*paddr = segs->ds_addr;
-}
-
-static int
-t1xxp_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr)
-{
-	int res;
-
-	res = bus_dma_tag_create(NULL, 8, 0,
-	    BUS_SPACE_MAXADDR_32BIT, BUS_SPACE_MAXADDR, NULL, NULL,
-	    size, 1, size, BUS_DMA_ALLOCNOW, NULL, NULL, ptag);
-	if (res)
-		return (res);
-
-	res = bus_dmamem_alloc(*ptag, pvaddr, BUS_DMA_NOWAIT | BUS_DMA_ZERO, pmap);
-	if (res) {
-		bus_dma_tag_destroy(*ptag);
-		*ptag = NULL;
-		return (res);
-	}
-
-	res = bus_dmamap_load(*ptag, *pmap, *pvaddr, size, t1xxp_dma_map_addr, ppaddr, 0);
-	if (res) {
-		bus_dmamem_free(*ptag, *pvaddr, *pmap);
-		*pvaddr = NULL;
-
-		bus_dmamap_destroy(*ptag, *pmap);
-		*pmap = NULL;
-
-		bus_dma_tag_destroy(*ptag);
-		*ptag = NULL;
-		return (res);
-	}
-
-	return (0);
-}
-
-static void
-t1xxp_dma_free(bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr)
-{
-	if (*ppaddr != 0) {
-		bus_dmamap_unload(*ptag, *pmap);
-		*ppaddr = 0;
-	}
-	if (*pvaddr != NULL) {
-		bus_dmamem_free(*ptag, *pvaddr, *pmap);
-		*pvaddr = NULL;
-
-		bus_dmamap_destroy(*ptag, *pmap);
-		*pmap = NULL;
-	}
-	if (*ptag != NULL) {
-		bus_dma_tag_destroy(*ptag);
-		*ptag = NULL;
-	}
 }
 
 static int
@@ -1838,12 +1775,12 @@ t1xxp_device_attach(device_t dev)
 	if (res)
 		goto err;
 
-	res = t1xxp_dma_allocate(DAHDI_MAX_CHUNKSIZE * 32 * 2, &wc->write_dma_tag, &wc->write_dma_map,
+	res = dahdi_dma_allocate(DAHDI_MAX_CHUNKSIZE * 32 * 2, &wc->write_dma_tag, &wc->write_dma_map,
 	    __DECONST(void **, &wc->writechunk), &wc->writedma);
 	if (res)
 		goto err;
 
-	res = t1xxp_dma_allocate(DAHDI_MAX_CHUNKSIZE * 32 * 2, &wc->read_dma_tag, &wc->read_dma_map,
+	res = dahdi_dma_allocate(DAHDI_MAX_CHUNKSIZE * 32 * 2, &wc->read_dma_tag, &wc->read_dma_map,
 	    __DECONST(void **, &wc->readchunk), &wc->readdma);
 	if (res)
 		goto err;

@@ -38,12 +38,6 @@
 #include <machine/bus.h>
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcivar.h>
-
-static int
-t4_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr);
-
-static void
-t4_dma_free(bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr);
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -3400,15 +3394,15 @@ static int t4_allocate_buffers(struct t4 *wc, int numbufs)
 	bus_dmamap_t    write_dma_map;
 
 	/* allocate DMA resources */
-	res = t4_dma_allocate(numbufs * T4_BASE_SIZE, &write_dma_tag, &write_dma_map,
+	res = dahdi_dma_allocate(numbufs * T4_BASE_SIZE, &write_dma_tag, &write_dma_map,
 	    &writechunk, &writedma);
 	if (res)
 		return -res;
 
-	res = t4_dma_allocate(numbufs * T4_BASE_SIZE, &read_dma_tag, &read_dma_map,
+	res = dahdi_dma_allocate(numbufs * T4_BASE_SIZE, &read_dma_tag, &read_dma_map,
 	    &readchunk, &readdma);
 	if (res) {
-		t4_dma_free(&write_dma_tag, &write_dma_map, &writechunk, &writedma);
+		dahdi_dma_free(&write_dma_tag, &write_dma_map, &writechunk, &writedma);
 		return -res;
 	}
 
@@ -3521,8 +3515,8 @@ static void t4_increase_latency(struct t4 *wc, int newlatency)
 	spin_unlock_irqrestore(&wc->reglock, flags);
 
 #if defined(__FreeBSD__)
-	t4_dma_free(&write_dma_tag, &write_dma_map, &writechunk, &writedma);
-	t4_dma_free(&read_dma_tag, &read_dma_map, &readchunk, &readdma);
+	dahdi_dma_free(&write_dma_tag, &write_dma_map, &writechunk, &writedma);
+	dahdi_dma_free(&read_dma_tag, &read_dma_map, &readchunk, &readdma);
 #else
 	pci_free_consistent(wc->dev, T4_BASE_SIZE * oldbufs * 2, (void *)oldalloc, oldaddr);
 #endif
@@ -4566,8 +4560,8 @@ t4_release_resources(struct t4 *wc)
 	}
 
 	/* release DMA resources */
-	t4_dma_free(&wc->write_dma_tag, &wc->write_dma_map, (void **) &wc->writechunk, &wc->writedma);
-	t4_dma_free(&wc->read_dma_tag, &wc->read_dma_map, (void **) &wc->readchunk, &wc->readdma);
+	dahdi_dma_free(&wc->write_dma_tag, &wc->write_dma_map, (void **) &wc->writechunk, &wc->writedma);
+	dahdi_dma_free(&wc->read_dma_tag, &wc->read_dma_map, (void **) &wc->readchunk, &wc->readdma);
 
 	/* release memory window */
 	if (wc->mem_res != NULL) {
@@ -4609,67 +4603,6 @@ t4_setup_intr(struct t4 *wc, struct devtype *dt)
 	}
 
 	return (0);
-}
-
-static void
-t4_dma_map_addr(void *arg, bus_dma_segment_t *segs, int nseg, int error)
-{
-	uint32_t *paddr = arg;
-	*paddr = segs->ds_addr;
-}
-
-static int
-t4_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr)
-{
-	int res;
-
-	res = bus_dma_tag_create(NULL, 8, 0,
-	    BUS_SPACE_MAXADDR_32BIT, BUS_SPACE_MAXADDR, NULL, NULL,
-	    size, 1, size, BUS_DMA_ALLOCNOW, NULL, NULL, ptag);
-	if (res)
-		return (res);
-
-	res = bus_dmamem_alloc(*ptag, pvaddr, BUS_DMA_NOWAIT | BUS_DMA_ZERO, pmap);
-	if (res) {
-		bus_dma_tag_destroy(*ptag);
-		*ptag = NULL;
-		return (res);
-	}
-
-	res = bus_dmamap_load(*ptag, *pmap, *pvaddr, size, t4_dma_map_addr, ppaddr, 0);
-	if (res) {
-		bus_dmamem_free(*ptag, *pvaddr, *pmap);
-		*pvaddr = NULL;
-
-		bus_dmamap_destroy(*ptag, *pmap);
-		*pmap = NULL;
-
-		bus_dma_tag_destroy(*ptag);
-		*ptag = NULL;
-		return (res);
-	}
-
-	return (0);
-}
-
-static void
-t4_dma_free(bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr)
-{
-	if (*ppaddr != 0) {
-		bus_dmamap_unload(*ptag, *pmap);
-		*ppaddr = 0;
-	}
-	if (*pvaddr != NULL) {
-		bus_dmamem_free(*ptag, *pvaddr, *pmap);
-		*pvaddr = NULL;
-
-		bus_dmamap_destroy(*ptag, *pmap);
-		*pmap = NULL;
-	}
-	if (*ptag != NULL) {
-		bus_dma_tag_destroy(*ptag);
-		*ptag = NULL;
-	}
 }
 
 static int
