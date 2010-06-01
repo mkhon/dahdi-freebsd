@@ -16,6 +16,18 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
+
+#if defined(__FreeBSD__)
+#include <sys/param.h>
+#include <sys/types.h>
+#include <sys/conf.h>
+#include <sys/module.h>
+#include <sys/bus.h>
+
+#include <dev/pci/pcivar.h>
+
+#include <machine/stdarg.h>
+#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -23,6 +35,7 @@
 #include <linux/ctype.h>
 #include <linux/moduleparam.h>
 #include <linux/pci.h>
+#endif /* !__FreeBSD__ */
 
 #include <dahdi/kernel.h>
 
@@ -48,7 +61,7 @@ logger(const char *format, ...)
 	va_start(args, format);
 	res = vsnprintf(buf, sizeof(buf), format, args);
 	va_end(args);
-	printk(KERN_INFO "%s" buf);
+	printk(KERN_INFO "%s", buf);
 #endif
 
 	return res;
@@ -77,7 +90,11 @@ static void init_private_context(struct private_context *ctx)
 
 static void handle_receive(struct voicebus *vb, struct list_head *buffers)
 {
+#if defined(__FreeBSD__)
+	struct private_context *ctx = (struct private_context *) vb->ctx;
+#else
 	struct private_context *ctx = pci_get_drvdata(vb->pdev);
+#endif
 	struct vbb *vbb;
 	list_for_each_entry(vbb, buffers, entry) {
 		__vpmadt032_receive(ctx->pvt, vbb->data);
@@ -89,7 +106,11 @@ static void handle_receive(struct voicebus *vb, struct list_head *buffers)
 static void handle_transmit(struct voicebus *vb, struct list_head *buffers)
 {
 	struct vbb *vbb;
+#if defined(__FreeBSD__)
+	struct private_context *ctx = (struct private_context *) vb->ctx;
+#else
 	struct private_context *ctx = pci_get_drvdata(vb->pdev);
+#endif
 	list_for_each_entry(vbb, buffers, entry)
 		__vpmadt032_transmit(ctx->pvt, vbb->data);
 }
@@ -104,7 +125,9 @@ static int vpmadt032_load_firmware(struct voicebus *vb)
 	int ret = 0;
 	struct private_context *ctx;
 	const struct voicebus_operations *old;
+#if !defined(__FreeBSD__)
 	void *old_drvdata;
+#endif
 	int id;
 	might_sleep();
 	ctx = kzalloc(sizeof(struct private_context), GFP_KERNEL);
@@ -113,22 +136,30 @@ static int vpmadt032_load_firmware(struct voicebus *vb)
 	init_private_context(ctx);
 	ctx->vb = vb;
 
-	if (0x8007 == vb->pdev->device || 0x8008 == vb->pdev->device)
-		id = vb->pdev->vendor << 16 | 0x2400;
+	if (0x8007 == dahdi_pci_get_device(vb->pdev) || 0x8008 == dahdi_pci_get_device(vb->pdev))
+		id = dahdi_pci_get_vendor(vb->pdev) << 16 | 0x2400;
 	else
-		id = vb->pdev->vendor << 16 | vb->pdev->device;
+		id = dahdi_pci_get_vendor(vb->pdev) << 16 | dahdi_pci_get_device(vb->pdev);
 
 	ret = __vpmadt032_start_load(0, id, &ctx->pvt);
 	if (ret)
 		goto error_exit;
+#if defined(__FreeBSD__)
+	vb->ctx = ctx;
+#else
 	old_drvdata = pci_get_drvdata(vb->pdev);
 	pci_set_drvdata(vb->pdev, ctx);
+#endif
 	old = vb->ops;
 	vb->ops = &loader_operations;
 	if (!wait_for_completion_timeout(&ctx->done, HZ*20))
 		ret = -EIO;
 	vb->ops = old;
+#if defined(__FreeBSD__)
+	vb->ctx = NULL;
+#else
 	pci_set_drvdata(vb->pdev, old_drvdata);
+#endif
 	__vpmadt032_cleanup(ctx->pvt);
 error_exit:
 	kfree(ctx);
@@ -153,10 +184,40 @@ static void __exit vpmadt032_loader_exit(void)
 	return;
 }
 
+#if defined(__FreeBSD__)
+SYSCTL_NODE(_dahdi, OID_AUTO, vpmadt032_loader, CTLFLAG_RW, 0, "DAHDI VPMADT032 Firmware Loader");
+#define MODULE_PARAM_PREFIX "dahdi.vpmadt032_loader"
+#define MODULE_PARAM_PARENT _dahdi_vpmadt032_loader
+
+static int
+dahdi_vpmadt032_loader_modevent(module_t mod __unused, int type, void *data __unused)
+{
+	int res;
+
+	switch (type) {
+	case MOD_LOAD:
+		res = vpmadt032_loader_init();
+		return (-res);
+	case MOD_UNLOAD:
+		vpmadt032_loader_exit();
+		return (0);
+	default:
+		return (EOPNOTSUPP);
+	}
+}
+
+DEV_MODULE(dahdi_vpmadt032_loader, dahdi_vpmadt032_loader_modevent, NULL);
+MODULE_VERSION(dahdi_vpmadt032_loader, 1);
+MODULE_DEPEND(dahdi_vpmadt032_loader, voicebus, 1, 1, 1);
+#endif
+
 module_param(debug, int, S_IRUGO | S_IWUSR);
+
+#if !defined(__FreeBSD__)
 MODULE_DESCRIPTION("DAHDI VPMADT032 (Hardware Echo Canceller) Firmware Loader");
 MODULE_AUTHOR("Digium Incorporated <support@digium.com>");
 MODULE_LICENSE("Digium Commercial");
 
 module_init(vpmadt032_loader_init);
 module_exit(vpmadt032_loader_exit);
+#endif

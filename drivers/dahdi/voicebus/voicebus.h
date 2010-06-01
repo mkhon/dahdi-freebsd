@@ -115,6 +115,7 @@ struct voicebus {
 	struct pci_dev		*pdev;
 #if defined(__FreeBSD__)
 	struct pci_dev		_dev;
+	void *			ctx;
 
 	struct resource *	irq_res;	/* resource for irq */
 	int			irq_rid;

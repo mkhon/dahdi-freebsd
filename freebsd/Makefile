@@ -24,9 +24,14 @@ SUBDIR=\
 # the following drivers are ported but not tested on real HW
 .if defined(WITH_EXPERIMENTAL)
 SUBDIR+=\
+	${_dahdi_vpmadt032_loader}\
 	wctdm\
 	wcte11xp\
 	wcte12xp
+.endif
+
+.if ${MACHINE_ARCH} == "i386" || ${MACHINE_ARCH} == "amd64"
+_dahdi_vpmadt032_loader=	dahdi_vpmadt032_loader
 .endif
 
 .include <bsd.subdir.mk>
