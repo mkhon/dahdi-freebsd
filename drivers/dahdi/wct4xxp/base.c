@@ -3885,13 +3885,8 @@ static void t4_vpm450_init(struct t4 *wc)
 	extern u8 _binary_dahdi_fw_oct6114_064_bin_start[];
 	extern u8 _binary_dahdi_fw_oct6114_128_bin_start[];
 #else
-#if defined(__FreeBSD__)
-	static const char oct064_firmware[] = "dahdi_fw_oct6114_064";
-	static const char oct128_firmware[] = "dahdi_fw_oct6114_128";
-#else
 	static const char oct064_firmware[] = "dahdi-fw-oct6114-064.bin";
 	static const char oct128_firmware[] = "dahdi-fw-oct6114-128.bin";
-#endif
 #endif
 
 	if (!vpmsupport) {
