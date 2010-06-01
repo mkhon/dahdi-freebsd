@@ -21,9 +21,11 @@ SUBDIR=\
 	wctdm24xxp
 
 # the following drivers are ported but not tested on real HW
-#SUBDIR+=\
-#	wctdm\
-#	wcte11xp\
-#	wcte12xp
+.if defined(WITH_EXPERIMENTAL)
+SUBDIR+=\
+	wctdm\
+	wcte11xp\
+	wcte12xp
+.endif
 
 .include <bsd.subdir.mk>
