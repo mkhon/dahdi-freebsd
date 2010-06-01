@@ -14,8 +14,8 @@
 #include <machine/atomic.h>
 #include <machine/bus.h>
 
-#define LINUX_VERSION_CODE	-1
-#define KERNEL_VERSION(x, y, z)	0
+#define LINUX_VERSION_CODE	KERNEL_VERSION(2, 6, 32)
+#define KERNEL_VERSION(x, y, z)	(((x) << 16) + ((y) << 8) + (z))
 
 /*
  * Byte order API
@@ -188,6 +188,7 @@ struct timer_list {
 };
 
 void init_timer(struct timer_list *t);
+void setup_timer(struct timer_list *t, void (*function)(unsigned long), unsigned long data);
 void mod_timer(struct timer_list *t, unsigned long expires);
 void add_timer(struct timer_list *t);
 void del_timer(struct timer_list *t);
@@ -287,6 +288,7 @@ device_rlprintf(int pps, device_t dev, const char *fmt, ...)
 #define KERN_NOTICE	"<5>"	/* normal but significant condition	*/
 #define KERN_INFO	"<6>"	/* informational			*/
 #define KERN_DEBUG	"<7>"	/* debug-level messages			*/
+#define KERN_CONT	""
 
 #define dev_err(dev, fmt, args...)	device_printf(*(dev), fmt, ##args)
 #define dev_warn(dev, fmt, args...)	device_printf(*(dev), fmt, ##args)
@@ -297,6 +299,7 @@ device_rlprintf(int pps, device_t dev, const char *fmt, ...)
 #define pr_info(fmt, args...)		printf(fmt, ##args)
 
 #define printk(fmt, args...)		printf(fmt, ##args)
+#define vprintk(fmt, args)		vprintf(fmt, args)
 
 int printk_ratelimit(void);
 
@@ -447,6 +450,8 @@ strncat(char * __restrict dst, const char * __restrict src, size_t n);
 #define unlikely(x)     __builtin_expect(!!(x), 0)
 
 #define DAHDI_IRQ_HANDLER(a)	static int a(void *dev_id)
+
+#define clamp(x, low, high) min(max(low, x), high)
 
 extern u_short fcstab[256];
 

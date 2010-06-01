@@ -400,7 +400,7 @@ static void update_channel_config(struct vpmadt032 *vpm, unsigned int channel,
  * the hardware can take some time while messages are sent to the VPMADT032
  * module and the driver waits for the responses.
  */
-#if !defined(__FreeBSD__) && LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 static void vpmadt032_bh(void *data)
 {
 	struct vpmadt032 *vpm = data;
@@ -670,7 +670,7 @@ vpmadt032_init(struct vpmadt032 *vpm, struct voicebus *vb)
 		goto failed_exit;
 	}
 
-#if !defined(__FreeBSD__) && LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20)
 	INIT_WORK(&vpm->work, vpmadt032_bh, vpm);
 #else
 	INIT_WORK(&vpm->work, vpmadt032_bh);

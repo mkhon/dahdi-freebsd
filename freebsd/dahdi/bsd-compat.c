@@ -123,8 +123,16 @@ init_timer(struct timer_list *t)
 	mtx_init(&t->mtx, "dahdi timer lock", NULL, MTX_SPIN);
 	callout_init(&t->callout, CALLOUT_MPSAFE);
 	t->expires = 0;
-	t->function = 0;
-	t->data = 0;
+	// function and data are not initialized intentionally:
+	// they are not initialized by Linux implementation too
+}
+
+void
+setup_timer(struct timer_list *t, void (*function)(unsigned long), unsigned long data)
+{
+	t->function = function;
+	t->data = data;
+	init_timer(t);
 }
 
 void

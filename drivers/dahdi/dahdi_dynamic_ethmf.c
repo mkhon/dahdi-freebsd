@@ -455,7 +455,7 @@ static int ztdethmf_transmit(void *pvt, unsigned char *msg, int msglen)
 	unsigned short subaddr;
 	struct net_device *dev;
 	int spans_ready = 0, index = 0;
-#if !defined(__FreeBSD__) && LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 10)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 10)
 	static spinlock_t lock = SPIN_LOCK_UNLOCKED;
 	unsigned long flags;
 #endif
@@ -748,7 +748,7 @@ static void *ztdethmf_create(struct dahdi_span *span, char *addr)
 		return NULL;
 	}
 	z->dev = dev_get_by_name(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 24)
+#if !defined(__FreeBSD__) && LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 24)
 		&init_net,
 #endif
 		z->ethdev);

@@ -1831,7 +1831,7 @@ static void t1_handle_receive(struct voicebus *vb, struct list_head *buffers)
 		t1_receiveprep(wc, vbb->data);
 }
 
-#if !defined(__FreeBSD__) && LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 static void timer_work_func(void *param)
 {
 	struct t1 *wc = param;
@@ -1914,7 +1914,7 @@ static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_devi
 	setup_timer(&wc->timer, te12xp_timer, (unsigned long)wc);
 #	endif
 
-#	if !defined(__FreeBSD__) && LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+#	if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 	INIT_WORK(&wc->timer_work, timer_work_func, wc);
 #	else
 	INIT_WORK(&wc->timer_work, timer_work_func);

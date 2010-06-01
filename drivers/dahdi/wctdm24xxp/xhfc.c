@@ -2367,7 +2367,7 @@ int b400m_dchan(struct dahdi_span *span)
 
 /*
  */
-#if !defined(__FreeBSD__) && LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 static void xhfc_work(void *data)
 {
 	struct b400m *b4 = data;
@@ -2619,7 +2619,7 @@ void b400m_post_init(struct b400m *b4)
 	snprintf(b4->name, sizeof(b4->name) - 1, "b400m-%d",
 		 b4->b400m_no);
 	b4->xhfc_ws = create_singlethread_workqueue(b4->name);
-#if	!defined(__FreeBSD__) && if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+#if	LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 	INIT_WORK(&b4->xhfc_wq, xhfc_work, b4);
 #	else
 	INIT_WORK(&b4->xhfc_wq, xhfc_work);

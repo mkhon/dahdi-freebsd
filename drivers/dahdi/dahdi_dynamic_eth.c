@@ -442,7 +442,7 @@ static void *ztdeth_create(struct dahdi_span *span, char *addr)
 			z->subaddr = htons(sub);
 		}
 		z->dev = dev_get_by_name(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,24)
+#if !defined(__FreeBSD__) && LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,24)
 				&init_net,
 #endif
 				z->ethdev);

@@ -1236,7 +1236,7 @@ voicebus_release(struct voicebus *vb)
 	voicebus_stop(vb);
 
 	/* Make sure the underrun_work isn't running or going to run. */
-#if !defined(__FreeBSD__) && LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 22)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 22)
 	flush_scheduled_work();
 #else
 	cancel_work_sync(&vb->underrun_work);
@@ -1573,7 +1573,7 @@ tx_error_exit:
  * @work: 	The work_struct used to queue this function.
  *
  */
-#if !defined(__FreeBSD__) && LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 static void handle_hardunderrun(void *data)
 {
 	struct voicebus *vb = data;
@@ -1751,7 +1751,7 @@ __voicebus_init(struct voicebus *vb, const char *board_name, int normal_mode)
 	vb->timer.data = (unsigned long)vb;
 #endif
 
-#if !defined(__FreeBSD__) && LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 	INIT_WORK(&vb->underrun_work, handle_hardunderrun, vb);
 #else
 	INIT_WORK(&vb->underrun_work, handle_hardunderrun);
@@ -1944,7 +1944,7 @@ int vpmadtreg_loadfirmware(struct voicebus *vb)
 	spin_unlock(&loader_list_lock);
 
 	if (!loader_present) {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 30)
+#if defined(__FreeBSD__) || LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 30)
 		ret = request_module("dahdi_vpmadt032_loader");
 #else
 		/* If we use the blocking 'request_module' here and we are

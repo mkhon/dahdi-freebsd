@@ -1238,14 +1238,12 @@ static inline short dahdi_txtone_nextsample(struct dahdi_chan *ss)
 #define clamp(x, low, high) min (max (low, x), high)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 25)
 
-#if !defined(__FreeBSD__)
 /* Some distributions backported fatal_signal_pending so we'll use a macro to
  * override the inline functino definition. */
 #define fatal_signal_pending(p) \
 	(signal_pending((p)) && sigismember(&(p)->pending.signal, SIGKILL))
-#endif
 
-#if !defined(__FreeBSD__) && LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 18)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 18)
 static inline void list_replace(struct list_head *old, struct list_head *new)
 {
         new->next = old->next;
