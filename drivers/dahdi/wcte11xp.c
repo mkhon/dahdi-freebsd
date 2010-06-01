@@ -1160,6 +1160,9 @@ static void t1xxp_transmitprep(struct t1 *wc, int ints)
 				wc->tempo[pos - 32 * DAHDI_CHUNKSIZE] = wc->chans[x]->writechunk[y];
 		}
 	}
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(wc->write_dma_tag, wc->write_dma_map, BUS_DMASYNC_PREWRITE);
+#endif
 }
 
 static void t1xxp_receiveprep(struct t1 *wc, int ints)
@@ -1169,6 +1172,9 @@ static void t1xxp_receiveprep(struct t1 *wc, int ints)
 	int x;
 	int y;
 	unsigned int oldcan;
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(wc->read_dma_tag, wc->read_dma_map, BUS_DMASYNC_POSTREAD);
+#endif
 	if (ints & 0x04) {
 		/* Just received first buffer */
 		rxbuf = wc->readchunk;
