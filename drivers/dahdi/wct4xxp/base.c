@@ -3303,23 +3303,14 @@ DAHDI_IRQ_HANDLER(t4_interrupt)
 	}
 
 	/* Ignore if it's not for us */
-	if (!status) {
-#if defined(__FreeBSD__)
-		return FILTER_STRAY;
-#else
+	if (!status)
 		return IRQ_NONE;
-#endif
-	}
 
 	__t4_pci_out(wc, WC_INTR, 0);
 
 	if (!wc->spansstarted) {
 		printk(KERN_NOTICE "Not prepped yet!\n");
-#if defined(__FreeBSD__)
-		return FILTER_STRAY;
-#else
 		return IRQ_NONE;
-#endif
 	}
 
 	wc->intcount++;
@@ -3370,11 +3361,7 @@ DAHDI_IRQ_HANDLER(t4_interrupt)
 
 	spin_unlock_irqrestore(&wc->reglock, flags);
 
-#if defined(__FreeBSD__)
-	return (FILTER_HANDLED);
-#else
 	return IRQ_RETVAL(1);
-#endif
 }
 #endif
 
@@ -3579,11 +3566,7 @@ DAHDI_IRQ_HANDLER(t4_interrupt_gen2)
 		spin_lock(&wc->reglock);
 		__t4_set_sclk_src(wc, WC_SELF, 0, 0);
 		spin_unlock(&wc->reglock);
-#if defined(__FreeBSD__)
-		return (FILTER_HANDLED);
-#else
 		return IRQ_RETVAL(1);
-#endif
 	}
 
 	/* Make sure it's really for us */
@@ -3591,11 +3574,7 @@ DAHDI_IRQ_HANDLER(t4_interrupt_gen2)
 
 	/* Ignore if it's not for us */
 	if (!(status & 0x7)) {
-#if defined(__FreeBSD__)
-		return (FILTER_STRAY);
-#else
 		return IRQ_NONE;
-#endif
 	}
 
 #ifdef ENABLE_WORKQUEUES
@@ -3604,11 +3583,7 @@ DAHDI_IRQ_HANDLER(t4_interrupt_gen2)
 
 	if (unlikely(!wc->spansstarted)) {
 		printk(KERN_INFO "Not prepped yet!\n");
-#if defined(__FreeBSD__)
-		return (FILTER_STRAY);
-#else
 		return IRQ_NONE;
-#endif
 	}
 
 	wc->intcount++;

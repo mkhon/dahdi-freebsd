@@ -455,6 +455,10 @@ strncat(char * __restrict dst, const char * __restrict src, size_t n);
 
 extern u_short fcstab[256];
 
+#define IRQ_NONE	FILTER_STRAY
+#define IRQ_HANDLED	FILTER_HANDLED
+#define IRQ_RETVAL(x)	((x) ? FILTER_HANDLED : FILTER_STRAY)
+
 /*
  * DMA API
  */

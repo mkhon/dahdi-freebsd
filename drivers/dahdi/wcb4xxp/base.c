@@ -2488,11 +2488,7 @@ DAHDI_IRQ_HANDLER(b4xxp_interrupt)
 	/* Make sure it's really for us */
 	status = __pci_in8(b4, R_STATUS);
 	if (!(status & HFC_INTS))
-#if defined(__FreeBSD__)
-		return (FILTER_STRAY);
-#else
 		return IRQ_NONE;
-#endif
 
 /*
  * since the interrupt is for us, read in the FIFO and misc IRQ status registers.
@@ -2541,11 +2537,7 @@ DAHDI_IRQ_HANDLER(b4xxp_interrupt)
 #endif
 	b4xxp_bottom_half((unsigned long)b4);
 
-#if defined(__FreeBSD__)
-	return (FILTER_HANDLED);
-#else
 	return IRQ_RETVAL(1);
-#endif
 }
 
 

@@ -1634,11 +1634,7 @@ DAHDI_IRQ_HANDLER(vb_isr)
 	int_status &= 0x7fff;
 
 	if (!int_status)
-#if defined(__FreeBSD__)
-		return FILTER_STRAY;
-#else
 		return IRQ_NONE;
-#endif
 
 	if (unlikely((int_status &
 	    (TX_UNAVAILABLE_INTERRUPT|RX_UNAVAILABLE_INTERRUPT)) &&

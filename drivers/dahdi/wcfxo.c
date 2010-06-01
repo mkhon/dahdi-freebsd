@@ -521,11 +521,7 @@ DAHDI_IRQ_HANDLER(wcfxo_interrupt)
 
 
 	if (!ints)
-#if defined(__FreeBSD__)
-		return FILTER_STRAY;
-#else
 		return IRQ_NONE;
-#endif
 
 	wcfxo_outb(wc, WC_INTSTAT, ints);
 
@@ -550,20 +546,12 @@ DAHDI_IRQ_HANDLER(wcfxo_interrupt)
 		printk(KERN_INFO "FXO PCI Master abort\n");
 		/* Stop DMA andlet the watchdog start it again */
 		wcfxo_stop_dma(wc);
-#if defined(__FreeBSD__)
-		return FILTER_HANDLED;
-#else
 		return IRQ_RETVAL(1);
-#endif
 	}
 
 	if (ints & 0x20) {
 		printk(KERN_INFO "PCI Target abort\n");
-#if defined(__FreeBSD__)
-		return FILTER_HANDLED;
-#else
 		return IRQ_RETVAL(1);
-#endif
 	}
 	if (1 /* !(wc->report % 0xf) */) {
 		/* Check for BATTERY from register and debounce for 8 ms */
@@ -638,11 +626,7 @@ DAHDI_IRQ_HANDLER(wcfxo_interrupt)
 
 	}
 
-#if defined(__FreeBSD__)
-	return FILTER_HANDLED;
-#else
 	return IRQ_RETVAL(1);
-#endif
 }
 
 static int wcfxo_setreg(struct wcfxo *wc, unsigned char reg, unsigned char value)

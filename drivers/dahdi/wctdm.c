@@ -1168,11 +1168,7 @@ DAHDI_IRQ_HANDLER(wctdm_interrupt)
 	ints = wctdm_inb(wc, WC_INTSTAT);
 
 	if (!ints)
-#if defined(__FreeBSD__)
-		return FILTER_STRAY;
-#else
 		return IRQ_NONE;
-#endif
 
 	wctdm_outb(wc, WC_INTSTAT, ints);
 
@@ -1180,20 +1176,12 @@ DAHDI_IRQ_HANDLER(wctdm_interrupt)
 		/* Stop DMA, wait for watchdog */
 		printk(KERN_INFO "TDM PCI Master abort\n");
 		wctdm_stop_dma(wc);
-#if defined(__FreeBSD__)
-		return FILTER_HANDLED;
-#else
 		return IRQ_RETVAL(1);
-#endif
 	}
 	
 	if (ints & 0x20) {
 		printk(KERN_INFO "PCI Target abort\n");
-#if defined(__FreeBSD__)
-		return FILTER_HANDLED;
-#else
 		return IRQ_RETVAL(1);
-#endif
 	}
 
 	for (x=0;x<4;x++) {
@@ -1293,11 +1281,7 @@ DAHDI_IRQ_HANDLER(wctdm_interrupt)
 		wctdm_transmitprep(wc, ints);
 	}
 
-#if defined(__FreeBSD__)
-	return FILTER_HANDLED;
-#else
 	return IRQ_RETVAL(1);
-#endif
 }
 
 static int wctdm_voicedaa_insane(struct wctdm *wc, int card)
