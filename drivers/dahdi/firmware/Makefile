@@ -23,7 +23,6 @@
 .PHONY: dist-clean clean all uninstall have_download install object-build hotplug-install hotplug-dirs hotplug-uninstall make_firmware_object firmware-loaders
 
 include "../../../firmware.mk"
-HX8_VERSION:=2.06
 
 ALL_FIRMWARE=FIRMWARE-OCT6114-064 FIRMWARE-OCT6114-128 FIRMWARE-TC400M FIRMWARE-HX8
 
