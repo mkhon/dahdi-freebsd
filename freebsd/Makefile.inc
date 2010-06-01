@@ -6,10 +6,12 @@ KMODDIR?=	${PREFIX}/lib/dahdi
 
 CFLAGS+=	-I${INCLUDEDIR} -D__KERNEL__
 
+CP?=		cp
 FETCH?=		fetch
 MKDIR?=		mkdir -p
 INSTALL_DATA?=	${INSTALL} -m ${SHAREMODE} -o ${SHAREOWN} -g ${SHAREGRP} -c
 TAR?=		tar
+TOUCH?=		touch
 
 beforeinstall:
 	${MKDIR} ${KMODDIR}
