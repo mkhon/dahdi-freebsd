@@ -5171,7 +5171,6 @@ wctdm_device_detach(device_t dev)
 	return (0);
 }
 
-
 static int
 wctdm_modevent(module_t mod __unused, int type, void *data __unused)
 {
@@ -5204,11 +5203,11 @@ static driver_t wctdm_pci_driver = {
 
 static devclass_t wctdm_devclass;
 
-DRIVER_MODULE(wcwctdm24xxp, pci, wctdm_pci_driver, wctdm_devclass, wctdm_modevent, 0);
-MODULE_DEPEND(wcwctdm24xxp, pci, 1, 1, 1);
-MODULE_DEPEND(wcwctdm24xxp, dahdi, 1, 1, 1);
-MODULE_DEPEND(wcwctdm24xxp, dahdi_voicebus, 1, 1, 1);
-MODULE_DEPEND(wcwctdm24xxp, firmware, 1, 1, 1);
+DRIVER_MODULE(wctdm24xxp, pci, wctdm_pci_driver, wctdm_devclass, wctdm_modevent, 0);
+MODULE_DEPEND(wctdm24xxp, pci, 1, 1, 1);
+MODULE_DEPEND(wctdm24xxp, dahdi, 1, 1, 1);
+MODULE_DEPEND(wctdm24xxp, dahdi_voicebus, 1, 1, 1);
+MODULE_DEPEND(wctdm24xxp, firmware, 1, 1, 1);
 #else
 MODULE_DESCRIPTION("Wildcard VoiceBus Analog Card Driver");
 MODULE_AUTHOR("Digium Incorporated <support@digium.com>");
