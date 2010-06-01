@@ -2434,7 +2434,7 @@ static void init_spans(struct b4xxp *b4)
 		bspan->span.manufacturer = "Digium";
 		dahdi_copy_string(bspan->span.devicetype, b4->variety, sizeof(bspan->span.devicetype));
 		sprintf(bspan->span.location, "PCI Bus %02d Slot %02d",
-			dahdi_pci_get_bus(b4->pdev), dahdi_pci_get_slot(b4->pdev));
+			dahdi_pci_get_bus(b4->pdev), dahdi_pci_get_slot(b4->pdev) + 1);
 
 		bspan->span.owner = THIS_MODULE;
 		bspan->span.spanconfig = b4xxp_spanconfig;

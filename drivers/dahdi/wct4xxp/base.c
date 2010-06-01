@@ -1892,7 +1892,7 @@ static void init_spans(struct t4 *wc)
 		else
 			snprintf(ts->span.location, sizeof(ts->span.location) - 1,
 				 "PCI%s Bus %02d Slot %02d", (ts->spanflags & FLAG_EXPRESS) ? " Express" : " ",
-				 dahdi_pci_get_bus(wc->dev), dahdi_pci_get_slot(wc->dev));
+				 dahdi_pci_get_bus(wc->dev), dahdi_pci_get_slot(wc->dev) + 1);
 		switch (ts->spantype) {
 		case TYPE_T1:
 			ts->span.spantype = "T1";

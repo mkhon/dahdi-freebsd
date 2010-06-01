@@ -3641,7 +3641,7 @@ static struct wctdm_span *wctdm_init_span(struct wctdm *wc, int spanno, int chan
 	snprintf(s->span.desc, sizeof(s->span.desc) - 1, "%s Board %d", wc->desc->name, wc->pos + 1);
 	snprintf(s->span.location, sizeof(s->span.location) - 1,
 		 "PCI%s Bus %02d Slot %02d", (wc->flags[0] & FLAG_EXPRESS) ? " Express" : "",
-		 dahdi_pci_get_bus(pdev), dahdi_pci_get_slot(pdev));
+		 dahdi_pci_get_bus(pdev), dahdi_pci_get_slot(pdev) + 1);
 	s->span.manufacturer = "Digium";
 	strncpy(s->span.devicetype, wc->desc->name, sizeof(s->span.devicetype) - 1);
 
