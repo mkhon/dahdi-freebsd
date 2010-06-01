@@ -758,14 +758,17 @@ module_param(aggressive, int, S_IRUGO | S_IWUSR);
 static int
 echocan_kb1_modevent(module_t mod __unused, int type, void *data __unused)
 {
+	int res;
+
 	switch (type) {
 	case MOD_LOAD:
-		return mod_init();
+		res = mod_init();
+		return (-res);
 	case MOD_UNLOAD:
 		mod_exit();
-		return 0;
+		return (0);
 	default:
-		return EOPNOTSUPP;
+		return (EOPNOTSUPP);
 	}
 }
 
