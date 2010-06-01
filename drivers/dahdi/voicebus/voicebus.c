@@ -1650,7 +1650,7 @@ DAHDI_IRQ_HANDLER(vb_isr)
 #if defined(CONFIG_VOICEBUS_NODEFER)
 		vb_intr(dev_id);
 #elif defined(CONFIG_VOICEBUS_ITHREAD)
-		res = FILTER_SCHEDULE_THREAD;
+		res |= FILTER_SCHEDULE_THREAD;
 #else
 		tasklet_hi_schedule(&vb->tasklet);
 #endif
