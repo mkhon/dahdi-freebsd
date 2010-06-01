@@ -919,7 +919,6 @@ echocan_mg2_modevent(module_t mod __unused, int type, void *data __unused)
 DEV_MODULE(dahdi_echocan_mg2, echocan_mg2_modevent, NULL);
 MODULE_VERSION(dahdi_echocan_mg2, 1);
 MODULE_DEPEND(dahdi_echocan_mg2, dahdi, 1, 1, 1);
-
 #else /* !__FreeBSD__ */
 MODULE_DESCRIPTION("DAHDI 'MG2' Echo Canceler");
 MODULE_AUTHOR("Michael Gernoth");

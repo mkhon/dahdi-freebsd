@@ -379,7 +379,6 @@ echocan_sec2_modevent(module_t mod __unused, int type, void *data __unused)
 DEV_MODULE(dahdi_echocan_sec2, echocan_sec2_modevent, NULL);
 MODULE_VERSION(dahdi_echocan_sec2, 1);
 MODULE_DEPEND(dahdi_echocan_sec2, dahdi, 1, 1, 1);
-
 #else /* !__FreeBSD__ */
 MODULE_DESCRIPTION("DAHDI 'SEC2' Echo Canceler");
 MODULE_AUTHOR("Steve Underwood <steveu@coppice.org>");

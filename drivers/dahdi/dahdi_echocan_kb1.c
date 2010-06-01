@@ -772,7 +772,6 @@ echocan_kb1_modevent(module_t mod __unused, int type, void *data __unused)
 DEV_MODULE(dahdi_echocan_kb1, echocan_kb1_modevent, NULL);
 MODULE_VERSION(dahdi_echocan_kb1, 1);
 MODULE_DEPEND(dahdi_echocan_kb1, dahdi, 1, 1, 1);
-
 #else /* !__FreeBSD__ */
 MODULE_DESCRIPTION("DAHDI 'KB1' Echo Canceler");
 MODULE_AUTHOR("Kris Boutilier");

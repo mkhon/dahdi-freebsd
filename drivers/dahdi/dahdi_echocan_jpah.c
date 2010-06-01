@@ -172,7 +172,6 @@ echocan_jpah_modevent(module_t mod __unused, int type, void *data __unused)
 DEV_MODULE(dahdi_echocan_jpah, echocan_jpah_modevent, NULL);
 MODULE_VERSION(dahdi_echocan_jpah, 1);
 MODULE_DEPEND(dahdi_echocan_jpah, dahdi, 1, 1, 1);
-
 #else /* !__FreeBSD__ */
 MODULE_DESCRIPTION("DAHDI Jason Parker Audio Hoser");
 MODULE_AUTHOR("Jason Parker <jparker@digium.com>");
