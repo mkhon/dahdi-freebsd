@@ -5161,7 +5161,7 @@ wctdm_device_attach(device_t dev)
 		return (ENXIO);
 
 	res = wctdm_init_one(dev, id);
-	return -res;
+	return (-res);
 }
 
 static int
@@ -5179,10 +5179,10 @@ wctdm_modevent(module_t mod __unused, int type, void *data __unused)
 	switch (type) {
 	case MOD_LOAD:
 		res = wctdm_init();
-		return -res;
+		return (-res);
 	case MOD_UNLOAD:
 		wctdm_cleanup();
-		return 0;
+		return (0);
 	default:
 		return (EOPNOTSUPP);
 	}
