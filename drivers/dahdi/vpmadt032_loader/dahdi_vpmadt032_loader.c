@@ -208,7 +208,8 @@ dahdi_vpmadt032_loader_modevent(module_t mod __unused, int type, void *data __un
 
 DEV_MODULE(dahdi_vpmadt032_loader, dahdi_vpmadt032_loader_modevent, NULL);
 MODULE_VERSION(dahdi_vpmadt032_loader, 1);
-MODULE_DEPEND(dahdi_vpmadt032_loader, voicebus, 1, 1, 1);
+MODULE_DEPEND(dahdi_vpmadt032_loader, dahdi, 1, 1, 1);
+MODULE_DEPEND(dahdi_vpmadt032_loader, dahdi_voicebus, 1, 1, 1);
 #endif
 
 module_param(debug, int, S_IRUGO | S_IWUSR);
