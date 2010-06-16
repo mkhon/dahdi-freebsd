@@ -2004,7 +2004,6 @@ static void __devexit te12xp_remove_one(struct pci_dev *pdev)
 #if !defined(__FreeBSD__)
 	flush_scheduled_work();
 #endif
-	del_timer_sync(&wc->timer);
 
 	voicebus_release(&wc->vb);
 
