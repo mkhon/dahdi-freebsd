@@ -144,7 +144,7 @@ typedef struct sx rwlock_t;
 #define DEFINE_RWLOCK(name)				\
 	struct sx name;					\
 	SX_SYSINIT(name, &name, #name)
-#define rwlock_init(rwlock)	sx_init(rwlock, "DAHDI rwlock")
+#define rwlock_init(rwlock)	sx_init_flags(rwlock, "DAHDI rwlock", SX_NOADAPTIVE)
 #define read_lock(rwlock)	sx_slock(rwlock)
 #define read_unlock(rwlock)	sx_sunlock(rwlock)
 
@@ -437,8 +437,6 @@ static inline unsigned long _jiffies(void)
  */
 char *
 strncat(char * __restrict dst, const char * __restrict src, size_t n);
-
-#define memmove(dst, src, size)	bcopy((src), (dst), (size))
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
