@@ -14,21 +14,16 @@ SUBDIR=\
 	dahdi-fw-hx8.bin\
 	dahdi-fw-oct6114-064.bin\
 	dahdi-fw-oct6114-128.bin\
+	${_dahdi_vpmadt032_loader}\
 	dahdi_voicebus\
 	ng_dahdi_netdev\
 	wcb4xxp\
 	wcfxo\
 	wct4xxp\
-	wctdm24xxp
-
-# the following drivers are ported but not tested on real HW
-.if defined(WITH_EXPERIMENTAL)
-SUBDIR+=\
-	${_dahdi_vpmadt032_loader}\
 	wctdm\
+	wctdm24xxp\
 	wcte11xp\
 	wcte12xp
-.endif
 
 .if ${MACHINE_ARCH} == "i386" || ${MACHINE_ARCH} == "amd64"
 _dahdi_vpmadt032_loader=	dahdi_vpmadt032_loader
