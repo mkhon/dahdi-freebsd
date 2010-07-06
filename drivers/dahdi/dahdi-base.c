@@ -47,7 +47,6 @@
 #include <sys/module.h>
 #include <sys/poll.h>
 #include <net/ppp_defs.h>
-#include <sys/selinfo.h>
 
 #include "version.h"
 
@@ -358,6 +357,52 @@ static int
 dahdi_copy_from_user(void *to, const void *from, int n)
 {
 	return copyin(from, to, n);
+}
+
+struct pseudo_free {
+	LIST_ENTRY(pseudo_free) pf_link;
+	struct dahdi_chan *pf_pseudo;
+	struct thread *pf_thread;
+};
+
+static DEFINE_SPINLOCK(pseudo_free_list_lock);
+
+static LIST_HEAD(, pseudo_free) pseudo_free_list =
+	LIST_HEAD_INITIALIZER(pseudo_free_list);
+
+static void
+free_pseudo(struct dahdi_chan *pseudo)
+{
+	unsigned long flags;
+	struct pseudo_free *pf;
+
+	pf = kmalloc(sizeof(*pf), GFP_KERNEL);
+	pf->pf_pseudo = pseudo;
+	pf->pf_thread = curthread;
+
+	spin_lock_irqsave(&pseudo_free_list_lock, flags);
+	LIST_INSERT_HEAD(&pseudo_free_list, pf, pf_link);
+	spin_unlock_irqrestore(&pseudo_free_list_lock, flags);
+}
+
+static eventhandler_tag free_pseudo_tag;
+
+static void
+thread_dtor_free_pseudo(void *arg, struct thread *td)
+{
+	unsigned long flags;
+	struct pseudo_free *pf, *pf_next;
+
+	spin_lock_irqsave(&pseudo_free_list_lock, flags);
+	LIST_FOREACH_SAFE(pf, &pseudo_free_list, pf_link, pf_next) {
+		if (pf->pf_thread != td)
+			continue;
+
+		LIST_REMOVE(pf, pf_link);
+		kfree(pf->pf_pseudo);
+		kfree(pf);
+	}
+	spin_unlock_irqrestore(&pseudo_free_list_lock, flags);
 }
 
 #else /* !__FreeBSD__ */
@@ -3146,7 +3191,11 @@ static void dahdi_free_pseudo(struct dahdi_chan *pseudo)
 {
 	if (pseudo) {
 		dahdi_chan_unreg(pseudo);
+#if defined(__FreeBSD__)
+		free_pseudo(pseudo);
+#else
 		kfree(pseudo);
+#endif
 	}
 }
 
@@ -5711,7 +5760,6 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 		int fflags = dahdi_get_flags(file->dev);
 
 		get_user(j, data);
-		printf("F_SETFL: 0x%x\n", j);
 
 		/*
 		 * XXX: On the moment we're interested only in O_NONBLOCK
@@ -9160,6 +9208,9 @@ static int __init dahdi_init(void)
 #endif
 
 #if defined(__FreeBSD__)
+	free_pseudo_tag = EVENTHANDLER_REGISTER(
+	    thread_dtor, thread_dtor_free_pseudo, NULL, EVENTHANDLER_PRI_ANY);
+
 	dev_ctl = make_dev(&dahdi_devsw, 0, UID_ROOT, GID_WHEEL, 0644, "dahdi/ctl");
 	{
 		struct cdev *dev;
@@ -9202,6 +9253,18 @@ static void __exit dahdi_cleanup(void)
 	coretimer_cleanup();
 
 #if defined(__FreeBSD__)
+	EVENTHANDLER_DEREGISTER(thread_dtor, free_pseudo_tag);
+
+	spin_lock_irqsave(&pseudo_free_list_lock, x);
+	while (!LIST_EMPTY(&pseudo_free_list)) {
+		struct pseudo_free *pf = LIST_FIRST(&pseudo_free_list);
+
+		LIST_REMOVE(pf, pf_link);
+		kfree(pf->pf_pseudo);
+		kfree(pf);
+	}
+	spin_unlock_irqrestore(&pseudo_free_list_lock, x);
+
 	if (dev_ctl != NULL) {
 		destroy_dev(dev_ctl);
 		dev_ctl = NULL;
