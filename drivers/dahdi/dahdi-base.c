@@ -3771,13 +3771,12 @@ static int dahdi_release(struct inode *inode, struct file *file)
 #if defined(__FreeBSD__)
 		if (dahdi_transcode_fops && dahdi_transcode_fops->release)
 			return dahdi_transcode_fops->release(inode, file);
-#else
+#endif /* __FreeBSD__ */
 		/* We should not be here because the dahdi_transcode.ko module
 		 * should have updated the file_operations for this file
 		 * handle when the file was opened. */
 		WARN_ON(1);
 		return -EFAULT;
-#endif
 	}
 	if (unit == 254) {
 		chan = dahdi_get_private_data(file);
@@ -4785,7 +4784,7 @@ static int dahdi_ctl_ioctl(struct file *file, unsigned int cmd, unsigned long da
 #if defined(__FreeBSD__)
 		if (copy_from_user(&data, (void *) data, sizeof(data)))
 			return -EFAULT;
-#endif
+#endif /* __FreeBSD__ */
 		return ioctl_load_zone(data);
 	case DAHDI_FREEZONE:
 		get_user(j, (int __user *) data);
@@ -5761,7 +5760,7 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 		}
 		break;
 	}
-#endif
+#endif /* __FreeBSD__ */
 	case DAHDI_SETSIGFREEZE:
 		get_user(j, (int __user *)data);
 		spin_lock_irqsave(&chan->lock, flags);
@@ -5945,7 +5944,7 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 #if defined(__FreeBSD__)
 		if (copy_from_user(&data, (void *) data, sizeof(data)))
 			return -EFAULT;
-#endif
+#endif /* __FreeBSD__ */
 		if (!(chan->flags & DAHDI_FLAG_AUDIO))
 			return -EINVAL;
 		ret = copy_from_user(&ecp,
@@ -6203,13 +6202,12 @@ static int dahdi_ioctl(struct inode *inode, struct file *file,
 			ret = dahdi_transcode_fops->ioctl(inode, file, cmd, data);
 			goto unlock_exit;
 		}
-#else
+#endif /* __FreeBSD__ */
 		/* dahdi_transcode should have updated the file_operations on
 		 * this file object on open, so we shouldn't be here. */
 		WARN_ON(1);
 		ret = -EFAULT;
 		goto unlock_exit;
-#endif
 	}
 
 	if (unit == 253) {
@@ -6345,13 +6343,13 @@ int dahdi_register(struct dahdi_span *span, int prefmaster)
 			    UID_ROOT, GID_WHEEL, 0644,
 			    "dahdi/%d", span->chans[x]->channo);
 			dev_depends(dev_ctl, span->chans[x]->dev);
-#else
+#else /* !__FreeBSD__ */
 			char chan_name[32];
 			snprintf(chan_name, sizeof(chan_name), "dahdi!%d", 
 					span->chans[x]->channo);
 			CLASS_DEV_CREATE(dahdi_class, MKDEV(DAHDI_MAJOR, 
 					span->chans[x]->channo), NULL, chan_name);
-#endif
+#endif /* !__FreeBSD__ */
 		}
 	}
 
@@ -6420,9 +6418,9 @@ int dahdi_unregister(struct dahdi_span *span)
 				destroy_dev(span->chans[x]->dev);
 				span->chans[x]->dev = NULL;
 			}
-#else
+#else /* !__FreeBSD__ */
 			CLASS_DEV_DESTROY(dahdi_class, MKDEV(DAHDI_MAJOR, span->chans[x]->channo));
-#endif
+#endif /* !__FreeBSD__ */
 		}
 	}
 
@@ -9227,7 +9225,7 @@ static int __init dahdi_init(void)
 	CLASS_DEV_CREATE(dahdi_class, MKDEV(DAHDI_MAJOR, 254), NULL, "dahdi!channel");
 	CLASS_DEV_CREATE(dahdi_class, MKDEV(DAHDI_MAJOR, 255), NULL, "dahdi!pseudo");
 	CLASS_DEV_CREATE(dahdi_class, MKDEV(DAHDI_MAJOR, 0), NULL, "dahdi!ctl");
-#endif
+#endif /* !__FreeBSD__ */
 
 	module_printk(KERN_INFO, "Telephony Interface Registered on major %d\n", DAHDI_MAJOR);
 	module_printk(KERN_INFO, "Version: %s\n", DAHDI_VERSION);
@@ -9264,7 +9262,7 @@ static void __exit dahdi_cleanup(void)
 		destroy_dev(dev_ctl);
 		dev_ctl = NULL;
 	}
-#else
+#else /* !__FreeBSD__ */
 	CLASS_DEV_DESTROY(dahdi_class, MKDEV(DAHDI_MAJOR, 253)); /* timer */
 	CLASS_DEV_DESTROY(dahdi_class, MKDEV(DAHDI_MAJOR, 254)); /* channel */
 	CLASS_DEV_DESTROY(dahdi_class, MKDEV(DAHDI_MAJOR, 255)); /* pseudo */
@@ -9272,7 +9270,7 @@ static void __exit dahdi_cleanup(void)
 	class_destroy(dahdi_class);
 
 	unregister_chrdev(DAHDI_MAJOR, "dahdi");
-#endif
+#endif /* !__FreeBSD__ */
 
 #ifdef CONFIG_PROC_FS
 	remove_proc_entry("dahdi", NULL);
