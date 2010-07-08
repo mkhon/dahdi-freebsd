@@ -996,7 +996,7 @@ static void ztdynamic_cleanup(void)
 }
 
 #if defined(__FreeBSD__)
-SYSCTL_NODE(_dahdi, OID_AUTO, dynamic, CTLFLAG_RW, 0, "DAHDI dynamic");
+SYSCTL_NODE(_dahdi, OID_AUTO, dynamic, CTLFLAG_RW, 0, "DAHDI Dynamic Span Support");
 #define MODULE_PARAM_PREFIX "dahdi.dynamic"
 #define MODULE_PARAM_PARENT _dahdi_dynamic
 #endif
