@@ -50,8 +50,6 @@
 
 #include "version.h"
 
-#define module_printk(level, fmt, args...) printf(fmt, ## args)
-
 #define FOP_READ_ARGS_DECL	struct file *file, struct uio *uio, size_t count
 #define FOP_READ_ARGS		file, uio, count
 #define FOP_WRITE_ARGS_DECL	struct file *file, struct uio *uio, size_t count
@@ -83,14 +81,13 @@
 
 #include <dahdi/version.h>
 
-#define module_printk(level, fmt, args...) printk(level "%s: " fmt, THIS_MODULE->name, ## args)
-
 #define FOP_READ_ARGS_DECL	struct file *file, char __user *usrbuf, size_t count, loff_t *ppos
 #define FOP_READ_ARGS		file, usrbuf, count, ppos
 #define FOP_WRITE_ARGS_DECL	struct file *file, const char __user *usrbuf, size_t count, loff_t *ppos
 #define FOP_WRITE_ARGS		file, usrbuf, count, ppos
-
 #endif /* !__FreeBSD__ */
+
+#define module_printk(level, fmt, args...) printk(level "%s: " fmt, THIS_MODULE->name, ## args)
 
 /* #define BUF_MUNGE */
 
@@ -9314,7 +9311,7 @@ dahdi_modevent(module_t mod, int cmd, void *arg)
 
 /* Now declare the module to the system */
 MODULE_VERSION(dahdi, 1);
-DEV_MODULE(dahdi, dahdi_modevent, NULL);
+DAHDI_DEV_MODULE(dahdi, dahdi_modevent, NULL);
 #ifdef CONFIG_DAHDI_CORE_TIMER
 MODULE_VERSION(dahdi_dummy, 1);
 DEV_MODULE(dahdi_dummy, NULL, NULL);

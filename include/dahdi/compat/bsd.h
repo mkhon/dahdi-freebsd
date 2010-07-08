@@ -325,11 +325,21 @@ MALLOC_DECLARE(M_DAHDI);
 #define __devexit
 #define __devinitdata
 
-struct module;
-
 #define try_module_get(m)	(1)
 #define module_put(m)		((void) (m))
-#define THIS_MODULE		((struct module *) __FILE__)
+
+struct module {
+	const char *name;
+};
+
+extern struct module _this_module;
+
+#define THIS_MODULE (&_this_module)
+
+#define DAHDI_DEV_MODULE(name, evh, arg)		\
+	DEV_MODULE(name, evh, arg);			\
+	struct module _this_module = { #name }
+
 int request_module(const char *fmt, ...);
 
 #define EXPORT_SYMBOL(s)

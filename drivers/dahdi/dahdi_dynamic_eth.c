@@ -516,7 +516,7 @@ dahdi_dynamic_eth_modevent(module_t mod __unused, int type, void *data __unused)
 	}
 }
 
-DEV_MODULE(dahdi_dynamic_eth, dahdi_dynamic_eth_modevent, NULL);
+DAHDI_DEV_MODULE(dahdi_dynamic_eth, dahdi_dynamic_eth_modevent, NULL);
 MODULE_VERSION(dahdi_dynamic_eth, 1);
 MODULE_DEPEND(dahdi_dynamic_eth, dahdi, 1, 1, 1);
 MODULE_DEPEND(dahdi_dynamic_eth, dahdi_dynamic, 1, 1, 1);

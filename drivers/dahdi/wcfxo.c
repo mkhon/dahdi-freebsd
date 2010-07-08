@@ -122,15 +122,9 @@
 #define PEGTIME		50 * 8		/* 50ms peak to peak gets us rings of 10 Hz or more */
 #define PEGCOUNT	5		/* 5 cycles of pegging means RING */
 
-#if defined(__FreeBSD__)
-#define	wcfxo_printk(level, span, fmt, ...)	\
-	printk(KERN_ ## level "%s-%s: %s: " fmt, #level,	\
-		"wcfxo", (span).name, ## __VA_ARGS__)
-#else
 #define	wcfxo_printk(level, span, fmt, ...)	\
 	printk(KERN_ ## level "%s-%s: %s: " fmt, #level,	\
 		THIS_MODULE->name, (span).name, ## __VA_ARGS__)
-#endif
 
 #define wcfxo_notice(span, fmt, ...) \
 	wcfxo_printk(NOTICE, span, fmt, ## __VA_ARGS__)

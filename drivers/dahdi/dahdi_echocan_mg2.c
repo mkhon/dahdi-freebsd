@@ -38,9 +38,6 @@
 #include <sys/ctype.h>
 #include <sys/libkern.h>
 #include <sys/module.h>
-
-#define module_printk(level, fmt, args...) printf(fmt, ## args)
-#define debug_printk(level, fmt, args...) if (debug >= level) printf("%s: " fmt, __FUNCTION__, ## args)
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/slab.h>
@@ -49,15 +46,15 @@
 #include <linux/init.h>
 #include <linux/ctype.h>
 #include <linux/moduleparam.h>
-
-#define module_printk(level, fmt, args...) printk(level "%s: " fmt, THIS_MODULE->name, ## args)
-#define debug_printk(level, fmt, args...) if (debug >= level) printk("%s (%s): " fmt, THIS_MODULE->name, __FUNCTION__, ## args)
 #endif /* !__FreeBSD__ */
 
 #include <dahdi/kernel.h>
 
 static int debug;
 static int aggressive;
+
+#define module_printk(level, fmt, args...) printk(level "%s: " fmt, THIS_MODULE->name, ## args)
+#define debug_printk(level, fmt, args...) if (debug >= level) printk("%s (%s): " fmt, THIS_MODULE->name, __FUNCTION__, ## args)
 
 #define ABS(a) abs(a!=-32768?a:-32767)
 
@@ -919,7 +916,7 @@ echocan_mg2_modevent(module_t mod __unused, int type, void *data __unused)
 	}
 }
 
-DEV_MODULE(dahdi_echocan_mg2, echocan_mg2_modevent, NULL);
+DAHDI_DEV_MODULE(dahdi_echocan_mg2, echocan_mg2_modevent, NULL);
 MODULE_VERSION(dahdi_echocan_mg2, 1);
 MODULE_DEPEND(dahdi_echocan_mg2, dahdi, 1, 1, 1);
 #else /* !__FreeBSD__ */

@@ -282,7 +282,7 @@ dahdi_dynamic_loc_modevent(module_t mod __unused, int type, void *data __unused)
 	}
 }
 
-DEV_MODULE(dahdi_dynamic_loc, dahdi_dynamic_loc_modevent, NULL);
+DAHDI_DEV_MODULE(dahdi_dynamic_loc, dahdi_dynamic_loc_modevent, NULL);
 MODULE_VERSION(dahdi_dynamic_loc, 1);
 MODULE_DEPEND(dahdi_dynamic_loc, dahdi, 1, 1, 1);
 MODULE_DEPEND(dahdi_dynamic_loc, dahdi_dynamic, 1, 1, 1);

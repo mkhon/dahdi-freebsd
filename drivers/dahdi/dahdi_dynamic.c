@@ -1018,7 +1018,7 @@ dahdi_dynamic_modevent(module_t mod __unused, int type, void *data __unused)
 	}
 }
 
-DEV_MODULE(dahdi_dynamic, dahdi_dynamic_modevent, NULL);
+DAHDI_DEV_MODULE(dahdi_dynamic, dahdi_dynamic_modevent, NULL);
 MODULE_VERSION(dahdi_dynamic, 1);
 MODULE_DEPEND(dahdi_dynamic, dahdi, 1, 1, 1);
 #else /* !__FreeBSD__ */

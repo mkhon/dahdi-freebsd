@@ -2102,7 +2102,7 @@ dahdi_voicebus_modevent(module_t mod __unused, int type, void *data __unused)
 }
 
 MODULE_VERSION(dahdi_voicebus, 1);
-DEV_MODULE(dahdi_voicebus, dahdi_voicebus_modevent, NULL);
+DAHDI_DEV_MODULE(dahdi_voicebus, dahdi_voicebus_modevent, NULL);
 MODULE_DEPEND(dahdi_voicebus, dahdi, 1, 1, 1);
 #else /* !__FreeBSD__ */
 MODULE_DESCRIPTION("Voicebus Interface w/VPMADT032 support");
