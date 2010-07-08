@@ -908,7 +908,7 @@ struct dahdi_span {
 struct dahdi_transcoder_channel {
 	void *pvt;
 	struct dahdi_transcoder *parent;
-	wait_queue_head_t ready;
+	struct pollinfo ready;
 	__u32 built_fmts;
 #define DAHDI_TC_FLAG_BUSY		1
 #define DAHDI_TC_FLAG_CHAN_BUILT	2
@@ -975,12 +975,7 @@ struct dahdi_transcoder {
 	int numchannels;
 	unsigned int srcfmts;
 	unsigned int dstfmts;
-#if defined(__FreeBSD__)
-	int (*write)(struct dahdi_transcoder_channel *channel, struct uio *uio, int ioflags);
-	int (*read)(struct dahdi_transcoder_channel *channel, struct uio *uio, int ioflags);
-#else
 	struct file_operations fops;
-#endif
 	int (*allocate)(struct dahdi_transcoder_channel *channel);
 	int (*release)(struct dahdi_transcoder_channel *channel);
 	/* Transcoder channels */
@@ -1109,9 +1104,7 @@ struct dahdi_tone *dahdi_mf_tone(const struct dahdi_chan *chan, char digit, int 
 void dahdi_ec_chunk(struct dahdi_chan *chan, unsigned char *rxchunk, const unsigned char *txchunk);
 void dahdi_ec_span(struct dahdi_span *span);
 
-#if !defined(__FreeBSD__)
 extern struct file_operations *dahdi_transcode_fops;
-#endif
 
 /* Don't use these directly -- they're not guaranteed to
    be there. */
@@ -1279,5 +1272,11 @@ wait_for_completion_timeout(struct completion *x, unsigned long timeout)
 #ifndef DMA_BIT_MASK
 #define DMA_BIT_MASK(n)	(((n) == 64) ? ~0ULL : ((1ULL<<(n))-1))
 #endif
+
+void *dahdi_get_private_data(struct file *file);
+
+void dahdi_set_private_data(struct file *file, void *private_data);
+
+void dahdi_poll_wait(struct file *file, struct pollinfo *sel, struct poll_table_struct *wait_table);
 
 #endif /* _DAHDI_KERNEL_H */

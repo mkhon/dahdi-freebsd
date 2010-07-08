@@ -479,4 +479,43 @@ dahdi_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pva
 void
 dahdi_dma_free(bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr);
 
+/*
+ * File operations
+ *
+ * Supposed to be used only for transcoders stuff
+ */
+
+struct inode;
+
+struct file {
+	struct cdev *dev;
+	int f_flags;
+};
+
+struct vm_area_struct {
+	vm_offset_t offset;
+	vm_paddr_t *paddr;
+	int nprot;
+};
+
+struct poll_table_struct {
+	struct selinfo *selinfo;
+};
+
+#define FOP_READ_ARGS_DECL	struct file *file, struct uio *uio, size_t count
+#define FOP_READ_ARGS		file, uio, count
+#define FOP_WRITE_ARGS_DECL	struct file *file, struct uio *uio, size_t count
+#define FOP_WRITE_ARGS		file, uio, count
+
+struct file_operations {
+	struct module *owner;
+	int (*open)(struct inode *inode, struct file *file);
+	int (*release)(struct inode *inode, struct file *file);
+	int (*ioctl)(struct inode *inode, struct file *file, unsigned int cmd, unsigned long data);
+	ssize_t (*read)(FOP_READ_ARGS_DECL);
+	ssize_t (*write)(FOP_WRITE_ARGS_DECL);
+	unsigned int (*poll)(struct file *file, struct poll_table_struct *wait_table);
+	int (*mmap)(struct file *file, struct vm_area_struct *vma);
+};
+
 #endif /* _DAHDI_COMPAT_BSD_H_ */

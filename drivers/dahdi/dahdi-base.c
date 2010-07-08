@@ -50,11 +50,6 @@
 
 #include "version.h"
 
-#define FOP_READ_ARGS_DECL	struct file *file, struct uio *uio, size_t count
-#define FOP_READ_ARGS		file, uio, count
-#define FOP_WRITE_ARGS_DECL	struct file *file, struct uio *uio, size_t count
-#define FOP_WRITE_ARGS		file, uio, count
-
 #define MODULE_PARAM_PREFIX "dahdi"
 #define MODULE_PARAM_PARENT _dahdi
 #else /* !__FreeBSD__ */
@@ -183,23 +178,6 @@ static struct cdev *dev_ctl = NULL;
 
 static struct cdevsw dahdi_devsw;
 
-struct inode;
-
-struct file {
-	struct cdev *dev;
-	int f_flags;
-};
-
-struct vm_area_struct {
-	vm_offset_t offset;
-	vm_paddr_t *paddr;
-	int nprot;
-};
-
-struct poll_table_struct {
-	struct selinfo *selinfo;
-};
-
 #define UNIT(file)	dev2unit(file->dev)
 
 struct dahdi_fp {
@@ -260,7 +238,7 @@ dahdi_set_flags(struct file *file, int fflags)
 	fp->fflags = fflags;
 }
 
-static void *
+void *
 dahdi_get_private_data(struct file *file)
 {
 	int error;
@@ -273,7 +251,7 @@ dahdi_get_private_data(struct file *file)
 	return fp->private_data;
 }
 
-static void
+void
 dahdi_set_private_data(struct file *file, void *private_data)
 {
 	int error;
@@ -299,7 +277,7 @@ dahdi_poll_init(struct pollinfo *sel)
 	TASK_INIT(&sel->task, 0, handle_selwakeup, &sel->selinfo);
 }
 
-static void
+void
 dahdi_poll_wait(struct file *file, struct pollinfo *sel, struct poll_table_struct *wait_table)
 {
 	wait_table->selinfo = &sel->selinfo;
@@ -341,19 +319,19 @@ dahdi_get_current_time(struct timespec *ts)
 static int
 dahdi_fop_read(FOP_READ_ARGS_DECL, int off, void *buf, int iocount)
 {
-	return uiomove(buf, iocount, uio);
+	return -uiomove(buf, iocount, uio);
 }
 
 static int
 dahdi_fop_write(FOP_WRITE_ARGS_DECL, int off, void *buf, int iocount)
 {
-	return uiomove(buf, iocount, uio);
+	return -uiomove(buf, iocount, uio);
 }
 
 static int
 dahdi_copy_from_user(void *to, const void *from, int n)
 {
-	return copyin(from, to, n);
+	return -copyin(from, to, n);
 }
 
 struct pseudo_free {
@@ -415,13 +393,13 @@ dahdi_get_flags(struct file *file)
 	return file->f_flags;
 }
 
-static void *
+void *
 dahdi_get_private_data(struct file *file)
 {
 	return file->private_data;
 }
 
-static void
+void
 dahdi_set_private_data(struct file *file, void *private_data)
 {
 	file->private_data = private_data;
@@ -433,7 +411,7 @@ dahdi_poll_init(struct pollinfo *sel)
 	init_wait_queue_head(&sel->wait_queue);
 }
 
-static void
+void
 dahdi_poll_wait(struct file *file, struct pollinfo *sel, struct poll_table_struct *wait_table)
 {
 	poll_wait(file, &sel->wait_queue, wait_table);
@@ -519,8 +497,6 @@ dahdi_unregister_chardev(struct dahdi_chardev *dev)
 	return 0;
 }
 
-struct file_operations *dahdi_transcode_fops = NULL;
-
 EXPORT_SYMBOL(dahdi_transcode_fops);
 EXPORT_SYMBOL(dahdi_init_tone_state);
 EXPORT_SYMBOL(dahdi_mf_tone);
@@ -602,6 +578,8 @@ static struct class_simple *dahdi_class = NULL;
 #define class_destroy class_simple_destroy
 #endif
 #endif /* !__FreeBSD__ */
+
+struct file_operations *dahdi_transcode_fops = NULL;
 
 static int deftaps = 64;
 
@@ -3204,7 +3182,6 @@ static int dahdi_open(struct inode *inode, struct file *file)
 	if (!unit)
 		return dahdi_ctl_open(file);
 	if (unit == 250) {
-#if !defined(__FreeBSD__)
 		if (!dahdi_transcode_fops) {
 			if (request_module("dahdi_transcode")) {
 				return -ENXIO;
@@ -3224,7 +3201,6 @@ static int dahdi_open(struct inode *inode, struct file *file)
 			 * file_operations table. */
 			 WARN_ON(1);
 		}
-#endif /* !__FreeBSD__ */
 		return -ENXIO;
 	}
 	if (unit == 253) {
@@ -3270,6 +3246,12 @@ static ssize_t dahdi_read(FOP_READ_ARGS_DECL)
 		return -EINVAL;
 	}
 
+	if (unit == 250) {
+		if (dahdi_transcode_fops && dahdi_transcode_fops->read)
+			return dahdi_transcode_fops->read(FOP_READ_ARGS);
+		return -ENOSYS;
+	}
+
 	if (unit == 253)
 		return -EINVAL;
 
@@ -3303,6 +3285,11 @@ static int dahdi_write(FOP_WRITE_ARGS_DECL)
 		return -EINVAL;
 	if (count < 0)
 		return -EINVAL;
+	if (unit == 250) {
+		if (dahdi_transcode_fops && dahdi_transcode_fops->write)
+			return dahdi_transcode_fops->write(FOP_WRITE_ARGS);
+		return -ENOSYS;
+	}
 	if (unit == 253)
 		return -EINVAL;
 	if (unit == 254) {
@@ -3781,11 +3768,16 @@ static int dahdi_release(struct inode *inode, struct file *file)
 		return dahdi_timer_release(file);
 	}
 	if (unit == 250) {
+#if defined(__FreeBSD__)
+		if (dahdi_transcode_fops && dahdi_transcode_fops->release)
+			return dahdi_transcode_fops->release(inode, file);
+#else
 		/* We should not be here because the dahdi_transcode.ko module
 		 * should have updated the file_operations for this file
 		 * handle when the file was opened. */
 		WARN_ON(1);
 		return -EFAULT;
+#endif
 	}
 	if (unit == 254) {
 		chan = dahdi_get_private_data(file);
@@ -6206,11 +6198,18 @@ static int dahdi_ioctl(struct inode *inode, struct file *file,
 	}
 
 	if (unit == 250) {
+#if defined(__FreeBSD__)
+		if (dahdi_transcode_fops && dahdi_transcode_fops->ioctl) {
+			ret = dahdi_transcode_fops->ioctl(inode, file, cmd, data);
+			goto unlock_exit;
+		}
+#else
 		/* dahdi_transcode should have updated the file_operations on
 		 * this file object on open, so we shouldn't be here. */
 		WARN_ON(1);
 		ret = -EFAULT;
 		goto unlock_exit;
+#endif
 	}
 
 	if (unit == 253) {
@@ -8408,11 +8407,11 @@ dahdi_chan_poll(struct file *file, struct poll_table_struct *wait_table, int uni
 
 static int dahdi_mmap(struct file *file, struct vm_area_struct *vm)
 {
-#if !defined(__FreeBSD__)
 	int unit = UNIT(file);
-	if (unit == 250)
-		return dahdi_transcode_fops->mmap(file, vm);
-#endif
+	if (unit == 250) {
+		if (dahdi_transcode_fops && dahdi_transcode_fops->mmap)
+			return dahdi_transcode_fops->mmap(file, vm);
+	}
 	return -ENOSYS;
 }
 
@@ -8424,12 +8423,11 @@ static unsigned int dahdi_poll(struct file *file, struct poll_table_struct *wait
 	if (!unit)
 		return -EINVAL;
 
-	if (unit == 250)
-#if defined(__FreeBSD__)
-		return -ENXIO;
-#else
-		return dahdi_transcode_fops->poll(file, wait_table);
-#endif
+	if (unit == 250) {
+		if (dahdi_transcode_fops && dahdi_transcode_fops->poll)
+			return dahdi_transcode_fops->poll(file, wait_table);
+		return -ENOSYS;
+	}
 
 	if (unit == 253)
 		return dahdi_timer_poll(file, wait_table);

@@ -22,6 +22,15 @@
  * this program for more details.
  */
 
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/param.h>
+#include <sys/conf.h>
+#include <sys/fcntl.h>
+#include <sys/ioccom.h>
+#include <sys/module.h>
+#include <sys/poll.h>
+#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -35,18 +44,23 @@
 #include <linux/mm.h>
 #include <linux/page-flags.h>
 #include <asm/io.h>
+#endif /* !__FreeBSD__ */
 
 #include <dahdi/kernel.h>
 
 static int debug;
 /* The registration list contains transcoders in the order in which they were
  * registered. */
-static LIST_HEAD(registration_list);
+static _LIST_HEAD(registration_list);
 /* The active list is sorted by the most recently used transcoder is last. This
  * is used as a simplistic way to spread the load amongst the different hardware
  * transcoders in the system. */
-static LIST_HEAD(active_list);
+static _LIST_HEAD(active_list);
+#ifdef DEFINE_SPINLOCK
+static DEFINE_SPINLOCK(translock);
+#else
 static spinlock_t translock = SPIN_LOCK_UNLOCKED;
+#endif
 
 EXPORT_SYMBOL(dahdi_transcoder_register);
 EXPORT_SYMBOL(dahdi_transcoder_unregister);
@@ -150,6 +164,7 @@ int dahdi_transcoder_alert(struct dahdi_transcoder_channel *chan)
 
 static int dahdi_tc_open(struct inode *inode, struct file *file)
 {
+#if !defined(__FreeBSD__)
 	const struct file_operations *original_fops;	
 	BUG_ON(!dahdi_transcode_fops);
 	original_fops = file->f_op;
@@ -160,6 +175,7 @@ static int dahdi_tc_open(struct inode *inode, struct file *file)
 	 * responsible for taking a reference out on this module before
 	 * calling this function. */
 	module_put(original_fops->owner);
+#endif
 	return 0;
 }
 
@@ -174,7 +190,7 @@ static void dtc_release(struct dahdi_transcoder_channel *chan)
 
 static int dahdi_tc_release(struct inode *inode, struct file *file)
 {
-	struct dahdi_transcoder_channel *chan = file->private_data;
+	struct dahdi_transcoder_channel *chan = dahdi_get_private_data(file);
 	/* There will not be a transcoder channel associated with this file if
 	 * the ALLOCATE ioctl never succeeded. 
 	 */
@@ -223,8 +239,9 @@ get_free_channel(struct dahdi_transcoder *tc,
  * supported but all the channels are busy, or -ENODEV if there are not any
  * transcoders that support the formats.
  */
-static struct dahdi_transcoder_channel *
-__find_free_channel(struct list_head *list, const struct dahdi_transcoder_formats *fmts)
+static int
+__find_free_channel(struct list_head *list, const struct dahdi_transcoder_formats *fmts,
+		    struct dahdi_transcoder_channel **pchan)
 {
 	struct dahdi_transcoder *tc;
 	struct dahdi_transcoder_channel *chan = NULL;
@@ -242,16 +259,18 @@ __find_free_channel(struct list_head *list, const struct dahdi_transcoder_format
 				 * transcoder in the system) we'll move tc 
 				 * to the end of the list. */
 				list_move_tail(&tc->active_list_node, list);
-				return chan;
+				*pchan = chan;
+				return 0;
 			}
 		}
 	}
-	return (void*)((long)((match) ? -EBUSY : -ENODEV));
+	return ((match) ? -EBUSY : -ENODEV);
 }
 
 static long dahdi_tc_allocate(struct file *file, unsigned long data)
 {
-	struct dahdi_transcoder_channel *chan = NULL;
+	int res;
+	struct dahdi_transcoder_channel *chan = NULL, *old_chan;
 	struct dahdi_transcoder_formats fmts;
 	
 	if (copy_from_user(&fmts, (__user const void *) data, sizeof(fmts))) {
@@ -259,12 +278,10 @@ static long dahdi_tc_allocate(struct file *file, unsigned long data)
 	}
 
 	spin_lock(&translock);
-	chan = __find_free_channel(&active_list, &fmts);
+	res = __find_free_channel(&active_list, &fmts, &chan);
 	spin_unlock(&translock);
-
-	if (IS_ERR(chan)) {
-		return PTR_ERR(chan);
-	}
+	if (res)
+		return res;
 
 	/* Every transcoder channel must be associated with a parent
 	 * transcoder. */
@@ -273,13 +290,14 @@ static long dahdi_tc_allocate(struct file *file, unsigned long data)
 	chan->srcfmt = fmts.srcfmt;
 	chan->dstfmt = fmts.dstfmt;
 
-	if (file->private_data) {
+	if ((old_chan = dahdi_get_private_data(file)) != NULL) {
 		/* This open file is moving to a new channel. Cleanup and
 		 * close the old channel here.  */
-		dtc_release(file->private_data);
+		dtc_release(old_chan);
 	}
 
-	file->private_data = chan;
+	dahdi_set_private_data(file, chan);
+#if !defined(__FreeBSD__)
 	if (chan->parent->fops.owner != file->f_op->owner) {
 		if (!try_module_get(chan->parent->fops.owner)) {
 			/* Failed to get a reference on the driver for the
@@ -290,6 +308,7 @@ static long dahdi_tc_allocate(struct file *file, unsigned long data)
 		module_put(file->f_op->owner);
 		file->f_op = &chan->parent->fops;
 	}
+#endif
 
 	if (file->f_flags & O_NONBLOCK) {
 		dahdi_tc_set_nonblock(chan);
@@ -336,9 +355,15 @@ static long dahdi_tc_getinfo(unsigned long data)
 	return copy_to_user((__user void *) data, &info, sizeof(info)) ? -EFAULT : 0;
 }
 
-static ssize_t dahdi_tc_write(struct file *file, __user const char *usrbuf, size_t count, loff_t *ppos)
+static ssize_t dahdi_tc_write(FOP_WRITE_ARGS_DECL)
 {
-	if (file->private_data) {
+	struct dahdi_transcoder_channel *chan = dahdi_get_private_data(file);
+
+	if (chan != NULL) {
+#if defined(__FreeBSD__)
+		if (chan->parent->fops.write)
+			return chan->parent->fops.write(FOP_WRITE_ARGS);
+#endif
 		/* file->private_data will not be NULL if DAHDI_TC_ALLOCATE was
 		 * called, and therefore indicates that the transcoder driver
 		 * did not export a read function. */
@@ -351,9 +376,15 @@ static ssize_t dahdi_tc_write(struct file *file, __user const char *usrbuf, size
 	}
 }
 
-static ssize_t dahdi_tc_read(struct file *file, __user char *usrbuf, size_t count, loff_t *ppos)
+static ssize_t dahdi_tc_read(FOP_READ_ARGS_DECL)
 {
-	if (file->private_data) {
+	struct dahdi_transcoder_channel *chan = dahdi_get_private_data(file);
+
+	if (chan != NULL) {
+#if defined(__FreeBSD__)
+		if (chan->parent->fops.read)
+			return chan->parent->fops.read(FOP_READ_ARGS);
+#endif
 		/* file->private_data will not be NULL if DAHDI_TC_ALLOCATE was
 		 * called, and therefore indicates that the transcoder driver
 		 * did not export a write function. */
@@ -410,7 +441,7 @@ static int dahdi_tc_mmap(struct file *file, struct vm_area_struct *vma)
 static unsigned int dahdi_tc_poll(struct file *file, struct poll_table_struct *wait_table)
 {
 	int ret;
-	struct dahdi_transcoder_channel *chan = file->private_data;
+	struct dahdi_transcoder_channel *chan = dahdi_get_private_data(file);
 
 	if (!chan) {
 		/* This is because the DAHDI_TC_ALLOCATE ioctl was not called
@@ -418,7 +449,7 @@ static unsigned int dahdi_tc_poll(struct file *file, struct poll_table_struct *w
 		return -EINVAL;
 	}
 
-	poll_wait(file, &chan->ready, wait_table);
+	dahdi_poll_wait(file, &chan->ready, wait_table);
 
 	ret =  dahdi_tc_is_busy(chan)         ? 0       : POLLPRI;
 	ret |= dahdi_tc_is_built(chan)        ? POLLOUT : 0;
@@ -435,7 +466,7 @@ static struct file_operations __dahdi_transcode_fops = {
 	.write =   dahdi_tc_write,
 	.poll =    dahdi_tc_poll,
 	.mmap =    dahdi_tc_mmap,
-#if HAVE_UNLOCKED_IOCTL
+#ifdef HAVE_UNLOCKED_IOCTL
 	.unlocked_ioctl = dahdi_tc_unlocked_ioctl,
 #endif
 };
@@ -472,7 +503,36 @@ static void dahdi_transcode_cleanup(void)
 	printk(KERN_DEBUG "%s: Unloaded.\n", THIS_MODULE->name);
 }
 
+#if defined(__FreeBSD__)
+SYSCTL_NODE(_dahdi, OID_AUTO, transcode, CTLFLAG_RW, 0, "DAHDI Transcoder Support");
+#define MODULE_PARAM_PREFIX "dahdi.transcode"
+#define MODULE_PARAM_PARENT _dahdi_transcode
+#endif
+
 module_param(debug, int, S_IRUGO | S_IWUSR);
+
+#if defined(__FreeBSD__)
+static int
+transcode_modevent(module_t mod __unused, int type, void *data __unused)
+{
+	int res;
+
+	switch (type) {
+	case MOD_LOAD:
+		res = dahdi_transcode_init();
+		return (-res);
+	case MOD_UNLOAD:
+		dahdi_transcode_cleanup();
+		return (0);
+	default:
+		return (EOPNOTSUPP);
+	}
+}
+
+DAHDI_DEV_MODULE(dahdi_transcode, transcode_modevent, NULL);
+MODULE_VERSION(dahdi_transcode, 1);
+MODULE_DEPEND(dahdi_transcode, dahdi, 1, 1, 1);
+#else /* !__FreeBSD__ */
 MODULE_DESCRIPTION("DAHDI Transcoder Support");
 MODULE_AUTHOR("Mark Spencer <markster@digium.com>");
 #ifdef MODULE_LICENSE
@@ -481,3 +541,4 @@ MODULE_LICENSE("GPL");
 
 module_init(dahdi_transcode_init);
 module_exit(dahdi_transcode_cleanup);
+#endif
