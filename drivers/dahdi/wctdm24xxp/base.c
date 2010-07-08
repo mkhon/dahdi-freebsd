@@ -5203,7 +5203,7 @@ static driver_t wctdm_pci_driver = {
 
 static devclass_t wctdm_devclass;
 
-DRIVER_MODULE(wctdm24xxp, pci, wctdm_pci_driver, wctdm_devclass, wctdm_modevent, 0);
+DAHDI_DRIVER_MODULE(wctdm24xxp, pci, wctdm_pci_driver, wctdm_devclass, wctdm_modevent, 0);
 MODULE_DEPEND(wctdm24xxp, pci, 1, 1, 1);
 MODULE_DEPEND(wctdm24xxp, dahdi, 1, 1, 1);
 MODULE_DEPEND(wctdm24xxp, dahdi_voicebus, 1, 1, 1);

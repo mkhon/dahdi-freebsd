@@ -1851,7 +1851,7 @@ static driver_t t1xxp_pci_driver = {
 
 static devclass_t t1xxp_devclass;
 
-DRIVER_MODULE(t1xxp, pci, t1xxp_pci_driver, t1xxp_devclass, 0, 0);
+DAHDI_DRIVER_MODULE(t1xxp, pci, t1xxp_pci_driver, t1xxp_devclass, 0, 0);
 MODULE_DEPEND(t1xxp, pci, 1, 1, 1);
 MODULE_DEPEND(t1xxp, dahdi, 1, 1, 1);
 #else /* !__FreeBSD__ */

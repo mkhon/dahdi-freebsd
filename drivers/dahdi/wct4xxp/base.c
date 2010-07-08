@@ -4668,7 +4668,7 @@ static driver_t t4_pci_driver = {
 
 static devclass_t t4_devclass;
 
-DRIVER_MODULE(wct4xxp, pci, t4_pci_driver, t4_devclass, 0, 0);
+DAHDI_DRIVER_MODULE(wct4xxp, pci, t4_pci_driver, t4_devclass, 0, 0);
 MODULE_DEPEND(wct4xxp, pci, 1, 1, 1);
 MODULE_DEPEND(wct4xxp, dahdi, 1, 1, 1);
 MODULE_DEPEND(wct4xxp, firmware, 1, 1, 1);

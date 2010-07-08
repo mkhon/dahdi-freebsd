@@ -1324,7 +1324,7 @@ static driver_t wcfxo_pci_driver = {
 
 static devclass_t wcfxo_devclass;
 
-DRIVER_MODULE(wcfxo, pci, wcfxo_pci_driver, wcfxo_devclass, 0, 0);
+DAHDI_DRIVER_MODULE(wcfxo, pci, wcfxo_pci_driver, wcfxo_devclass, 0, 0);
 MODULE_DEPEND(wcfxo, pci, 1, 1, 1);
 MODULE_DEPEND(wcfxo, dahdi, 1, 1, 1);
 #else /* !__FreeBSD__ */

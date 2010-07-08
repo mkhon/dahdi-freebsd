@@ -3079,7 +3079,7 @@ static driver_t wctdm_pci_driver = {
 
 static devclass_t wctdm_devclass;
 
-DRIVER_MODULE(wctdm, pci, wctdm_pci_driver, wctdm_devclass, 0, 0);
+DAHDI_DRIVER_MODULE(wctdm, pci, wctdm_pci_driver, wctdm_devclass, 0, 0);
 MODULE_DEPEND(wctdm, pci, 1, 1, 1);
 MODULE_DEPEND(wctdm, dahdi, 1, 1, 1);
 #else /* !__FreeBSD__ */

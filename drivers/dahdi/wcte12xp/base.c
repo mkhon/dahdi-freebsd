@@ -2074,7 +2074,7 @@ te12xp_init(void)
 	cmd_cache = uma_zcreate("wcte12xp", sizeof(struct command),
 	    NULL, NULL, NULL, NULL, 0, 0);
 	if (cmd_cache == NULL) {
-		printf("wcte12xp: can not allocate UMA zone\n");
+		printf("%s: can not allocate UMA zone\n", THIS_MODULE->name);
 		return (ENXIO);
 	}
 
@@ -2116,7 +2116,7 @@ static driver_t te12xp_pci_driver = {
 
 static devclass_t te12xp_devclass;
 
-DRIVER_MODULE(te12xp, pci, te12xp_pci_driver, te12xp_devclass, te12xp_modevent, 0);
+DAHDI_DRIVER_MODULE(te12xp, pci, te12xp_pci_driver, te12xp_devclass, te12xp_modevent, 0);
 MODULE_DEPEND(te12xp, pci, 1, 1, 1);
 MODULE_DEPEND(te12xp, dahdi, 1, 1, 1);
 MODULE_DEPEND(te12xp, dahdi_voicebus, 1, 1, 1);

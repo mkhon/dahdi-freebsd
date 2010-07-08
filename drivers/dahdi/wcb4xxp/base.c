@@ -3097,7 +3097,7 @@ static driver_t b4xxp_pci_driver = {
 
 static devclass_t b4xxp_devclass;
 
-DRIVER_MODULE(wcb4xxp, pci, b4xxp_pci_driver, b4xxp_devclass, 0, 0);
+DAHDI_DRIVER_MODULE(wcb4xxp, pci, b4xxp_pci_driver, b4xxp_devclass, 0, 0);
 MODULE_DEPEND(wcb4xxp, pci, 1, 1, 1);
 MODULE_DEPEND(wcb4xxp, dahdi, 1, 1, 1);
 

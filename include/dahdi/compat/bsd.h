@@ -336,9 +336,16 @@ extern struct module _this_module;
 
 #define THIS_MODULE (&_this_module)
 
+#define DAHDI_MODULE(name)				\
+	struct module _this_module = { #name }
+
 #define DAHDI_DEV_MODULE(name, evh, arg)		\
 	DEV_MODULE(name, evh, arg);			\
-	struct module _this_module = { #name }
+	DAHDI_MODULE(name)
+
+#define DAHDI_DRIVER_MODULE(name, busname, driver, devclass, evh, arg)	\
+	DRIVER_MODULE(name, busname, driver, devclass, evh, arg);	\
+	DAHDI_MODULE(name)
 
 int request_module(const char *fmt, ...);
 
