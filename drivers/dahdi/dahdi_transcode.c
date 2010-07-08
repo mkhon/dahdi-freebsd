@@ -175,7 +175,7 @@ static int dahdi_tc_open(struct inode *inode, struct file *file)
 	 * responsible for taking a reference out on this module before
 	 * calling this function. */
 	module_put(original_fops->owner);
-#endif
+#endif /* !__FreeBSD__ */
 	return 0;
 }
 
@@ -308,7 +308,7 @@ static long dahdi_tc_allocate(struct file *file, unsigned long data)
 		module_put(file->f_op->owner);
 		file->f_op = &chan->parent->fops;
 	}
-#endif
+#endif /* !__FreeBSD__ */
 
 	if (file->f_flags & O_NONBLOCK) {
 		dahdi_tc_set_nonblock(chan);
@@ -363,7 +363,7 @@ static ssize_t dahdi_tc_write(FOP_WRITE_ARGS_DECL)
 #if defined(__FreeBSD__)
 		if (chan->parent->fops.write)
 			return chan->parent->fops.write(FOP_WRITE_ARGS);
-#endif
+#endif /* __FreeBSD__ */
 		/* file->private_data will not be NULL if DAHDI_TC_ALLOCATE was
 		 * called, and therefore indicates that the transcoder driver
 		 * did not export a read function. */
@@ -384,7 +384,7 @@ static ssize_t dahdi_tc_read(FOP_READ_ARGS_DECL)
 #if defined(__FreeBSD__)
 		if (chan->parent->fops.read)
 			return chan->parent->fops.read(FOP_READ_ARGS);
-#endif
+#endif /* __FreeBSD__ */
 		/* file->private_data will not be NULL if DAHDI_TC_ALLOCATE was
 		 * called, and therefore indicates that the transcoder driver
 		 * did not export a write function. */
@@ -507,7 +507,7 @@ static void dahdi_transcode_cleanup(void)
 SYSCTL_NODE(_dahdi, OID_AUTO, transcode, CTLFLAG_RW, 0, "DAHDI Transcoder Support");
 #define MODULE_PARAM_PREFIX "dahdi.transcode"
 #define MODULE_PARAM_PARENT _dahdi_transcode
-#endif
+#endif /* __FreeBSD__ */
 
 module_param(debug, int, S_IRUGO | S_IWUSR);
 
@@ -541,4 +541,4 @@ MODULE_LICENSE("GPL");
 
 module_init(dahdi_transcode_init);
 module_exit(dahdi_transcode_cleanup);
-#endif
+#endif /* !__FreeBSD__ */
