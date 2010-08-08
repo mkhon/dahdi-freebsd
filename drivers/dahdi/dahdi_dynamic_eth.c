@@ -29,8 +29,6 @@
 #include <sys/module.h>
 
 #include "ng_dahdi_netdev.h"
-
-#define ETH_ALEN ETHER_ADDR_LEN
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>

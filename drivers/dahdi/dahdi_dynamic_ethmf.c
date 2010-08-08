@@ -93,7 +93,6 @@ static atomic_t shutdown = ATOMIC_INIT(0);
 static char g_padding[ETHMF_MAX_CHANNELS * 8];
 static char g_padding_ignore[8];
 
-#define ETH_ALEN ETHER_ADDR_LEN
 #define crc32_le(crc, data, len)	crc32_raw(data, len, crc)
 #else
 static struct sk_buff_head skbs;
