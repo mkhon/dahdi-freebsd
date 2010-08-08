@@ -22,11 +22,21 @@
  */
 #define cpu_to_le32(x)	htole32(x)
 #define le32_to_cpu(x)	le32toh(x)
+#define cpu_to_be32(x)	htobe32(x)
+
 #define cpu_to_le16(x)	htole16(x)
+#define le16_to_cpu(x)	le16toh(x)
+#define cpu_to_be16(x)	htobe16(x)
+#define be16_to_cpu(x)	be16toh(x)
+
+#define __be16  u_int16_t
+#define __be32  u_int32_t
 
 #if _BYTE_ORDER == _LITTLE_ENDIAN
+#define __LITTLE_ENDIAN_BITFIELD
 #define __constant_htons(x)	((uint16_t) (((uint16_t) (x)) << 8 | ((uint16_t) (x)) >> 8))
-#else
+#elif _BYTE_ORDER == _BIG_ENDIAN
+#define __BIG_ENDIAN_BITFIELD
 #define __constant_htons(x)	(x)
 #endif
 
@@ -205,6 +215,7 @@ struct completion {
 #define INIT_COMPLETION(c)
 void init_completion(struct completion *c);
 void destroy_completion(struct completion *c);
+void wait_for_completion(struct completion *c);
 int wait_for_completion_timeout(struct completion *c, unsigned long timeout);
 void complete(struct completion *c);
 
@@ -524,5 +535,7 @@ struct file_operations {
 	unsigned int (*poll)(struct file *file, struct poll_table_struct *wait_table);
 	int (*mmap)(struct file *file, struct vm_area_struct *vma);
 };
+
+#define ETH_ALEN ETHER_ADDR_LEN
 
 #endif /* _DAHDI_COMPAT_BSD_H_ */

@@ -182,6 +182,14 @@ destroy_completion(struct completion *c)
 	mtx_destroy(&c->lock);
 }
 
+void
+wait_for_completion(struct completion *c)
+{
+	mtx_lock(&c->lock);
+	cv_wait(&c->cv, &c->lock);
+	mtx_unlock(&c->lock);
+}
+
 int
 wait_for_completion_timeout(struct completion *c, unsigned long timeout)
 {
