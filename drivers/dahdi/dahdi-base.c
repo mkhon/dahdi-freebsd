@@ -9310,7 +9310,20 @@ DAHDI_DEV_MODULE(dahdi, dahdi_modevent, NULL);
 MODULE_VERSION(dahdi, 1);
 MODULE_DEPEND(dahdi, firmware, 1, 1, 1);
 #ifdef CONFIG_DAHDI_CORE_TIMER
-DEV_MODULE(dahdi_dummy, NULL, NULL);
+static int
+dahdi_dummy_modevent(module_t mod, int cmd, void *arg)
+{
+	switch (cmd) {
+	case MOD_LOAD:
+	case MOD_UNLOAD:
+		return 0;
+	default:
+		/* we only understand load/unload*/
+		return EOPNOTSUPP;
+	}
+}
+
+DEV_MODULE(dahdi_dummy, dahdi_dummy_modevent, NULL);
 MODULE_VERSION(dahdi_dummy, 1);
 #endif
 #else /* !__FreeBSD__ */
