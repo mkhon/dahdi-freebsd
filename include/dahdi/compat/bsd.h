@@ -151,6 +151,10 @@ typedef struct mtx spinlock_t;
  */
 typedef struct sx rwlock_t;
 
+#if defined(SX_ADAPTIVESPIN) && !defined(SX_NOADAPTIVE)
+#define SX_NOADAPTIVE SX_ADAPTIVESPIN
+#endif
+
 #define DEFINE_RWLOCK(name)				\
 	struct sx name;					\
 	SX_SYSINIT(name, &name, #name)
