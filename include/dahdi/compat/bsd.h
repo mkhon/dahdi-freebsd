@@ -1,7 +1,9 @@
 #ifndef _DAHDI_COMPAT_BSD_H_
 #define _DAHDI_COMPAT_BSD_H_
 
+#include <sys/param.h>
 #include <sys/callout.h>
+#include <sys/conf.h>		/* D_VERSION */
 #include <sys/condvar.h>
 #include <sys/endian.h>
 #include <sys/lock.h>
@@ -13,6 +15,8 @@
 #include <sys/taskqueue.h>
 #include <machine/atomic.h>
 #include <machine/bus.h>
+
+#define D_VERSION_LINEAR	((D_VERSION & 0xffff) | ((D_VERSION >> 16) & 0xff) | ((D_VERSION >> 24) & 0xff))
 
 #define LINUX_VERSION_CODE	KERNEL_VERSION(2, 6, 32)
 #define KERNEL_VERSION(x, y, z)	(((x) << 16) + ((y) << 8) + (z))
@@ -515,7 +519,11 @@ struct file {
 };
 
 struct vm_area_struct {
+#if D_VERSION_LINEAR >= 0x20091217
+	vm_ooffset_t offset;
+#else
 	vm_offset_t offset;
+#endif
 	vm_paddr_t *paddr;
 	int nprot;
 };

@@ -9051,7 +9051,11 @@ dahdi_device_poll(struct cdev *dev, int events, struct thread *td)
 }
 
 static int
+#if D_VERSION_LINEAR >= 0x20091217
+dahdi_device_mmap(struct cdev *dev, vm_ooffset_t offset, vm_paddr_t *paddr, int nprot, vm_memattr_t *memattr)
+#else
 dahdi_device_mmap(struct cdev *dev, vm_offset_t offset, vm_paddr_t *paddr, int nprot)
+#endif
 {
 	int res;
 	struct file file;
