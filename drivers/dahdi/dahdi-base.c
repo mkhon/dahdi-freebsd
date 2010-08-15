@@ -6473,7 +6473,7 @@ int dahdi_unregister(struct dahdi_span *span)
 */
 
 #define ZEROTRAP    /* turn on the trap as per the MIL-STD */
-#define BIAS 0x84   /* define the add-in bias for 16 bit samples */
+#define DAHDI_BIAS 0x84   /* define the add-in bias for 16 bit samples */
 #define CLIP 32635
 
 #ifdef CONFIG_CALC_XLAW
@@ -6508,7 +6508,7 @@ __dahdi_lineartoulaw(short sample)
   if (sample > CLIP) sample = CLIP;             /* clip the magnitude */
 
   /* Convert from 16 bit linear to ulaw. */
-  sample = sample + BIAS;
+  sample = sample + DAHDI_BIAS;
   exponent = exp_lut[(sample >> 7) & 0xFF];
   mantissa = (sample >> (exponent + 3)) & 0x0F;
   ulawbyte = ~(sign | (exponent << 4) | mantissa);

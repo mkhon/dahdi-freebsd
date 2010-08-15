@@ -367,8 +367,8 @@ static void __ztdynamic_run(void)
 
 	list_for_each_entry_rcu(drv, &driver_list, list) {
 		/* Flush any traffic still pending in the driver */
-		if (drv->flush) {
-			drv->flush();
+		if (drv->dynamic_flush) {
+			drv->dynamic_flush();
 		}
 	}
 	rcu_read_unlock();

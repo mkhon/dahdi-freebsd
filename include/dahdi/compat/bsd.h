@@ -84,6 +84,7 @@ typedef void *wait_queue_head_t;
 #define set_bit(v, p)	atomic_set_long((p), (1 << ((v) & 0x1f)))
 #define clear_bit(v, p)	atomic_clear_long((p), (1 << ((v) & 0x1f)))
 
+#if defined(__i386__) || defined(__x86_64__)
 #define ADDR (*(volatile long *) addr)
 
 #ifdef SMP
@@ -92,7 +93,8 @@ typedef void *wait_queue_head_t;
 #define	LOCK_PREFIX ""
 #endif /* SMP */
 
-static __inline int test_and_set_bit(int nr, volatile void * addr)
+static __inline int
+test_and_set_bit(int nr, volatile void *addr)
 {
 	int oldbit;
 
@@ -103,7 +105,8 @@ static __inline int test_and_set_bit(int nr, volatile void * addr)
 	return oldbit;
 }
 
-static __inline__ int test_and_clear_bit(int nr, volatile void * addr)
+static __inline__
+int test_and_clear_bit(int nr, volatile void *addr)
 {
 	int oldbit;
 
@@ -113,6 +116,29 @@ static __inline__ int test_and_clear_bit(int nr, volatile void * addr)
 		:"Ir" (nr) : "memory");
 	return oldbit;
 }
+#else
+static __inline int
+test_and_set_bit(int nr, volatile void *addr)
+{
+	int val;
+
+	do {
+		val = *(volatile int *) addr;
+	} while (atomic_cmpset_int(addr, val, val | (1 << nr)) == 0);
+	return (val & (1 << nr));
+}
+
+static __inline__
+int test_and_clear_bit(int nr, volatile void *addr)
+{
+	int val;
+
+	do {
+		val = *(volatile int *) addr;
+	} while (atomic_cmpset_int(addr, val, val & ~(1 << nr)) == 0);
+	return (val & (1 << nr));
+}
+#endif
 
 /*
  * Atomic API
