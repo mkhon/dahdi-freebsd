@@ -22,15 +22,25 @@ SUBDIR+=\
 	dahdi_echocan_sec\
 	dahdi_echocan_sec2
 
-# HW drivers
+# FXO/FXS analog and hybrid cards
 SUBDIR+=\
-	wcb4xxp\
 	wcfxo\
-	wct4xxp\
 	wctdm\
-	wctdm24xxp\
+	wctdm24xxp
+
+# E1/T1 cards
+SUBDIR+=\
+	wct4xxp\
 	wcte11xp\
 	wcte12xp
+
+# ISDN cards
+SUBDIR+=\
+	wcb4xxp
+
+# Transcoding cards
+#SUBDIR+=\
+#	wctc4xxp
 
 # firmware drivers
 SUBDIR+=\
