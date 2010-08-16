@@ -526,7 +526,7 @@ void
 dahdi_dma_map_addr(void *arg, bus_dma_segment_t *segs, int nseg, int error);
 
 int
-dahdi_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr);
+dahdi_dma_allocate(device_t dev, int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr);
 
 void
 dahdi_dma_free(bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr);

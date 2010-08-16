@@ -2987,12 +2987,12 @@ wctdm_device_attach(device_t dev)
 
 	/* allocate enough memory for two zt chunks.  Each sample uses
 	   32 bits.  Allocate an extra set just for control too */
-	res = dahdi_dma_allocate(DAHDI_MAX_CHUNKSIZE * 2 * 2 * 4, &wc->write_dma_tag, &wc->write_dma_map,
+	res = dahdi_dma_allocate(wc->dev->dev, DAHDI_MAX_CHUNKSIZE * 2 * 2 * 4, &wc->write_dma_tag, &wc->write_dma_map,
 	    __DECONST(void **, &wc->writechunk), &wc->writedma);
 	if (res)
 		goto err;
 
-	res = dahdi_dma_allocate(DAHDI_MAX_CHUNKSIZE * 2 * 2 * 4, &wc->read_dma_tag, &wc->read_dma_map,
+	res = dahdi_dma_allocate(wc->dev->dev, DAHDI_MAX_CHUNKSIZE * 2 * 2 * 4, &wc->read_dma_tag, &wc->read_dma_map,
 	    __DECONST(void **, &wc->readchunk), &wc->readdma);
 	if (res)
 		goto err;

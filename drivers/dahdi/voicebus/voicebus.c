@@ -121,16 +121,14 @@
 #define DMA_FROM_DEVICE	0
 #define DMA_TO_DEVICE	1
 
-static bus_dma_tag_t vbb_dma_tag;
-
 struct vbb *
-voicebus_alloc(int malloc_flags)
+voicebus_alloc(struct voicebus *vb, int malloc_flags)
 {
 	struct vbb *vbb;
 	int res;
 	bus_dmamap_t dma_map;
 
-	res = bus_dmamem_alloc(vbb_dma_tag, (void **) &vbb, BUS_DMA_NOWAIT | BUS_DMA_ZERO, &dma_map);
+	res = bus_dmamem_alloc(vb->dma_tag, (void **) &vbb, BUS_DMA_NOWAIT | BUS_DMA_ZERO, &dma_map);
 	if (res)
 		return NULL;
 	vbb->dma_map = dma_map;
@@ -139,20 +137,20 @@ voicebus_alloc(int malloc_flags)
 }
 
 void
-voicebus_free(struct vbb *vbb)
+voicebus_free(struct voicebus *vb, struct vbb *vbb)
 {
 	bus_dmamap_t dma_map = vbb->dma_map;
 
-	bus_dmamem_free(vbb_dma_tag, vbb, dma_map);
-	bus_dmamap_destroy(vbb_dma_tag, dma_map);
+	bus_dmamem_free(vb->dma_tag, vbb, dma_map);
+	bus_dmamap_destroy(vb->dma_tag, dma_map);
 }
 
 static __le32
-voicebus_map(struct vbb *vbb, int direction)
+voicebus_map(struct voicebus *vb, struct vbb *vbb, int direction)
 {
 	int res;
 
-	res = bus_dmamap_load(vbb_dma_tag, vbb->dma_map, vbb->data, sizeof(vbb->data),
+	res = bus_dmamap_load(vb->dma_tag, vbb->dma_map, vbb->data, sizeof(vbb->data),
 	    dahdi_dma_map_addr, &vbb->paddr, 0);
 	if (res) {
 		if (printk_ratelimit())
@@ -163,9 +161,9 @@ voicebus_map(struct vbb *vbb, int direction)
 }
 
 static void
-voicebus_unmap(struct vbb *vbb, int direction)
+voicebus_unmap(struct voicebus *vb, struct vbb *vbb, int direction)
 {
-	bus_dmamap_unload(vbb_dma_tag, vbb->dma_map);
+	bus_dmamap_unload(vb->dma_tag, vbb->dma_map);
 }
 #else /* !__FreeBSD__ */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
@@ -175,28 +173,28 @@ struct kmem_cache *voicebus_vbb_cache;
 #endif
 
 struct vbb *
-voicebus_alloc(int malloc_flags)
+voicebus_alloc(struct voicebus *vb, int malloc_flags)
 {
 	return kmem_cache_alloc(voicebus_vbb_cache, malloc_flags);
 }
 EXPORT_SYMBOL(voicebus_alloc);
 
 void
-voicebus_free(struct vbb *vbb)
+voicebus_free(struct voicebus *vb, struct vbb *vbb)
 {
 	kmem_cache_free(voicebus_vbb_cache, vbb);
 }
 EXPORT_SYMBOL(voicebus_free);
 
 static __le32
-voicebus_map(struct vbb *vbb, int direction)
+voicebus_map(struct voicebus *vb, struct vbb *vbb, int direction)
 {
 	vbb->paddr = dma_map_single(&vb->pdev->dev, vbb->data, sizeof(vbb->data), direction);
 	return vbb->paddr;
 }
 
 static void
-voicebus_unmap(struct vbb *vbb, int direction)
+voicebus_unmap(struct voicebus *vb, struct vbb *vbb, int direction)
 {
 	dma_unmap_single(&vb->pdev->dev, vbb->paddr, VOICEBUS_SFRAME_SIZE, direction);
 }
@@ -296,7 +294,7 @@ vb_initialize_descriptors(struct voicebus *vb, struct voicebus_descriptor_list *
 	}
 
 #if defined(__FreeBSD__)
-	i = dahdi_dma_allocate((sizeof(*d) + dl->padding) * DRING_SIZE,
+	i = dahdi_dma_allocate(vb->pdev->dev, (sizeof(*d) + dl->padding) * DRING_SIZE,
 	    &dl->dma_tag, &dl->dma_map, (void **) &dl->desc, &dl->desc_dma);
 	if (i) {
 		return i;
@@ -365,7 +363,7 @@ vb_initialize_tx_descriptors(struct voicebus *vb)
 	}
 
 #if defined(__FreeBSD__)
-	i = dahdi_dma_allocate((sizeof(*d) + dl->padding) * DRING_SIZE,
+	i = dahdi_dma_allocate(vb->pdev->dev, (sizeof(*d) + dl->padding) * DRING_SIZE,
 	    &dl->dma_tag, &dl->dma_map, (void **) &dl->desc, &dl->desc_dma);
 	if (i) {
 		return i;
@@ -516,8 +514,8 @@ vb_cleanup_tx_descriptors(struct voicebus *vb)
 		d = vb_descriptor(dl, i);
 		if (d->buffer1 && (d->buffer1 != vb->idle_vbb_dma_addr)) {
 			WARN_ON(!dl->pending[i]);
-			voicebus_unmap(dl->pending[i], DMA_TO_DEVICE);
-			voicebus_free(dl->pending[i]);
+			voicebus_unmap(vb, dl->pending[i], DMA_TO_DEVICE);
+			voicebus_free(vb, dl->pending[i]);
 		}
 		if (!test_bit(VOICEBUS_NORMAL_MODE, &vb->flags)) {
 			d->buffer1 = 0;
@@ -554,10 +552,10 @@ vb_cleanup_rx_descriptors(struct voicebus *vb)
 	for (i = 0; i < DRING_SIZE; ++i) {
 		d = vb_descriptor(dl, i);
 		if (d->buffer1) {
-			voicebus_unmap(dl->pending[i], DMA_FROM_DEVICE);
+			voicebus_unmap(vb, dl->pending[i], DMA_FROM_DEVICE);
 			d->buffer1 = 0;
 			BUG_ON(!dl->pending[i]);
-			voicebus_free(dl->pending[i]);
+			voicebus_free(vb, dl->pending[i]);
 			dl->pending[i] = NULL;
 		}
 		d->des0 &= ~OWN_BIT;
@@ -776,13 +774,13 @@ vb_submit_rxb(struct voicebus *vb, struct vbb *vbb)
 	if (unlikely(d->buffer1)) {
 		/* Do not overwrite a buffer that is still in progress. */
 		WARN_ON(1);
-		voicebus_free(vbb);
+		voicebus_free(vb, vbb);
 		return -EBUSY;
 	}
 
 	dl->pending[tail] = vbb;
 	dl->tail = (++tail) & DRING_MASK;
-	d->buffer1 = voicebus_map(vbb, DMA_FROM_DEVICE);
+	d->buffer1 = voicebus_map(vb, vbb, DMA_FROM_DEVICE);
 	SET_OWNED(d); /* That's it until the hardware is done with it. */
 #if defined(__FreeBSD__)
 	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_PREWRITE);
@@ -804,12 +802,12 @@ int voicebus_transmit(struct voicebus *vb, struct vbb *vbb)
 
 #if defined(__FreeBSD__)
 	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_POSTREAD);
-	bus_dmamap_sync(vbb_dma_tag, vbb->dma_map, BUS_DMASYNC_PREWRITE);
+	bus_dmamap_sync(vb->dma_tag, vbb->dma_map, BUS_DMASYNC_PREWRITE);
 #endif
 	if (unlikely((d->buffer1 != vb->idle_vbb_dma_addr) && d->buffer1)) {
 		if (printk_ratelimit())
 			dev_warn(&vb->pdev->dev, "Dropping tx buffer buffer\n");
-		voicebus_free(vbb);
+		voicebus_free(vb, vbb);
 		/* Schedule the underrun handler to run here, since we'll need
 		 * to cleanup as best we can. */
 		schedule_work(&vb->underrun_work);
@@ -817,7 +815,7 @@ int voicebus_transmit(struct voicebus *vb, struct vbb *vbb)
 	}
 
 	dl->pending[dl->tail] = vbb;
-	d->buffer1 = voicebus_map(vbb, DMA_TO_DEVICE);
+	d->buffer1 = voicebus_map(vb, vbb, DMA_TO_DEVICE);
 	dl->tail = (++(dl->tail)) & DRING_MASK;
 	SET_OWNED(d); /* That's it until the hardware is done with it. */
 #if defined(__FreeBSD__)
@@ -857,7 +855,7 @@ static void setup_descriptors(struct voicebus *vb)
 	vb_setctl(vb, 0x0018, (u32)vb->rxd.desc_dma);
 
 	for (i = 0; i < DRING_SIZE; ++i) {
-		vbb = voicebus_alloc(GFP_KERNEL);
+		vbb = voicebus_alloc(vb, GFP_KERNEL);
 		if (unlikely(NULL == vbb))
 			BUG_ON(1);
 		list_add_tail(&vbb->entry, &buffers);
@@ -872,7 +870,7 @@ static void setup_descriptors(struct voicebus *vb)
 
 	if (test_bit(VOICEBUS_NORMAL_MODE, &vb->flags)) {
 		for (i = 0; i < vb->min_tx_buffer_count; ++i) {
-			vbb = voicebus_alloc(GFP_KERNEL);
+			vbb = voicebus_alloc(vb, GFP_KERNEL);
 			if (unlikely(NULL == vbb))
 				BUG_ON(1);
 			else
@@ -996,7 +994,7 @@ vb_get_completed_txb(struct voicebus *vb)
 		return NULL;
 
 	vbb = dl->pending[head];
-	voicebus_unmap(vbb, DMA_TO_DEVICE);
+	voicebus_unmap(vb, vbb, DMA_TO_DEVICE);
 	if (test_bit(VOICEBUS_NORMAL_MODE, &vb->flags)) {
 		d->buffer1 = vb->idle_vbb_dma_addr;
 		dl->pending[head] = vb->idle_vbb;
@@ -1031,7 +1029,7 @@ vb_get_completed_rxb(struct voicebus *vb, u32 *des0)
 		return NULL;
 
 	vbb = dl->pending[head];
-	voicebus_unmap(vbb, DMA_FROM_DEVICE);
+	voicebus_unmap(vb, vbb, DMA_FROM_DEVICE);
 	dl->head = (++head) & DRING_MASK;
 	d->buffer1 = 0;
 	atomic_dec(&dl->count);
@@ -1041,7 +1039,7 @@ vb_get_completed_rxb(struct voicebus *vb, u32 *des0)
 	*des0 = le32_to_cpu(d->des0);
 #if defined(__FreeBSD__)
 	bus_dmamap_sync(dl->dma_tag, dl->dma_map, BUS_DMASYNC_PREWRITE);
-	bus_dmamap_sync(vbb_dma_tag, vbb->dma_map, BUS_DMASYNC_POSTREAD);
+	bus_dmamap_sync(vb->dma_tag, vbb->dma_map, BUS_DMASYNC_POSTREAD);
 #endif
 	return vbb;
 }
@@ -1281,6 +1279,11 @@ voicebus_release(struct voicebus *vb)
 		bus_release_resource(vb->pdev->dev, SYS_RES_MEMORY, vb->mem_rid, vb->mem_res);
 		vb->mem_res = NULL;
 	}
+
+	if (vb->dma_tag != NULL) {
+		bus_dma_tag_destroy(vb->dma_tag);
+		vb->dma_tag = NULL;
+	}
 #else /* !__FreeBSD__ */
 	release_mem_region(pci_resource_start(vb->pdev, 1),
 		pci_resource_len(vb->pdev, 1));
@@ -1324,7 +1327,7 @@ vb_increase_latency(struct voicebus *vb, unsigned int increase,
 	/* Set the minimum latency in case we're restarted...we don't want to
 	 * wait for the buffer to grow to this depth again in that case. */
 	for (i = 0; i < increase; ++i) {
-		vbb = voicebus_alloc(GFP_ATOMIC);
+		vbb = voicebus_alloc(vb, GFP_ATOMIC);
 		WARN_ON(NULL == vbb);
 		if (likely(NULL != vbb))
 			list_add_tail(&vbb->entry, &local);
@@ -1563,7 +1566,7 @@ tx_error_exit:
 	while (!list_empty(&buffers)) {
 		vbb = list_entry(buffers.next, struct vbb, entry);
 		list_del(&vbb->entry);
-		voicebus_free(vbb);
+		voicebus_free(vb, vbb);
 	}
 	return;
 }
@@ -1754,6 +1757,14 @@ __voicebus_init(struct voicebus *vb, const char *board_name, int normal_mode)
 #endif
 
 #if defined(__FreeBSD__)
+	retval = bus_dma_tag_create(bus_get_dma_tag(vb->pdev->dev), 8, 0,
+	    BUS_SPACE_MAXADDR_32BIT, BUS_SPACE_MAXADDR, NULL, NULL,
+	    sizeof(struct vbb), 1, sizeof(struct vbb), BUS_DMA_ALLOCNOW, NULL, NULL, &vb->dma_tag);
+	if (retval) {
+		device_printf(vb->pdev->dev, "Can't allocate DMA tag for voicebus frames\n");
+		goto cleanup;
+	}
+
 	vb->mem_rid = PCIR_BAR(1);
 	vb->mem_res = bus_alloc_resource_any(vb->pdev->dev, SYS_RES_MEMORY, &vb->mem_rid, RF_ACTIVE);
 	if (vb->mem_res == NULL) {
@@ -1794,7 +1805,7 @@ __voicebus_init(struct voicebus *vb, const char *board_name, int normal_mode)
 #endif
 
 #if defined(__FreeBSD__)
-	retval = dahdi_dma_allocate(VOICEBUS_SFRAME_SIZE,
+	retval = dahdi_dma_allocate(vb->pdev->dev, VOICEBUS_SFRAME_SIZE,
 	    &vb->idle_vbb_dma_tag, &vb->idle_vbb_dma_map, (void **) &vb->idle_vbb, &vb->idle_vbb_dma_addr);
 	if (retval) {
 		dev_err(&vb->pdev->dev, "Can't allocate DMA memory\n");
@@ -1901,6 +1912,11 @@ cleanup:
 	if (vb->mem_res != NULL) {
 		bus_release_resource(vb->pdev->dev, SYS_RES_MEMORY, vb->mem_rid, vb->mem_res);
 		vb->mem_res = NULL;
+	}
+
+	if (vb->dma_tag != NULL) {
+		bus_dma_tag_destroy(vb->dma_tag);
+		vb->dma_tag = NULL;
 	}
 #else /* !__FreeBSD__ */
 	dma_free_coherent(&vb->pdev->dev, VOICEBUS_SFRAME_SIZE,
@@ -2017,15 +2033,7 @@ static int __init voicebus_module_init(void)
 {
 	int res;
 
-#if defined(__FreeBSD__)
-	res = bus_dma_tag_create(NULL, 8, 0,
-	    BUS_SPACE_MAXADDR_32BIT, BUS_SPACE_MAXADDR, NULL, NULL,
-	    sizeof(struct vbb), 1, sizeof(struct vbb), BUS_DMA_ALLOCNOW, NULL, NULL, &vbb_dma_tag);
-	if (res) {
-		printf("voicebus: Can't allocate DMA tag for voicebus frames\n");
-		return -res;
-	}
-#else /* !__FreeBSD__ */
+#if !defined(__FreeBSD__)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 23)
 	voicebus_vbb_cache = kmem_cache_create(THIS_MODULE->name,
 					 sizeof(struct vbb), 0,
@@ -2071,12 +2079,7 @@ static int __init voicebus_module_init(void)
 
 static void __exit voicebus_module_cleanup(void)
 {
-#if defined(__FreeBSD__)
-	if (vbb_dma_tag != NULL) {
-		bus_dma_tag_destroy(vbb_dma_tag);
-		vbb_dma_tag = NULL;
-	}
-#else
+#if !defined(__FreeBSD__)
 	kmem_cache_destroy(voicebus_vbb_cache);
 #endif
 	spin_lock_destroy(&loader_list_lock);

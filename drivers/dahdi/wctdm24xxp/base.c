@@ -2083,7 +2083,7 @@ static void handle_hx8_transmit(struct voicebus *vb, struct list_head *buffers)
 
 	list_for_each_entry_safe(vbb, n, buffers, entry) {
 		list_del(&vbb->entry);
-		voicebus_free(vbb);
+		voicebus_free(vb, vbb);
 	}
 }
 
@@ -4227,7 +4227,7 @@ static int hx8_send_command(struct wctdm *wc, const u8 *command,
 	if (count > MAX_COMMAND_LENGTH)
 		return -EINVAL;
 
-	vbb = voicebus_alloc(GFP_KERNEL);
+	vbb = voicebus_alloc(&wc->vb, GFP_KERNEL);
 	WARN_ON(!vbb);
 	if (!vbb)
 		return -ENOMEM;

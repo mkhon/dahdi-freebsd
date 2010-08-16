@@ -452,11 +452,11 @@ dahdi_dma_map_addr(void *arg, bus_dma_segment_t *segs, int nseg, int error)
 }
 
 int
-dahdi_dma_allocate(int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr)
+dahdi_dma_allocate(device_t dev, int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, uint32_t *ppaddr)
 {
 	int res;
 
-	res = bus_dma_tag_create(NULL, 8, 0,
+	res = bus_dma_tag_create(bus_get_dma_tag(dev), 8, 0,
 	    BUS_SPACE_MAXADDR_32BIT, BUS_SPACE_MAXADDR, NULL, NULL,
 	    size, 1, size, BUS_DMA_ALLOCNOW, NULL, NULL, ptag);
 	if (res)

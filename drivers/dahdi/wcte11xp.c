@@ -1768,12 +1768,12 @@ t1xxp_device_attach(device_t dev)
 	if (res)
 		goto err;
 
-	res = dahdi_dma_allocate(DAHDI_MAX_CHUNKSIZE * 32 * 2, &wc->write_dma_tag, &wc->write_dma_map,
+	res = dahdi_dma_allocate(wc->dev->dev, DAHDI_MAX_CHUNKSIZE * 32 * 2, &wc->write_dma_tag, &wc->write_dma_map,
 	    __DECONST(void **, &wc->writechunk), &wc->writedma);
 	if (res)
 		goto err;
 
-	res = dahdi_dma_allocate(DAHDI_MAX_CHUNKSIZE * 32 * 2, &wc->read_dma_tag, &wc->read_dma_map,
+	res = dahdi_dma_allocate(wc->dev->dev, DAHDI_MAX_CHUNKSIZE * 32 * 2, &wc->read_dma_tag, &wc->read_dma_map,
 	    __DECONST(void **, &wc->readchunk), &wc->readdma);
 	if (res)
 		goto err;

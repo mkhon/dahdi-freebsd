@@ -3382,12 +3382,12 @@ static int t4_allocate_buffers(struct t4 *wc, int numbufs)
 	bus_dmamap_t    write_dma_map;
 
 	/* allocate DMA resources */
-	res = dahdi_dma_allocate(numbufs * T4_BASE_SIZE, &write_dma_tag, &write_dma_map,
+	res = dahdi_dma_allocate(wc->dev->dev, numbufs * T4_BASE_SIZE, &write_dma_tag, &write_dma_map,
 	    &writechunk, &writedma);
 	if (res)
 		return -res;
 
-	res = dahdi_dma_allocate(numbufs * T4_BASE_SIZE, &read_dma_tag, &read_dma_map,
+	res = dahdi_dma_allocate(wc->dev->dev, numbufs * T4_BASE_SIZE, &read_dma_tag, &read_dma_map,
 	    &readchunk, &readdma);
 	if (res) {
 		dahdi_dma_free(&write_dma_tag, &write_dma_map, &writechunk, &writedma);
