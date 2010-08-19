@@ -314,11 +314,24 @@ device_rlprintf(int pps, device_t dev, const char *fmt, ...)
 
 #define might_sleep()
 
-#define WARN_ON(cond)					\
-	do {						\
-		if (cond)				\
-			printf("WARN_ON: " #cond "\n");	\
-	} while (0)
+#define WARN_ON(condition)				\
+({							\
+	int __ret_warn_on = !!(condition);		\
+	if (unlikely(__ret_warn_on))			\
+		printf("WARN_ON: " #condition "\n");	\
+	unlikely(__ret_warn_on);			\
+})
+
+#define WARN_ON_ONCE(condition) ({			\
+	static int __warned;				\
+	int __ret_warn_once = !!(condition);		\
+							\
+	if (unlikely(__ret_warn_once))			\
+		if (WARN_ON(!__warned))			\
+			__warned = 1;			\
+	unlikely(__ret_warn_once);			\
+})
+
 #define BUG_ON(cond)					\
 	do {						\
 		if (cond)				\
