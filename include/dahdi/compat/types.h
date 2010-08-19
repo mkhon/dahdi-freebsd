@@ -12,7 +12,7 @@ typedef int32_t __s32;
 typedef uint32_t __u32;
 typedef uint32_t u32;
 
-typedef int16_t __le16;
-typedef int32_t __le32;
+typedef __u16 __le16;
+typedef __u32 __le32;
 
 #endif /* _DAHDI_COMPAT_TYPES_H_ */
