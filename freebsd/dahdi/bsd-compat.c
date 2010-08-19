@@ -460,13 +460,13 @@ dahdi_dma_allocate(device_t dev, int size, bus_dma_tag_t *ptag, bus_dmamap_t *pm
 	    BUS_SPACE_MAXADDR_32BIT, BUS_SPACE_MAXADDR, NULL, NULL,
 	    size, 1, size, BUS_DMA_ALLOCNOW, NULL, NULL, ptag);
 	if (res)
-		return (res);
+		return (-res);
 
 	res = bus_dmamem_alloc(*ptag, pvaddr, BUS_DMA_NOWAIT | BUS_DMA_ZERO, pmap);
 	if (res) {
 		bus_dma_tag_destroy(*ptag);
 		*ptag = NULL;
-		return (res);
+		return (-res);
 	}
 
 	res = bus_dmamap_load(*ptag, *pmap, *pvaddr, size, dahdi_dma_map_addr, ppaddr, 0);
@@ -479,7 +479,7 @@ dahdi_dma_allocate(device_t dev, int size, bus_dma_tag_t *ptag, bus_dmamap_t *pm
 
 		bus_dma_tag_destroy(*ptag);
 		*ptag = NULL;
-		return (res);
+		return (-res);
 	}
 
 	return (0);

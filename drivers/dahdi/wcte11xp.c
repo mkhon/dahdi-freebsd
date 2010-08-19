@@ -1702,7 +1702,7 @@ t1xxp_setup_intr(struct t1 *wc)
 	     wc->dev->dev, SYS_RES_IRQ, &wc->irq_rid, RF_SHAREABLE | RF_ACTIVE);
 	if (wc->irq_res == NULL) {
 		device_printf(wc->dev->dev, "Can't allocate irq resource\n");
-		return (ENXIO);
+		return (-ENXIO);
 	}
 
 	error = bus_setup_intr(
@@ -1710,7 +1710,7 @@ t1xxp_setup_intr(struct t1 *wc)
 	    t1xxp_interrupt, NULL, wc, &wc->irq_handle);
 	if (error) {
 		device_printf(wc->dev->dev, "Can't setup interrupt handler (error %d)\n", error);
-		return (ENXIO);
+		return (-ENXIO);
 	}
 
 	return (0);
@@ -1757,7 +1757,7 @@ t1xxp_device_attach(device_t dev)
 	wc->io_res = bus_alloc_resource_any(dev, SYS_RES_IOPORT, &wc->io_rid, RF_ACTIVE);
 	if (wc->io_res == NULL) {
 		device_printf(dev, "Can't allocate IO resource\n");
-		res = ENXIO;
+		res = -ENXIO;
 		goto err;
 	}
 
@@ -1797,7 +1797,7 @@ t1xxp_device_attach(device_t dev)
 
 	/* Misc. software stuff */
 	if (t1xxp_software_init(wc) < 0) {
-		res = ENXIO;
+		res = -ENXIO;
 		goto err;
 	}
 
@@ -1808,7 +1808,7 @@ err:
 	/* release resources */
 	t1xxp_release_resources(wc);
 	spin_lock_destroy(&wc->lock);
-	return (res);
+	return (-res);
 }
 
 static int

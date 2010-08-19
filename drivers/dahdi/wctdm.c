@@ -2908,7 +2908,7 @@ wctdm_setup_intr(struct wctdm *wc)
 	     wc->dev->dev, SYS_RES_IRQ, &wc->irq_rid, RF_SHAREABLE | RF_ACTIVE);
 	if (wc->irq_res == NULL) {
 		device_printf(wc->dev->dev, "Can't allocate irq resource\n");
-		return (ENXIO);
+		return (-ENXIO);
 	}
 
 	error = bus_setup_intr(
@@ -2916,7 +2916,7 @@ wctdm_setup_intr(struct wctdm *wc)
 	    wctdm_interrupt, NULL, wc, &wc->irq_handle);
 	if (error) {
 		device_printf(wc->dev->dev, "Can't setup interrupt handler (error %d)\n", error);
-		return (ENXIO);
+		return (-ENXIO);
 	}
 
 	return (0);
@@ -3000,12 +3000,12 @@ wctdm_device_attach(device_t dev)
 	if (wctdm_initialize(wc) < 0) {
 		printk(KERN_NOTICE "wctdm: Unable to intialize FXS\n");
 
-		res = ENXIO;
+		res = -ENXIO;
 		goto err;
 	}
 
 	if (wctdm_hardware_init(wc)) {
-		res = ENXIO;
+		res = -ENXIO;
 		goto err;
 	}
 
@@ -3037,7 +3037,7 @@ err:
 
 	/* release resources */
 	wctdm_release_resources(wc);
-	return (res);
+	return (-res);
 }
 
 static int

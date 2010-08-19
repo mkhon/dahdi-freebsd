@@ -1165,7 +1165,7 @@ wcfxo_setup_intr(struct wcfxo *wc)
 	     wc->dev->dev, SYS_RES_IRQ, &wc->irq_rid, RF_SHAREABLE | RF_ACTIVE);
 	if (wc->irq_res == NULL) {
 		device_printf(wc->dev->dev, "Can't allocate irq resource\n");
-		return (ENXIO);
+		return (-ENXIO);
 	}
 
 	error = bus_setup_intr(
@@ -1173,7 +1173,7 @@ wcfxo_setup_intr(struct wcfxo *wc)
 	    wcfxo_interrupt, NULL, wc, &wc->irq_handle);
 	if (error) {
 		device_printf(wc->dev->dev, "Can't setup interrupt handler (error %d)\n", error);
-		return (ENXIO);
+		return (-ENXIO);
 	}
 
 	return (0);
@@ -1249,7 +1249,7 @@ wcfxo_device_attach(device_t dev)
 		goto err;
 
 	if (wcfxo_initialize(wc) < 0) {
-		res = ENXIO;
+		res = -ENXIO;
 		goto err;
 	}
 
@@ -1264,7 +1264,7 @@ wcfxo_device_attach(device_t dev)
 	/* initialize DAA (after it's started) */
 	if (wcfxo_init_daa(wc)) {
 		printk(KERN_NOTICE "Failed to initailize DAA, giving up...\n");
-		res = ENXIO;
+		res = -ENXIO;
 		goto err;
 	}
 	wcfxo_set_daa_mode(wc);
@@ -1283,7 +1283,7 @@ err:
 
 	/* release resources */
 	wcfxo_release_resources(wc);
-	return (res);
+	return (-res);
 }
 
 static int

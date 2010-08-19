@@ -276,7 +276,7 @@ vb_initialize_descriptors(struct voicebus *vb, struct voicebus_descriptor_list *
 	if ((cache_line_size = pci_read_config(vb->pdev->dev, 0x0c, 1)) == 0) {
 		dev_err(&vb->pdev->dev, "Failed read of cache line "
 			"size from PCI configuration space.\n");
-		return EIO;
+		return -EIO;
 	}
 #else /* !__FreeBSD__ */
 	if (pci_read_config_byte(vb->pdev, 0x0c, &cache_line_size)) {
@@ -1769,7 +1769,7 @@ __voicebus_init(struct voicebus *vb, const char *board_name, int normal_mode)
 	vb->mem_res = bus_alloc_resource_any(vb->pdev->dev, SYS_RES_MEMORY, &vb->mem_rid, RF_ACTIVE);
 	if (vb->mem_res == NULL) {
 		device_printf(vb->pdev->dev, "Can't allocate memory resource\n");
-		retval = ENXIO;
+		retval = -ENXIO;
 		goto cleanup;
 	}
 #else /* !__FreeBSD__ */
@@ -1852,7 +1852,7 @@ __voicebus_init(struct voicebus *vb, const char *board_name, int normal_mode)
 	    vb->pdev->dev, SYS_RES_IRQ, &vb->irq_rid, RF_SHAREABLE | RF_ACTIVE);
 	if (vb->irq_res == NULL) {
 		dev_err(&vb->pdev->dev, "Can't allocate IRQ resource\n");
-		retval = ENXIO;
+		retval = -ENXIO;
 		goto cleanup;
 	}
 
