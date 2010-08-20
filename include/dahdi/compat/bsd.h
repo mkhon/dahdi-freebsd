@@ -76,6 +76,7 @@ typedef void *wait_queue_head_t;
 	}								\
 	__ret;								\
 })
+#define wait_event_interruptible(q, condition) wait_event_timeout(q, condition, 0)
 
 /*
  * Bit API
