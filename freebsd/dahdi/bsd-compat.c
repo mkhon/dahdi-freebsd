@@ -149,7 +149,7 @@ add_timer(struct timer_list *t)
 	mod_timer(t, t->expires);
 }
 
-void
+int
 del_timer_sync(struct timer_list *t)
 {
 	mtx_lock_spin(&t->mtx);
@@ -157,12 +157,14 @@ del_timer_sync(struct timer_list *t)
 	mtx_unlock_spin(&t->mtx);
 
 	mtx_destroy(&t->mtx);
+	return 0;
 }
 
-void
+int
 del_timer(struct timer_list *t)
 {
 	del_timer_sync(t);
+	return 0;
 }
 
 /*

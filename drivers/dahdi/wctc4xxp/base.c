@@ -4012,16 +4012,12 @@ static void __devexit wctc4xxp_remove_one(struct pci_dev *pdev)
 #endif
 
 	set_bit(DTE_SHUTDOWN, &wc->flags);
-#if !defined(__FreeBSD__)
 	if (del_timer_sync(&wc->watchdog))
-#endif
 		del_timer_sync(&wc->watchdog);
 
 	/* This should already be stopped, but it doesn't hurt to make sure. */
 	clear_bit(DTE_POLLING, &wc->flags);
-#if !defined(__FreeBSD__)
 	if (del_timer_sync(&wc->polling))
-#endif
 		del_timer_sync(&wc->polling);
 
 #ifndef WITHOUT_NETDEV
