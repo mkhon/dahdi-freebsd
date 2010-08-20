@@ -1686,7 +1686,7 @@ t1xxp_release_resources(struct t1 *wc)
 	dahdi_dma_free(&wc->write_dma_tag, &wc->write_dma_map, __DECONST(void **, &wc->writechunk), &wc->writedma);
 	dahdi_dma_free(&wc->read_dma_tag, &wc->read_dma_map, __DECONST(void **, &wc->readchunk), &wc->readdma);
 
-	/* release memory window */
+	/* release I/O range */
 	if (wc->io_res != NULL) {
 		bus_release_resource(wc->dev->dev, SYS_RES_IOPORT, wc->io_rid, wc->io_res);
 		wc->io_res = NULL;
