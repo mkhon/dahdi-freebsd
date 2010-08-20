@@ -39,8 +39,8 @@ SUBDIR+=\
 	wcb4xxp
 
 # Transcoding cards
-#SUBDIR+=\
-#	wctc4xxp
+SUBDIR+=\
+	wctc4xxp
 
 # firmware drivers
 SUBDIR+=\

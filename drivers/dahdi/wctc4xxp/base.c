@@ -20,6 +20,20 @@
  * this program for more details.
  */
 
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/bus.h>
+#include <sys/fcntl.h>
+#include <sys/firmware.h>
+#include <sys/module.h>
+#include <sys/rman.h>
+
+#include <dev/pci/pcivar.h>
+#include <dev/pci/pcireg.h>
+#include <machine/resource.h>
+#include <net/ethernet.h>
+#include <vm/uma.h>
+#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -38,14 +52,137 @@
 #include <linux/udp.h>
 #include <linux/etherdevice.h>
 #include <linux/timer.h>
+#endif /* !__FreeBSD__ */
 
 #include "dahdi/kernel.h"
 
+#if defined(__FreeBSD__)
+#define DMA_FROM_DEVICE	0
+#define DMA_TO_DEVICE	1
+
+#define ETH_P_IP ETHERTYPE_IP
+typedef __u16 __sum16;
+typedef unsigned gfp_t;
+
+struct ethhdr {
+	unsigned char	h_dest[ETH_ALEN];       /* destination eth addr */
+	unsigned char	h_source[ETH_ALEN];     /* source ether addr    */
+	__be16		h_proto;                /* packet type ID field */
+} __attribute__((packed));
+
+struct iphdr {
+#if defined(__LITTLE_ENDIAN_BITFIELD)
+	__u8	ihl:4,
+		version:4;
+#elif defined (__BIG_ENDIAN_BITFIELD)
+	__u8	version:4,
+		ihl:4;
+#else
+#error  "Please fix <asm/byteorder.h>"
+#endif
+	__u8	tos;
+	__be16	tot_len;
+	__be16	id;
+	__be16	frag_off;
+	__u8	ttl;
+	__u8	protocol;
+	__sum16	check;
+	__be32	saddr;
+	__be32	daddr;
+	/*The options start here. */
+};
+
+struct udphdr {
+	__be16	source;
+	__be16	dest;
+	__be16	len;
+	__sum16	check;
+};
+
+static inline unsigned short
+from32to16(unsigned int x)
+{
+	/* add up 16-bit and 16-bit for 16+c bit */
+	x = (x & 0xffff) + (x >> 16);
+	/* add up carry.. */
+	x = (x & 0xffff) + (x >> 16);
+	return x;
+}
+
+static unsigned int
+do_csum(const unsigned char *buff, int len)
+{
+	int odd, count;
+	unsigned int result = 0;
+
+	if (len <= 0)
+		goto out;
+	odd = 1 & (unsigned long) buff;
+	if (odd) {
+#ifdef __LITTLE_ENDIAN
+		result += (*buff << 8);
+#else
+		result = *buff;
+#endif
+		len--;
+		buff++;
+	}
+	count = len >> 1;		/* nr of 16-bit words.. */
+	if (count) {
+		if (2 & (unsigned long) buff) {
+			result += *(const unsigned short *) buff;
+			count--;
+			len -= 2;
+			buff += 2;
+		}
+		count >>= 1;		/* nr of 32-bit words.. */
+		if (count) {
+			unsigned int carry = 0;
+			do {
+				unsigned int w = *(const unsigned int *) buff;
+				count--;
+				buff += 4;
+				result += carry;
+				result += w;
+				carry = (w > result);
+			} while (count);
+			result += carry;
+			result = (result & 0xffff) + (result >> 16);
+		}
+		if (len & 2) {
+			result += *(const unsigned short *) buff;
+			buff += 2;
+		}
+	}
+	if (len & 1)
+#ifdef __LITTLE_ENDIAN
+		result += *buff;
+#else
+		result += (*buff << 8);
+#endif
+	result = from32to16(result);
+	if (odd)
+		result = ((result >> 8) & 0xff) | ((result & 0xff) << 8);
+out:
+	return result;
+}
+
+/*
+ *	This is a version of ip_compute_csum() optimized for IP headers,
+ *	which always checksum on 4 octet boundaries.
+ */
+static __sum16
+ip_fast_csum(const void *iph, unsigned int ihl)
+{
+	return (__sum16)~do_csum(iph, ihl*4);
+}
+#else /* !__FreeBSD__ */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 18)
 #include <asm/io.h>
 #else
 #include <linux/io.h>
 #endif
+#endif /* !__FreeBSD__ */
 
 /* COMPILE TIME OPTIONS =================================================== */
 
@@ -128,10 +265,20 @@ typedef	unsigned gfp_t;		/* Added in 2.6.14 */
 #define DTE_DEBUG_NETWORK_EARLY	(1 << 6) /* 64 */
 
 static int debug;
+#if defined(__FreeBSD__)
+static char mode[8];
+#else
 static char *mode;
+#endif
 
-static spinlock_t wctc4xxp_list_lock;
-static struct list_head wctc4xxp_list;
+#if !defined(__FreeBSD__)
+#ifdef DEFINE_SPINLOCK
+DEFINE_SPINLOCK(wctc4xxp_list_lock);
+#else
+static spinlock_t wctc4xxp_list_lock = SPIN_LOCK_UNLOCKED;
+#endif
+static _LIST_HEAD(wctc4xxp_list);
+#endif
 
 #define ETH_P_CSM_ENCAPS 0x889B
 
@@ -186,9 +333,9 @@ struct csm_encaps_hdr {
 
 #define CONTROL_PACKET_OPCODE  0x0001
 /* Control bits */
-#define LITTLE_ENDIAN	0x01
-#define SUPPRESS_ACK	0x40
-#define MESSAGE_PACKET	0x80
+#define CONTROL_LITTLE_ENDIAN	0x01
+#define CONTROL_SUPPRESS_ACK	0x40
+#define CONTROL_MESSAGE_PACKET	0x80
 
 #define SUPERVISOR_CHANNEL 0xffff
 
@@ -241,14 +388,34 @@ response_header(struct tcb *cmd)
 }
 
 static inline void
-initialize_cmd(struct tcb *cmd, unsigned long cmd_flags)
+initialize_cmd(struct tcb *cmd)
 {
 	INIT_LIST_HEAD(&cmd->node);
 	init_completion(&cmd->complete);
-	cmd->flags = cmd_flags;
 	spin_lock_init(&cmd->lock);
 }
 
+#if defined(__FreeBSD__)
+static uma_zone_t cmd_cache;
+
+static int
+cmd_cache_ctor(void *mem, int size, void *arg, int flags)
+{
+	struct tcb *cmd = (struct tcb *) mem;
+
+	initialize_cmd(cmd);
+	return (0);
+}
+
+static void
+cmd_cache_dtor(void *mem, int size, void *arg)
+{
+	struct tcb *cmd = (struct tcb *) mem;
+
+	destroy_completion(&cmd->complete);
+	spin_lock_destroy(&cmd->lock);
+}
+#else /* !__FreeBSD__ */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 /*! Used to allocate commands to submit to the dte. */
 kmem_cache_t *cmd_cache;
@@ -256,6 +423,7 @@ kmem_cache_t *cmd_cache;
 /*! Used to allocate commands to submit to the dte. */
 static struct kmem_cache *cmd_cache;
 #endif
+#endif /* !__FreeBSD__ */
 
 static inline struct tcb *
 __alloc_cmd(size_t size, gfp_t alloc_flags, unsigned long cmd_flags)
@@ -266,16 +434,29 @@ __alloc_cmd(size_t size, gfp_t alloc_flags, unsigned long cmd_flags)
 		return NULL;
 	if (size < MIN_PACKET_LEN)
 		size = MIN_PACKET_LEN;
+#if defined(__FreeBSD__)
+	cmd = uma_zalloc(cmd_cache, M_WAITOK | M_ZERO);
+#else
 	cmd = kmem_cache_alloc(cmd_cache, alloc_flags);
+#endif
 	if (likely(cmd)) {
+#if !defined(__FreeBSD__)
 		memset(cmd, 0, sizeof(*cmd));
+#endif
 		cmd->data = kzalloc(size, alloc_flags);
 		if (unlikely(!cmd->data)) {
+#if defined(__FreeBSD__)
+			uma_zfree(cmd_cache, cmd);
+#else
 			kmem_cache_free(cmd_cache, cmd);
+#endif
 			return NULL;
 		}
 		cmd->data_len = size;
-		initialize_cmd(cmd, cmd_flags);
+		cmd->flags = cmd_flags;
+#if !defined(__FreeBSD__)
+		initialize_cmd(cmd);
+#endif
 	}
 	return cmd;
 }
@@ -291,7 +472,11 @@ __free_cmd(struct tcb *cmd)
 {
 	if (cmd)
 		kfree(cmd->data);
+#if defined(__FreeBSD__)
+	uma_zfree(cmd_cache, cmd);
+#else
 	kmem_cache_free(cmd_cache, cmd);
+#endif
 	return;
 }
 
@@ -321,7 +506,7 @@ struct channel_pvt {
 	u32 timestamp;
 	struct {
 		u8 encoder:1;	/* If we're an encoder */
-	};
+	} e;
 	struct channel_stats stats;
 	struct list_head rx_queue; /* Transcoded packets for this channel. */
 };
@@ -329,8 +514,12 @@ struct channel_pvt {
 struct wcdte {
 	char board_name[40];
 	const char *variety;
+#if defined(__FreeBSD__)
+	struct pci_dev _dev;
+#else
 	int pos;
 	struct list_head node;
+#endif
 	spinlock_t reglock;
 	wait_queue_head_t waitq;
 	struct semaphore chansem;
@@ -358,7 +547,16 @@ struct wcdte {
 	 * physical interface to the transcoding engine.  */
 	struct pci_dev *pdev;
 	unsigned int   intmask;
+#if defined(__FreeBSD__)
+	struct resource *io_res;
+	int io_rid;
+
+	struct resource *irq_res;		/* resource for irq */
+	int irq_rid;
+	void *irq_handle;
+#else
 	unsigned long  iobase;
+#endif
 	struct wctc4xxp_descriptor_ring *txd;
 	struct wctc4xxp_descriptor_ring *rxd;
 
@@ -371,6 +569,7 @@ struct wcdte {
 	struct work_struct deferred_work;
 #endif
 
+#ifndef WITHOUT_NETDEV
 	/*
 	 * This section contains the members necessary for exporting the
 	 * network interface to the host system.  This is only used for
@@ -383,14 +582,16 @@ struct wcdte {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 24)
 	struct napi_struct napi;
 #endif
+#endif /* !WITHOUT_NETDEV */
 	struct timer_list watchdog;
 	atomic_t open_channels;
 	struct timer_list polling;
-#if HZ > 100
+#if defined(__FreeBSD__) || HZ > 100
 	unsigned long jiffies_at_last_poll;
 #endif
 };
 
+#ifndef WITHOUT_NETDEV
 #ifdef HAVE_NETDEV_PRIV
 struct wcdte_netdev_priv {
 	struct wcdte *wc;
@@ -408,7 +609,7 @@ wcdte_from_netdev(struct net_device *netdev)
 	return netdev->priv;
 #endif
 }
-
+#endif /* !WITHOUT_NETDEV */
 
 static inline void wctc4xxp_set_ready(struct wcdte *wc)
 {
@@ -451,6 +652,7 @@ static inline u8 wctc4xxp_dahdifmt_to_dtefmt(unsigned int fmt)
 	return pt;
 }
 
+#ifndef WITHOUT_NETDEV
 static struct sk_buff *
 tcb_to_skb(struct net_device *netdev, const struct tcb *cmd)
 {
@@ -802,7 +1004,7 @@ wctc4xxp_net_capture_cmd(struct wcdte *wc, const struct tcb *cmd)
 #	endif
 	return;
 }
-
+#endif /* !WITHOUT_NETDEV */
 
 /*! In-memory structure shared by the host and the adapter. */
 struct wctc4xxp_descriptor {
@@ -811,6 +1013,8 @@ struct wctc4xxp_descriptor {
 	__le32 buffer1;
 	__le32 container; /* Unused */
 } __attribute__((packed));
+
+#define _countof(a)	(sizeof(a)/sizeof((a)[0]))
 
 struct wctc4xxp_descriptor_ring {
 	/* Pointer to an array of descriptors to give to hardware. */
@@ -821,8 +1025,17 @@ struct wctc4xxp_descriptor_ring {
 	unsigned int 	tail;
 	/* Array to save the kernel virtual address of pending commands. */
 	struct tcb *pending[DRING_SIZE];
+#if defined(__FreeBSD__)
+	bus_dma_tag_t   dma_tag;
+	bus_dmamap_t    dma_map;
+	uint32_t        desc_dma;
+
+	bus_dma_tag_t	tcb_dma_tag;
+	bus_dmamap_t	tcb_dma_map[DRING_SIZE];
+#else /* !__FreeBSD__ */
 	/* PCI Bus address of the descriptor list. */
 	dma_addr_t	desc_dma;
+#endif /* !__FreeBSD__ */
 	/*! either DMA_FROM_DEVICE or DMA_TO_DEVICE */
 	unsigned int 	direction;
 	/*! The number of buffers currently submitted to the hardware. */
@@ -854,7 +1067,7 @@ static int
 wctc4xxp_initialize_descriptor_ring(struct pci_dev *pdev,
 	struct wctc4xxp_descriptor_ring *dr, u32 des1, unsigned int direction)
 {
-	int i;
+	int i, res;
 	const u32 END_OF_RING = 0x02000000;
 	u8 cache_line_size = 0;
 	struct wctc4xxp_descriptor *d;
@@ -863,8 +1076,13 @@ wctc4xxp_initialize_descriptor_ring(struct pci_dev *pdev,
 	BUG_ON(!pdev);
 	BUG_ON(!dr);
 
+#if defined(__FreeBSD__)
+	if ((cache_line_size = pci_read_config(pdev->dev, 0x0c, 1)) == 0)
+		return -EIO;
+#else
 	if (pci_read_config_byte(pdev, 0x0c, &cache_line_size))
 		return -EIO;
+#endif
 
 	memset(dr, 0, sizeof(*dr));
 
@@ -880,19 +1098,51 @@ wctc4xxp_initialize_descriptor_ring(struct pci_dev *pdev,
 	if (add_padding)
 		dr->padding = (cache_line_size*sizeof(u32)) - sizeof(*d);
 
+#if defined(__FreeBSD__)
+	res = dahdi_dma_allocate(pdev->dev, (sizeof(*d) + dr->padding) * DRING_SIZE,
+	    &dr->dma_tag, &dr->dma_map, (void **) &dr->desc, &dr->desc_dma);
+	if (res)
+		return -res;
+
+        res = bus_dma_tag_create(bus_get_dma_tag(pdev->dev), 8, 0,
+	    BUS_SPACE_MAXADDR_32BIT, BUS_SPACE_MAXADDR, NULL, NULL,
+	    SFRAME_SIZE, 1, SFRAME_SIZE, 0, NULL, NULL, &dr->tcb_dma_tag);
+	if (res) {
+		dahdi_dma_free(&dr->dma_tag, &dr->dma_map, (void **) &dr->desc, &dr->desc_dma);
+		return -res;
+	}
+
+	for (i = 0; i < _countof(dr->tcb_dma_map); i++) {
+		res = bus_dmamap_create(dr->tcb_dma_tag, 0, dr->tcb_dma_map + i);
+		if (res) {
+			int j;
+
+			for (j = 0; j < i; j++) {
+				bus_dmamap_destroy(dr->tcb_dma_tag, dr->tcb_dma_map[j]);
+			}
+			bus_dma_tag_destroy(dr->tcb_dma_tag);
+
+			dahdi_dma_free(&dr->dma_tag, &dr->dma_map, (void **) &dr->desc, &dr->desc_dma);
+			return -res;
+		}
+	}
+#else
 	dr->desc = pci_alloc_consistent(pdev,
 			(sizeof(*d)+dr->padding)*DRING_SIZE, &dr->desc_dma);
-
 	if (!dr->desc)
 		return -ENOMEM;
-
 	memset(dr->desc, 0, (sizeof(*d) + dr->padding) * DRING_SIZE);
+#endif
+
 	for (i = 0; i < DRING_SIZE; ++i) {
 		d = wctc4xxp_descriptor(dr, i);
 		d->des1 = cpu_to_le32(des1);
 	}
 
 	d->des1 |= cpu_to_le32(END_OF_RING);
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dr->dma_tag, dr->dma_map, BUS_DMASYNC_PREWRITE);
+#endif
 	dr->direction = direction;
 	spin_lock_init(&dr->lock);
 	dr->pdev = pdev;
@@ -908,6 +1158,7 @@ static const unsigned int BUFFER1_SIZE_MASK = 0x7ff;
 static int
 wctc4xxp_submit(struct wctc4xxp_descriptor_ring *dr, struct tcb *c)
 {
+	int res;
 	volatile struct wctc4xxp_descriptor *d;
 	unsigned int len;
 	unsigned long flags;
@@ -929,8 +1180,17 @@ wctc4xxp_submit(struct wctc4xxp_descriptor_ring *dr, struct tcb *c)
 	}
 	d->des1 &= cpu_to_le32(~(BUFFER1_SIZE_MASK));
 	d->des1 |= cpu_to_le32(len & BUFFER1_SIZE_MASK);
+#if defined(__FreeBSD__)
+	res = bus_dmamap_load(dr->tcb_dma_tag, dr->tcb_dma_map[dr->tail], c->data, c->data_len,
+	    dahdi_dma_map_addr, __DEVOLATILE(void *, &d->buffer1), 0);
+	if (res)
+		return -res;
+	bus_dmamap_sync(dr->dma_tag, dr->dma_map, BUS_DMASYNC_PREWRITE);
+	bus_dmamap_sync(dr->tcb_dma_tag, dr->tcb_dma_map[dr->tail], BUS_DMASYNC_PREWRITE);
+#else
 	d->buffer1 = pci_map_single(dr->pdev, c->data,
 			SFRAME_SIZE, dr->direction);
+#endif
 
 	SET_OWNED(d); /* That's it until the hardware is done with it. */
 	dr->pending[dr->tail] = c;
@@ -949,13 +1209,24 @@ wctc4xxp_retrieve(struct wctc4xxp_descriptor_ring *dr)
 	unsigned long flags;
 	spin_lock_irqsave(&dr->lock, flags);
 	d = wctc4xxp_descriptor(dr, head);
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dr->dma_tag, dr->dma_map, BUS_DMASYNC_POSTREAD);
+#endif
 	if (d->buffer1 && !OWNED(d)) {
+#if defined(__FreeBSD__)
+		bus_dmamap_sync(dr->tcb_dma_tag, dr->tcb_dma_map[head], BUS_DMASYNC_POSTREAD);
+		bus_dmamap_unload(dr->tcb_dma_tag, dr->tcb_dma_map[head]);
+#else
 		pci_unmap_single(dr->pdev, d->buffer1,
 			SFRAME_SIZE, dr->direction);
+#endif
 		c = dr->pending[head];
 		WARN_ON(!c);
 		dr->head = (++head) & DRING_MASK;
 		d->buffer1 = 0;
+#if defined(__FreeBSD__)
+		bus_dmamap_sync(dr->dma_tag, dr->dma_map, BUS_DMASYNC_PREWRITE);
+#endif
 		--dr->count;
 		WARN_ON(!c);
 		c->data_len = (d->des0 >> 16) & BUFFER1_SIZE_MASK;
@@ -980,13 +1251,23 @@ static inline int wctc4xxp_getcount(struct wctc4xxp_descriptor_ring *dr)
 static inline void
 __wctc4xxp_setctl(struct wcdte *wc, unsigned int addr, unsigned int val)
 {
+#if defined(__FreeBSD__)
+	bus_space_write_4(rman_get_bustag(wc->io_res),
+	    rman_get_bushandle(wc->io_res), addr, val);
+#else
 	outl(val, wc->iobase + addr);
+#endif
 }
 
 static inline unsigned int
 __wctc4xxp_getctl(struct wcdte *wc, unsigned int addr)
 {
+#if defined(__FreeBSD__)
+	return bus_space_read_4(rman_get_bustag(wc->io_res),
+	    rman_get_bushandle(wc->io_res), addr);
+#else
 	return inl(wc->iobase + addr);
+#endif
 }
 
 static inline void
@@ -1049,7 +1330,7 @@ setup_supervisor_header(struct wcdte *wc, struct csm_encaps_hdr *hdr)
 	setup_common_header(wc, hdr);
 
 	hdr->op_code = cpu_to_be16(CONTROL_PACKET_OPCODE);
-	hdr->control = LITTLE_ENDIAN;
+	hdr->control = CONTROL_LITTLE_ENDIAN;
 	hdr->seq_num = (wc->seq_num++)&0xf;
 	hdr->channel = cpu_to_be16(SUPERVISOR_CHANNEL);
 }
@@ -1184,14 +1465,14 @@ send_set_eth_header_cmd(struct wcdte *wc, struct tcb *cmd,
 	const u8 *host_mac, const u8 *assigned_mac)
 {
 	u16 parameters[8];
-	u16 *part;
+	const u16 *part;
 
 	parameters[0] = 0x0001;
-	part = (u16 *)host_mac;
+	part = (const u16 *)host_mac;
 	parameters[1] = part[0];
 	parameters[2] = part[1];
 	parameters[3] = part[2];
-	part = (u16 *)assigned_mac;
+	part = (const u16 *)assigned_mac;
 	parameters[4] = part[0];
 	parameters[5] = part[1];
 	parameters[6] = part[2];
@@ -1530,11 +1811,18 @@ wctc4xxp_cleanup_descriptor_ring(struct wctc4xxp_descriptor_ring *dr)
 	if (!dr || !dr->desc)
 		return;
 
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dr->dma_tag, dr->dma_map, BUS_DMASYNC_POSTREAD);
+#endif
 	for (i = 0; i < DRING_SIZE; ++i) {
 		d = wctc4xxp_descriptor(dr, i);
 		if (d->buffer1) {
+#if defined(__FreeBSD__)
+			bus_dmamap_unload(dr->tcb_dma_tag, dr->tcb_dma_map[i]);
+#else
 			pci_unmap_single(dr->pdev, d->buffer1,
 				SFRAME_SIZE, dr->direction);
+#endif
 			d->buffer1 = 0;
 			/* Commands will also be sitting on the waiting for
 			 * response list, so we want to make sure to delete
@@ -1543,19 +1831,30 @@ wctc4xxp_cleanup_descriptor_ring(struct wctc4xxp_descriptor_ring *dr)
 			free_cmd(dr->pending[i]);
 			dr->pending[i] = NULL;
 		}
+#if defined(__FreeBSD__)
+		bus_dmamap_destroy(dr->tcb_dma_tag, dr->tcb_dma_map[i]);
+#endif
 	}
 	dr->head = 0;
 	dr->tail = 0;
 	dr->count = 0;
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dr->dma_tag, dr->dma_map, BUS_DMASYNC_PREWRITE);
+	bus_dma_tag_destroy(dr->tcb_dma_tag);
+
+	dahdi_dma_free(&dr->dma_tag, &dr->dma_map, (void **) &dr->desc, &dr->desc_dma);
+#else
 	pci_free_consistent(dr->pdev, (sizeof(*d)+dr->padding) * DRING_SIZE,
 		dr->desc, dr->desc_dma);
+#endif
+	spin_lock_destroy(&dr->lock);
 }
 
 static void wctc4xxp_cleanup_command_list(struct wcdte *wc)
 {
 	struct tcb *cmd;
 	unsigned long flags;
-	LIST_HEAD(local_list);
+	_LIST_HEAD(local_list);
 
 	spin_lock_irqsave(&wc->cmd_list_lock, flags);
 	list_splice_init(&wc->cmd_list, &local_list);
@@ -1621,14 +1920,16 @@ wctc4xxp_transmit_cmd(struct wcdte *wc, struct tcb *cmd)
 			 * retry if we do not get the response within the
 			 * timeout period. */
 			struct csm_encaps_hdr *hdr = cmd->data;
-			hdr->control |= SUPPRESS_ACK;
+			hdr->control |= CONTROL_SUPPRESS_ACK;
 		}
 		WARN_ON(!list_empty(&cmd->node));
 		wctc4xxp_add_to_response_list(wc, cmd);
 		mod_timer(&wc->watchdog, jiffies + HZ/2);
 	}
+#ifndef WITHOUT_NETDEV
 	if (!(cmd->flags & DO_NOT_CAPTURE))
 		wctc4xxp_net_capture_cmd(wc, cmd);
+#endif
 	res = wctc4xxp_submit(wc->txd, cmd);
 	if (-EBUSY == res) {
 		/* Looks like we're out of room in the descriptor
@@ -1670,7 +1971,7 @@ wctc4xxp_init_state(struct channel_pvt *cpvt, int encoder,
 	unsigned int channel, struct wcdte *wc)
 {
 	memset(cpvt, 0, sizeof(*cpvt));
-	cpvt->encoder = encoder;
+	cpvt->e.encoder = encoder;
 	cpvt->wc = wc;
 	cpvt->chan_in_num = INVALID;
 	cpvt->chan_out_num = INVALID;
@@ -1703,7 +2004,7 @@ wctc4xxp_cleanup_channel_private(struct wcdte *wc,
 	struct tcb *cmd, *temp;
 	struct channel_pvt *cpvt = dtc->pvt;
 	unsigned long flags;
-	LIST_HEAD(local_list);
+	_LIST_HEAD(local_list);
 
 	spin_lock_irqsave(&cpvt->lock, flags);
 	list_splice_init(&cpvt->rx_queue, &local_list);
@@ -1729,7 +2030,7 @@ wctc4xxp_mark_channel_complement_built(struct wcdte *wc,
 	BUG_ON(!cpvt);
 	index = cpvt->timeslot_in_num/2;
 	BUG_ON(index >= wc->numchannels);
-	if (cpvt->encoder)
+	if (cpvt->e.encoder)
 		compl_dtc = &(wc->udecode->channels[index]);
 	else
 		compl_dtc = &(wc->uencode->channels[index]);
@@ -1904,7 +2205,7 @@ wctc4xxp_operation_release(struct dahdi_transcoder_channel *dtc)
 		
 	if ((packets_sent - packets_received) > 5) {
 		DTE_DEBUG(DTE_DEBUG_GENERAL, "%s channel %d sent %d packets " 
-			"and received %d packets.\n", (cpvt->encoder) ? 
+			"and received %d packets.\n", (cpvt->e.encoder) ? 
 			"encoder" : "decoder", cpvt->chan_out_num,
 			packets_sent, packets_received);
 	}
@@ -1913,7 +2214,7 @@ wctc4xxp_operation_release(struct dahdi_transcoder_channel *dtc)
 	wctc4xxp_cleanup_channel_private(wc, dtc);
 	index = cpvt->timeslot_in_num/2;
 	BUG_ON(index >= wc->numchannels);
-	if (cpvt->encoder)
+	if (cpvt->e.encoder)
 		compl_dtc = &(wc->udecode->channels[index]);
 	else
 		compl_dtc = &(wc->uencode->channels[index]);
@@ -1981,6 +2282,9 @@ wctc4xxp_handle_receive_ring(struct wcdte *wc)
 	/* If we can't grab this lock, another thread must already be checking
 	 * the receive ring...so we should just finish up, and we'll try again
 	 * later. */
+#if defined(__FreeBSD__)
+	spin_lock_irqsave(&wc->rx_lock, flags);
+#else /* !__FreeBSD__ */
 #if defined(spin_trylock_irqsave)
 	if (!spin_trylock_irqsave(&wc->rx_lock, flags))
 		return 0;
@@ -1989,6 +2293,7 @@ wctc4xxp_handle_receive_ring(struct wcdte *wc)
 		return 0;
 	spin_lock_irqsave(&wc->rx_lock, flags);
 #endif
+#endif /* !__FreeBSD__ */
 
 	while ((cmd = wctc4xxp_retrieve(wc->rxd))) {
 		++count;
@@ -2029,10 +2334,10 @@ wctc4xxp_polling(unsigned long data)
 
 /* Called with a buffer in which to copy a transcoded frame. */
 static ssize_t
-wctc4xxp_read(struct file *file, char __user *frame, size_t count, loff_t *ppos)
+wctc4xxp_read(FOP_READ_ARGS_DECL)
 {
 	ssize_t ret;
-	struct dahdi_transcoder_channel *dtc = file->private_data;
+	struct dahdi_transcoder_channel *dtc = dahdi_get_private_data(file);
 	struct channel_pvt *cpvt = dtc->pvt;
 	struct wcdte *wc = cpvt->wc;
 	struct tcb *cmd;
@@ -2055,13 +2360,14 @@ wctc4xxp_read(struct file *file, char __user *frame, size_t count, loff_t *ppos)
 		} else {
 			ret = wait_event_interruptible(dtc->ready,
 				dahdi_tc_is_data_waiting(dtc));
+#if !defined(__FreeBSD__)
 			if (-ERESTARTSYS == ret) {
 				/* Signal interrupted the wait */
 				return -EINTR;
-			} else {
-				/* List went not empty. */
-				cmd = get_ready_cmd(dtc);
 			}
+#endif
+			/* List went not empty. */
+			cmd = get_ready_cmd(dtc);
 		}
 	}
 
@@ -2083,7 +2389,11 @@ wctc4xxp_read(struct file *file, char __user *frame, size_t count, loff_t *ppos)
 
 	atomic_inc(&cpvt->stats.packets_received);
 
+#if defined(__FreeBSD__)
+	if (unlikely(uiomove(packet->payload, payload_bytes, uio))) {
+#else
 	if (unlikely(copy_to_user(frame, &packet->payload[0], payload_bytes))) {
+#endif
 		DTE_PRINTK(ERR, "Failed to copy data in %s\n", __func__);
 		free_cmd(cmd);
 		return -EFAULT;
@@ -2096,10 +2406,9 @@ wctc4xxp_read(struct file *file, char __user *frame, size_t count, loff_t *ppos)
 
 /* Called with a frame in the srcfmt to be transcoded into the dstfmt. */
 static ssize_t
-wctc4xxp_write(struct file *file, const char __user *frame,
-	size_t count, loff_t *ppos)
+wctc4xxp_write(FOP_WRITE_ARGS_DECL)
 {
-	struct dahdi_transcoder_channel *dtc = file->private_data;
+	struct dahdi_transcoder_channel *dtc = dahdi_get_private_data(file);
 	struct channel_pvt *cpvt = dtc->pvt;
 	struct wcdte *wc = cpvt->wc;
 	struct tcb *cmd;
@@ -2149,8 +2458,12 @@ wctc4xxp_write(struct file *file, const char __user *frame,
 	if (!cmd)
 		return -ENOMEM;
 	/* Copy the data directly from user space into the command buffer. */
+#if defined(__FreeBSD__)
+	if (uiomove(((struct rtp_packet *) cmd->data)->payload, count, uio)) {
+#else
 	if (copy_from_user(&((struct rtp_packet *)(cmd->data))->payload[0],
 		frame, count)) {
+#endif
 		DTE_PRINTK(ERR, "Failed to copy packet from userspace.\n");
 		free_cmd(cmd);
 		return -EFAULT;
@@ -2164,7 +2477,7 @@ wctc4xxp_write(struct file *file, const char __user *frame,
 	wctc4xxp_transmit_cmd(wc, cmd);
 
 	if (test_bit(DTE_POLLING, &wc->flags)) {
-#if HZ == 100
+#if !defined(__FreeBSD__) && HZ == 100
 		__wctc4xxp_polling(wc);
 #else
 		if (jiffies != wc->jiffies_at_last_poll) {
@@ -2337,8 +2650,8 @@ receive_csm_encaps_packet(struct wcdte *wc, struct tcb *cmd)
 {
 	const struct csm_encaps_hdr *hdr = cmd->data;
 
-	if (!(hdr->control & MESSAGE_PACKET)) {
-		if (!(hdr->control & SUPPRESS_ACK))
+	if (!(hdr->control & CONTROL_MESSAGE_PACKET)) {
+		if (!(hdr->control & CONTROL_SUPPRESS_ACK))
 			wctc4xxp_send_ack(wc, hdr->seq_num, hdr->channel);
 
 		if (is_response(hdr)) {
@@ -2493,7 +2806,7 @@ static inline void service_rx_ring(struct wcdte *wc)
 {
 	struct tcb *cmd;
 	unsigned long flags;
-	LIST_HEAD(local_list);
+	_LIST_HEAD(local_list);
 	spin_lock_irqsave(&wc->rx_list_lock, flags);
 	list_splice_init(&wc->rx_list, &local_list);
 	spin_unlock_irqrestore(&wc->rx_list_lock, flags);
@@ -2505,7 +2818,9 @@ static inline void service_rx_ring(struct wcdte *wc)
 		cmd = container_of(local_list.next, struct tcb, node);
 		list_del_init(&cmd->node);
 
+#ifndef WITHOUT_NETDEV
 		wctc4xxp_net_capture_cmd(wc, cmd);
+#endif
 		wctc4xxp_receiveprep(wc, cmd);
 	}
 	wctc4xxp_receive_demand_poll(wc);
@@ -2517,7 +2832,7 @@ static inline void service_dte(struct wcdte *wc)
 	service_rx_ring(wc);
 }
 
-
+#if DEFERRED_PROCESSING == WORKQUEUE
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 static void deferred_work_func(void *param)
 {
@@ -2529,6 +2844,7 @@ static void deferred_work_func(struct work_struct *work)
 #endif
 	service_dte(wc);
 }
+#endif
 
 DAHDI_IRQ_HANDLER(wctc4xxp_interrupt)
 {
@@ -2607,11 +2923,21 @@ wctc4xxp_hardware_init(struct wcdte *wc)
 	const u32 DEFAULT_PCI_ACCESS = 0xfff80000;
 
 	/* Enable I/O Access */
+#if defined(__FreeBSD__)
+	pci_enable_busmaster(wc->pdev->dev);
+	pci_enable_io(wc->pdev->dev, SYS_RES_IOPORT);
+	pci_enable_io(wc->pdev->dev, SYS_RES_MEMORY);
+#else
 	pci_read_config_dword(wc->pdev, 0x0004, &reg);
 	reg |= 0x00000007;
 	pci_write_config_dword(wc->pdev, 0x0004, reg);
+#endif
 
+#if defined(__FreeBSD__)
+	if ((cache_line_size = pci_read_config(wc->pdev->dev, 0x0c, 1)) == 0)
+#else
 	if (pci_read_config_byte(wc->pdev, 0x0c, &cache_line_size))
+#endif
 		return -EIO;
 
 	switch (cache_line_size) {
@@ -2819,6 +3145,12 @@ wctc4xxp_load_firmware(struct wcdte *wc, const struct firmware *firmware)
 	unsigned int last_byteloc;
 	unsigned int length;
 	struct tcb *cmd;
+	const char *firmware_data = (const char *) firmware->data;
+#if defined(__FreeBSD__)
+	size_t firmware_size = firmware->datasize;
+#else
+	size_t firmware_size = firmware->size;
+#endif
 
 	byteloc = 17;
 
@@ -2826,14 +3158,14 @@ wctc4xxp_load_firmware(struct wcdte *wc, const struct firmware *firmware)
 	if (!cmd)
 		return -ENOMEM;
 
-	while (byteloc < (firmware->size-20)) {
+	while (byteloc < (firmware_size-20)) {
 		last_byteloc = byteloc;
-		length = (firmware->data[byteloc] << 8) |
-				firmware->data[byteloc+1];
+		length = (firmware_data[byteloc] << 8) |
+				firmware_data[byteloc+1];
 		byteloc += 2;
 		cmd->data_len = length;
 		BUG_ON(length > cmd->data_len);
-		memcpy(cmd->data, &firmware->data[byteloc], length);
+		memcpy(cmd->data, &firmware_data[byteloc], length);
 		byteloc += length;
 		cmd->flags = WAIT_FOR_ACK;
 		wctc4xxp_transmit_cmd(wc, cmd);
@@ -2940,7 +3272,7 @@ wctc4xxp_create_channel_pair(struct wcdte *wc, struct channel_pvt *cpvt,
 		return -ENOMEM;
 
 	BUG_ON(!wc || !cpvt);
-	if (cpvt->encoder) {
+	if (cpvt->e.encoder) {
 		encoder_timeslot = cpvt->timeslot_in_num;
 		decoder_timeslot = cpvt->timeslot_out_num;
 	} else {
@@ -3021,7 +3353,7 @@ wctc4xxp_destroy_channel_pair(struct wcdte *wc, struct channel_pvt *cpvt)
 	if (!cmd)
 		return -ENOMEM;
 
-	if (cpvt->encoder) {
+	if (cpvt->e.encoder) {
 		chan1 = cpvt->chan_in_num;
 		timeslot1 = cpvt->timeslot_in_num;
 		chan2 = cpvt->chan_out_num;
@@ -3159,6 +3491,24 @@ initialize_channel_pvt(struct wcdte *wc, int encoder,
 	return 0;
 }
 
+static void
+destroy_channel_pvt(struct wcdte *wc, struct channel_pvt **cpvt)
+{
+	int chan;
+
+	if (*cpvt == NULL)
+		return;
+
+	for (chan = 0; chan < wc->numchannels; ++chan) {
+		struct channel_pvt *cp = *cpvt + chan;
+
+		spin_lock_destroy(&cp->lock);
+	}
+
+	kfree(*cpvt);
+	*cpvt = NULL;
+}
+
 static int
 initialize_transcoder(struct wcdte *wc, unsigned int srcfmts,
 	unsigned int dstfmts, struct channel_pvt *pvts,
@@ -3227,7 +3577,7 @@ wctc4xxp_watchdog(unsigned long data)
 {
 	struct wcdte *wc = (struct wcdte *)data;
 	struct tcb *cmd, *temp;
-	LIST_HEAD(cmds_to_retry);
+	_LIST_HEAD(cmds_to_retry);
 	const int MAX_RETRIES = 5;
 	int reschedule_timer = 0;
 
@@ -3284,6 +3634,7 @@ wctc4xxp_watchdog(unsigned long data)
 		wctc4xxp_send_commands(wc, &cmds_to_retry);
 }
 
+#if !defined(__FreeBSD__)
 /**
  * Insert an struct wcdte on the global list in sorted order
  *
@@ -3310,6 +3661,7 @@ wctc4xxp_add_to_device_list(struct wcdte *wc)
 	spin_unlock(&wctc4xxp_list_lock);
 	return pos;
 }
+#endif /* !__FreeBSD__ */
 
 struct wctc4xxp_desc {
 	const char *short_name;
@@ -3326,10 +3678,18 @@ static struct wctc4xxp_desc wctce400 = {
 	.long_name = "Wildcard TCE400+TC400M",
 };
 
+#if defined(__FreeBSD__)
+static int
+wctc4xxp_init_one(device_t dev, const struct pci_device_id *ent)
+#else
 static int __devinit
 wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
+#endif
 {
-	int res, reg, position_on_list;
+	int res, reg;
+#if !defined(__FreeBSD__)
+	int position_on_list;
+#endif
 	struct wcdte *wc = NULL;
 	struct wctc4xxp_desc *d = (struct wctc4xxp_desc *)ent->driver_data;
 	unsigned char g729_numchannels, g723_numchannels, min_numchannels;
@@ -3337,6 +3697,7 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	unsigned int complexfmts;
 	struct firmware embedded_firmware;
 	const struct firmware *firmware = &embedded_firmware;
+	const char *firmware_data;
 #if !defined(HOTPLUG_FIRMWARE)
 	extern void _binary_dahdi_fw_tc400m_bin_size;
 	extern u8 _binary_dahdi_fw_tc400m_bin_start[];
@@ -3347,7 +3708,19 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	/* ------------------------------------------------------------------
 	 * Setup the pure software constructs internal to this driver.
 	 * --------------------------------------------------------------- */
+#if defined(__FreeBSD__)
+	wc = device_get_softc(dev);
+	wc->pdev = &wc->_dev;
+	wc->pdev->dev = dev;
 
+        /* allocate memory resource */
+	wc->io_rid = PCIR_BAR(0);
+	wc->io_res = bus_alloc_resource_any(dev, SYS_RES_MEMORY, &wc->io_rid, RF_ACTIVE);
+	if (wc->io_res == NULL) {
+		device_printf(wc->pdev->dev, "Can't allocate memory resource\n");
+		return (-ENXIO);
+	}
+#else
 	wc = kzalloc(sizeof(*wc), GFP_KERNEL);
 	if (!wc)
 		return -ENOMEM;
@@ -3358,6 +3731,7 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	wc->iobase           = pci_resource_start(pdev, 0);
 	wc->pdev             = pdev;
 	wc->pos              = position_on_list;
+#endif
 	wc->variety          = d->long_name;
 	wc->last_rx_seq_num  = -1;
 
@@ -3374,6 +3748,9 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 #else
 	INIT_WORK(&wc->deferred_work, deferred_work_func);
 #endif
+	init_waitqueue_head(&wc->waitq);
+
+#if !defined(__FreeBSD__)
 	DTE_PRINTK(INFO, "Attached to device at %s.\n", pci_name(wc->pdev));
 
 	/* Keep track of whether we need to free the region */
@@ -3384,13 +3761,12 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		return -EIO;
 	}
 
-	init_waitqueue_head(&wc->waitq);
-
 	if (pci_set_dma_mask(wc->pdev, DMA_BIT_MASK(32))) {
 		release_region(wc->iobase, 0xff);
 		DTE_PRINTK(WARNING, "No suitable DMA available.\n");
 		return -EIO;
 	}
+#endif
 
 	wc->txd = kmalloc(sizeof(*wc->txd), GFP_KERNEL);
 	if (!wc->txd) {
@@ -3427,14 +3803,15 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	embedded_firmware.size = (size_t) &_binary_dahdi_fw_tc400m_bin_size;
 #endif
 
-	wctc4xxp_firmware_ver = firmware->data[0];
-	wctc4xxp_firmware_ver_minor = firmware->data[16];
-	g729_numchannels = firmware->data[1];
-	g723_numchannels = firmware->data[2];
+	firmware_data = (const char *) firmware->data;
+	wctc4xxp_firmware_ver = firmware_data[0];
+	wctc4xxp_firmware_ver_minor = firmware_data[16];
+	g729_numchannels = firmware_data[1];
+	g723_numchannels = firmware_data[2];
 
 	min_numchannels = min(g723_numchannels, g729_numchannels);
 
-	if (!mode || strlen(mode) < 4) {
+	if (strlen(mode) < 4) {
 		sprintf(wc->complexname, "G.729a / G.723.1");
 		complexfmts = DAHDI_FORMAT_G729A | DAHDI_FORMAT_G723_1;
 		wc->numchannels = min_numchannels;
@@ -3459,11 +3836,13 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (res)
 		goto error_exit_swinit;
 
+#ifndef WITHOUT_NETDEV
 	if (DTE_DEBUG_NETWORK_IF & debug) {
 		res = wctc4xxp_net_register(wc);
 		if (res)
 			goto error_exit_swinit;
 	}
+#endif /* !WITHOUT_NETDEV */
 
 #	if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 18)
 	wc->watchdog.function = wctc4xxp_watchdog;
@@ -3484,7 +3863,22 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	/* ------------------------------------------------------------------
 	 * Load the firmware and start the DTE.
 	 * --------------------------------------------------------------- */
+#if defined(__FreeBSD__)
+	wc->irq_res = bus_alloc_resource_any(
+	    wc->pdev->dev, SYS_RES_IRQ, &wc->irq_rid, RF_SHAREABLE | RF_ACTIVE);
+	if (wc->irq_res == NULL) {
+		device_printf(wc->pdev->dev, "Can't allocate irq resource\n");
+		res = -ENXIO;
+	}
 
+	res = bus_setup_intr(
+		wc->pdev->dev, wc->irq_res, INTR_TYPE_CLK | INTR_MPSAFE,
+		wctc4xxp_interrupt, NULL, wc, &wc->irq_handle);
+	if (res) {
+		device_printf(wc->pdev->dev, "Can't setup interrupt handler (error %d)\n", res);
+		return (-ENXIO);
+	}
+#else
 	res = pci_enable_device(pdev);
 	if (res) {
 		DTE_PRINTK(ERR, "Failed to enable device.\n");
@@ -3500,6 +3894,7 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 			release_firmware(firmware);
 		goto error_exit_hwinit;
 	}
+#endif
 	res = wctc4xxp_hardware_init(wc);
 	if (res) {
 		if (firmware != &embedded_firmware)
@@ -3538,23 +3933,46 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 error_exit_hwinit:
 	wctc4xxp_stop_dma(wc);
 	wctc4xxp_cleanup_command_list(wc);
+#if defined(__FreeBSD__)
+	/* disconnect the interrupt handler */
+	if (wc->irq_handle != NULL) {
+		bus_teardown_intr(wc->pdev->dev, wc->irq_res, wc->irq_handle);
+		wc->irq_handle = NULL;
+	}
+
+	if (wc->irq_res != NULL) {
+		bus_release_resource(wc->pdev->dev, SYS_RES_IRQ, wc->irq_rid, wc->irq_res);
+		wc->irq_res = NULL;
+	}
+#else
 	free_irq(pdev->irq, wc);
 	pci_set_drvdata(pdev, NULL);
+#endif
 error_exit_swinit:
+#ifndef WITHOUT_NETDEV
 	wctc4xxp_net_unregister(wc);
-	kfree(wc->encoders);
-	kfree(wc->decoders);
+#endif
+	destroy_channel_pvt(wc, &wc->encoders);
+	destroy_channel_pvt(wc, &wc->decoders);
 	dahdi_transcoder_free(wc->uencode);
 	dahdi_transcoder_free(wc->udecode);
 	wctc4xxp_cleanup_descriptor_ring(wc->txd);
 	kfree(wc->txd);
 	wctc4xxp_cleanup_descriptor_ring(wc->rxd);
 	kfree(wc->rxd);
+#if defined(__FreeBSD__)
+	/* release I/O region */
+	if (wc->io_res != NULL) {
+		bus_release_resource(wc->pdev->dev, SYS_RES_IOPORT, wc->io_rid, wc->io_res);
+		wc->io_res = NULL;
+	}
+#else
 	release_region(wc->iobase, 0xff);
 	spin_lock(&wctc4xxp_list_lock);
 	list_del(&wc->node);
 	spin_unlock(&wctc4xxp_list_lock);
 	kfree(wc);
+#endif
 	return res;
 }
 
@@ -3572,27 +3990,43 @@ static void wctc4xxp_cleanup_channels(struct wcdte *wc)
 	}
 }
 
+#if defined(__FreeBSD__)
+static void __devexit wctc4xxp_remove_one(device_t dev)
+#else
 static void __devexit wctc4xxp_remove_one(struct pci_dev *pdev)
+#endif
 {
+#if defined(__FreeBSD__)
+	struct wcdte *wc = device_get_softc(dev);
+#else
 	struct wcdte *wc = pci_get_drvdata(pdev);
+#endif
 
 	if (!wc)
 		return;
 
+#if !defined(__FreeBSD__)
 	spin_lock(&wctc4xxp_list_lock);
 	list_del(&wc->node);
 	spin_unlock(&wctc4xxp_list_lock);
+#endif
 
 	set_bit(DTE_SHUTDOWN, &wc->flags);
+#if !defined(__FreeBSD__)
 	if (del_timer_sync(&wc->watchdog))
+#endif
 		del_timer_sync(&wc->watchdog);
 
 	/* This should already be stopped, but it doesn't hurt to make sure. */
 	clear_bit(DTE_POLLING, &wc->flags);
+#if !defined(__FreeBSD__)
 	if (del_timer_sync(&wc->polling))
+#endif
 		del_timer_sync(&wc->polling);
 
+#ifndef WITHOUT_NETDEV
 	wctc4xxp_net_unregister(wc);
+#endif
 
 	/* Stop any DMA */
 	wctc4xxp_stop_dma(wc);
@@ -3600,7 +4034,20 @@ static void __devexit wctc4xxp_remove_one(struct pci_dev *pdev)
 	/* In case hardware is still there */
 	wctc4xxp_disable_interrupts(wc);
 
+#if defined(__FreeBSD__)
+        /* disconnect the interrupt handler */
+	if (wc->irq_handle != NULL) {
+		bus_teardown_intr(wc->pdev->dev, wc->irq_res, wc->irq_handle);
+		wc->irq_handle = NULL;
+	}
+
+	if (wc->irq_res != NULL) {
+		bus_release_resource(wc->pdev->dev, SYS_RES_IRQ, wc->irq_rid, wc->irq_res);
+		wc->irq_res = NULL;
+	}
+#else
 	free_irq(pdev->irq, wc);
+#endif
 
 	/* There isn't anything that would run in the workqueue that will wait
 	 * on an interrupt. */
@@ -3609,7 +4056,15 @@ static void __devexit wctc4xxp_remove_one(struct pci_dev *pdev)
 	dahdi_transcoder_unregister(wc->uencode);
 
 	/* Free Resources */
+#if defined(__FreeBSD__)
+	/* release I/O region */
+	if (wc->io_res != NULL) {
+		bus_release_resource(wc->pdev->dev, SYS_RES_IOPORT, wc->io_rid, wc->io_res);
+		wc->io_res = NULL;
+	}
+#else
 	release_region(wc->iobase, 0xff);
+#endif
 	wctc4xxp_cleanup_descriptor_ring(wc->txd);
 	kfree(wc->txd);
 	wctc4xxp_cleanup_descriptor_ring(wc->rxd);
@@ -3618,13 +4073,21 @@ static void __devexit wctc4xxp_remove_one(struct pci_dev *pdev)
 	wctc4xxp_cleanup_command_list(wc);
 	wctc4xxp_cleanup_channels(wc);
 
+#if !defined(__FreeBSD__)
 	pci_set_drvdata(pdev, NULL);
+#endif
 
 	dahdi_transcoder_free(wc->uencode);
 	dahdi_transcoder_free(wc->udecode);
-	kfree(wc->encoders);
-	kfree(wc->decoders);
+	destroy_channel_pvt(wc, &wc->encoders);
+	destroy_channel_pvt(wc, &wc->decoders);
+	spin_lock_destroy(&wc->reglock);
+	spin_lock_destroy(&wc->cmd_list_lock);
+	spin_lock_destroy(&wc->rx_list_lock);
+	spin_lock_destroy(&wc->rx_lock);
+#if !defined(__FreeBSD__)
 	kfree(wc);
+#endif
 }
 
 static struct pci_device_id wctc4xxp_pci_tbl[] = {
@@ -3635,6 +4098,64 @@ static struct pci_device_id wctc4xxp_pci_tbl[] = {
 	{ 0 }
 };
 
+#if defined(__FreeBSD__)
+SYSCTL_NODE(_dahdi, OID_AUTO, wctc4xxp, CTLFLAG_RW, 0, "DAHDI wctc4xxp");
+#define MODULE_PARAM_PREFIX "dahdi.wctc4xxp"
+#define MODULE_PARAM_PARENT _dahdi_wctc4xxp
+
+static int
+wctc4xxp_device_probe(device_t dev)
+{
+	struct pci_device_id *id;
+	struct wctc4xxp_desc *d;
+
+	id = dahdi_pci_device_id_lookup(dev, wctc4xxp_pci_tbl);
+	if (id == NULL)
+		return (ENXIO);
+
+	/* found device */
+	device_printf(dev, "vendor=%x device=%x subvendor=%x\n",
+	    id->vendor, id->device, id->subvendor);
+	d = (struct wctc4xxp_desc *) id->driver_data;
+	device_set_desc(dev, d->long_name);
+	return (0);
+}
+
+static int
+wctc4xxp_device_attach(device_t dev)
+{
+	int res;
+	struct pci_device_id *id;
+
+	id = dahdi_pci_device_id_lookup(dev, wctc4xxp_pci_tbl);
+	if (id == NULL)
+		return (ENXIO);
+
+	res = wctc4xxp_init_one(dev, id);
+	return (-res);
+}
+
+static int
+wctc4xxp_device_detach(device_t dev)
+{
+	wctc4xxp_remove_one(dev);
+	return (0);
+}
+
+static device_method_t wctc4xxp_methods[] = {
+	DEVMETHOD(device_probe,     wctc4xxp_device_probe),
+	DEVMETHOD(device_attach,    wctc4xxp_device_attach),
+	DEVMETHOD(device_detach,    wctc4xxp_device_detach),
+	{ 0, 0 }
+};
+
+static driver_t wctc4xxp_pci_driver = {
+	"wctc4xxp",
+	wctc4xxp_methods,
+	sizeof(struct wcdte)
+};
+
+#else /* !__FreeBSD__ */
 MODULE_DEVICE_TABLE(pci, wctc4xxp_pci_tbl);
 
 static struct pci_driver wctc4xxp_driver = {
@@ -3643,9 +4164,20 @@ static struct pci_driver wctc4xxp_driver = {
 	.remove = __devexit_p(wctc4xxp_remove_one),
 	.id_table = wctc4xxp_pci_tbl,
 };
+#endif /* !__FreeBSD__ */
 
 static int __init wctc4xxp_init(void)
 {
+#if defined(__FreeBSD__)
+	cmd_cache = uma_zcreate("wctc4xxp", sizeof(struct tcb),
+	    cmd_cache_ctor, cmd_cache_dtor, NULL, NULL, 0, 0);
+	if (cmd_cache == NULL) {
+		printf("%s: can not allocate UMA zone\n", THIS_MODULE->name);
+		return (-ENXIO);
+	}
+
+	return (0);
+#else /* !__FreeBSD__ */
 	int res;
 	unsigned long cache_flags;
 
@@ -3665,24 +4197,52 @@ static int __init wctc4xxp_init(void)
 
 	if (!cmd_cache)
 		return -ENOMEM;
-	spin_lock_init(&wctc4xxp_list_lock);
-	INIT_LIST_HEAD(&wctc4xxp_list);
 	res = dahdi_pci_module(&wctc4xxp_driver);
 	if (res) {
 		kmem_cache_destroy(cmd_cache);
 		return -ENODEV;
 	}
 	return 0;
+#endif
 }
 
 static void __exit wctc4xxp_cleanup(void)
 {
+#if defined(__FreeBSD__)
+	uma_zdestroy(cmd_cache);
+#else /* !__FreeBSD__ */
 	pci_unregister_driver(&wctc4xxp_driver);
 	kmem_cache_destroy(cmd_cache);
+#endif /* !__FreeBSD__ */
 }
 
 module_param(debug, int, S_IRUGO | S_IWUSR);
 module_param(mode, charp, S_IRUGO | S_IWUSR);
+
+#if defined(__FreeBSD__)
+static devclass_t wctc4xxp_devclass;
+
+static int
+wctc4xxp_modevent(module_t mod __unused, int type, void *data __unused)
+{
+	int res;
+
+	switch (type) {
+	case MOD_LOAD:
+		res = wctc4xxp_init();
+		return (-res);
+	case MOD_UNLOAD:
+		wctc4xxp_cleanup();
+		return (0);
+	default:
+		return (EOPNOTSUPP);
+	}
+}
+
+DAHDI_DRIVER_MODULE(wctc4xxp, pci, wctc4xxp_pci_driver, wctc4xxp_devclass, wctc4xxp_modevent, 0);
+MODULE_DEPEND(wctc4xxp, dahdi, 1, 1, 1);
+MODULE_DEPEND(wctc4xxp, dahdi_transcode, 1, 1, 1);
+#else /* !__FreeBSD__ */
 MODULE_PARM_DESC(mode, "'g729', 'g723.1', or 'any'.  Default 'any'.");
 MODULE_DESCRIPTION("Wildcard TC400P+TC400M Driver");
 MODULE_AUTHOR("Digium Incorporated <support@digium.com>");
@@ -3690,3 +4250,4 @@ MODULE_LICENSE("GPL");
 
 module_init(wctc4xxp_init);
 module_exit(wctc4xxp_cleanup);
+#endif /* !__FreeBSD__ */
