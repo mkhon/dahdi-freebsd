@@ -411,6 +411,7 @@ cmd_cache_ctor(void *mem, int size, void *arg, int flags)
 {
 	struct tcb *cmd = (struct tcb *) mem;
 
+	memset(cmd, 0, sizeof(*cmd));
 	initialize_cmd(cmd);
 	return (0);
 }
@@ -443,7 +444,7 @@ __alloc_cmd(size_t size, gfp_t alloc_flags, unsigned long cmd_flags)
 	if (size < MIN_PACKET_LEN)
 		size = MIN_PACKET_LEN;
 #if defined(__FreeBSD__)
-	cmd = uma_zalloc(cmd_cache, M_WAITOK | M_ZERO);
+	cmd = uma_zalloc(cmd_cache, M_WAITOK);
 #else
 	cmd = kmem_cache_alloc(cmd_cache, alloc_flags);
 #endif
@@ -3198,7 +3199,7 @@ wctc4xxp_load_firmware(struct wcdte *wc, const struct firmware *firmware)
 	unsigned int last_byteloc;
 	unsigned int length;
 	struct tcb *cmd;
-	const char *firmware_data = (const char *) firmware->data;
+	const u8 *firmware_data = (const u8 *) firmware->data;
 #if defined(__FreeBSD__)
 	size_t firmware_size = firmware->datasize;
 #else
@@ -3771,7 +3772,7 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	unsigned int complexfmts;
 	struct firmware embedded_firmware;
 	const struct firmware *firmware = &embedded_firmware;
-	const char *firmware_data;
+	const u8 *firmware_data;
 #if !defined(HOTPLUG_FIRMWARE)
 	extern void _binary_dahdi_fw_tc400m_bin_size;
 	extern u8 _binary_dahdi_fw_tc400m_bin_start[];
