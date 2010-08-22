@@ -26,13 +26,17 @@ SUBDIR+=\
 SUBDIR+=\
 	wcfxo\
 	wctdm\
-	wctdm24xxp
+	wctdm24xxp\
+	dahdi-fw-hx8.bin\
+	${_dahdi_vpmadt032_loader}
 
 # E1/T1 cards
 SUBDIR+=\
 	wct4xxp\
 	wcte11xp\
-	wcte12xp
+	wcte12xp\
+	dahdi-fw-oct6114-064.bin\
+	dahdi-fw-oct6114-128.bin
 
 # ISDN cards
 SUBDIR+=\
@@ -40,14 +44,8 @@ SUBDIR+=\
 
 # Transcoding cards
 SUBDIR+=\
-	wctc4xxp
-
-# firmware drivers
-SUBDIR+=\
-	dahdi-fw-hx8.bin\
-	dahdi-fw-oct6114-064.bin\
-	dahdi-fw-oct6114-128.bin\
-	${_dahdi_vpmadt032_loader}
+	wctc4xxp\
+	dahdi-fw-tc400m.bin
 
 .if ${MACHINE_ARCH} == "i386" || ${MACHINE_ARCH} == "amd64"
 _dahdi_vpmadt032_loader=	dahdi_vpmadt032_loader
