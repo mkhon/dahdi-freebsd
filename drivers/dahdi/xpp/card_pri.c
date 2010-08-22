@@ -101,7 +101,7 @@ enum pri_protocol {
 static const char *pri_protocol_name(enum pri_protocol pri_protocol)
 {
 	static const char *protocol_names[] = {
-		[PRI_PROTO_0] = "??",	/* unkown */
+		[PRI_PROTO_0] = "??",	/* unknown */
 		[PRI_PROTO_E1] = "E1",
 		[PRI_PROTO_T1] = "T1",
 		[PRI_PROTO_J1] = "J1"
@@ -302,6 +302,8 @@ struct pri_leds {
 #define	REG_PC3		0x82	/* Port Configuration 3	*/
 #define	REG_PC4		0x83	/* Port Configuration 4	*/
 
+#define	REG_XPM2	0x28	/* Transmit Pulse Mask 2 */
+
 #define	VAL_PC_SYPR	0x00	/* Synchronous Pulse Receive (Input, low active) */
 #define	VAL_PC_GPI	0x90	/* General purpose input */
 #define	VAL_PC_GPOH	0x0A	/* General Purpose Output, high level */
@@ -471,7 +473,7 @@ static int write_cas_reg(xpd_t *xpd, int rsnum, byte val)
 
 	BUG_ON(!xpd);
 	priv = xpd->priv;
-	if (priv->pri_protocol && !priv->is_esf) {
+	if ((priv->pri_protocol == PRI_PROTO_T1) && !priv->is_esf) {
 		/* same data should be copied to RS7..12 in D4 only */
 		is_d4 = 1;
 	}
@@ -1091,7 +1093,7 @@ bad_lineconfig:
 
 static int pri_spanconfig(struct dahdi_span *span, struct dahdi_lineconfig *lc)
 {
-	xpd_t			*xpd = span->pvt;
+	xpd_t			*xpd = container_of(span, struct xpd, span);
 	struct PRI_priv_data	*priv;
 	int			ret;
 
@@ -1125,10 +1127,9 @@ static int pri_spanconfig(struct dahdi_span *span, struct dahdi_lineconfig *lc)
  */
 static int pri_chanconfig(struct dahdi_chan *chan, int sigtype)
 {
-	xpd_t			*xpd;
+	xpd_t			*xpd = container_of(chan->span, struct xpd, span);
 	struct PRI_priv_data	*priv;
 
-	xpd = chan->span->pvt;
 	BUG_ON(!xpd);
 	priv = xpd->priv;
 	DBG(GENERAL, "channel %d (%s) -> %s\n", chan->channo, chan->name, sig2str(sigtype));
@@ -1193,6 +1194,7 @@ static xpd_t *PRI_card_new(xbus_t *xbus, int unit, int subunit, const xproto_tab
 		return NULL;
 	}
 #endif
+	xbus->sync_mode_default = SYNC_MODE_AB;
 	return xpd;
 }
 
@@ -1271,6 +1273,30 @@ static int pri_audio_notify(struct dahdi_chan *chan, int on)
 }
 #endif
 
+static const struct dahdi_span_ops PRI_span_ops = {
+	.owner = THIS_MODULE,
+	.spanconfig = pri_spanconfig,
+	.chanconfig = pri_chanconfig,
+	.startup = pri_startup,
+	.shutdown = pri_shutdown,
+	.rbsbits = pri_rbsbits,
+	.open = xpp_open,
+	.close = xpp_close,
+	.hooksig = xpp_hooksig,	/* Only with RBS bits */
+	.ioctl = xpp_ioctl,
+	.maint = xpp_maint,
+#ifdef	DAHDI_SYNC_TICK
+	.sync_tick = dahdi_sync_tick,
+#endif
+#ifdef	CONFIG_DAHDI_WATCHDOG
+	.watchdog = xpp_watchdog,
+#endif
+
+#ifdef	DAHDI_AUDIO_NOTIFY
+	.audio_notify = pri_audio_notify,
+#endif
+};
+
 static int PRI_card_dahdi_preregistration(xpd_t *xpd, bool on)
 {
 	xbus_t			*xbus;
@@ -1290,7 +1316,6 @@ static int PRI_card_dahdi_preregistration(xpd_t *xpd, bool on)
 		/* Nothing to do yet */
 		return 0;
 	}
-	xpd->span.owner = THIS_MODULE;
 	xpd->span.spantype = pri_protocol_name(priv->pri_protocol);
 	xpd->span.linecompat = pri_linecompat(priv->pri_protocol);
 	xpd->span.deflaw = priv->deflaw;
@@ -1310,16 +1335,8 @@ static int PRI_card_dahdi_preregistration(xpd_t *xpd, bool on)
 			cur_chan->flags &= ~DAHDI_FLAG_HDLC;
 		}
 	}
-	if(!priv->is_cas)
-		clear_bit(DAHDI_FLAGBIT_RBS, &xpd->span.flags);
-	xpd->span.spanconfig = pri_spanconfig;
-	xpd->span.chanconfig = pri_chanconfig;
-	xpd->span.startup = pri_startup;
-	xpd->span.shutdown = pri_shutdown;
-	xpd->span.rbsbits = pri_rbsbits;
-#ifdef	DAHDI_AUDIO_NOTIFY
-	xpd->span.audio_notify = pri_audio_notify;
-#endif
+	xpd->offhook_state = xpd->wanted_pcm_mask;
+	xpd->span.ops = &PRI_span_ops;
 	return 0;
 }
 
@@ -1509,7 +1526,7 @@ static int PRI_card_close(xpd_t *xpd, lineno_t pos)
  */
 static int pri_startup(struct dahdi_span *span)
 {
-	xpd_t			*xpd = span->pvt;
+	xpd_t			*xpd = container_of(span, struct xpd, span);
 	struct PRI_priv_data	*priv;
 
 	BUG_ON(!xpd);
@@ -1523,6 +1540,7 @@ static int pri_startup(struct dahdi_span *span)
 	// Turn on all channels
 	CALL_XMETHOD(XPD_STATE, xpd->xbus, xpd, 1);
 	set_rbslines(xpd, 0);
+	write_subunit(xpd, REG_XPM2, 0x00);
 	return 0;
 }
 
@@ -1531,7 +1549,7 @@ static int pri_startup(struct dahdi_span *span)
  */
 static int pri_shutdown(struct dahdi_span *span)
 {
-	xpd_t			*xpd = span->pvt;
+	xpd_t			*xpd = container_of(span, struct xpd, span);
 	struct PRI_priv_data	*priv;
 
 	BUG_ON(!xpd);
@@ -1668,7 +1686,7 @@ static int pri_rbsbits(struct dahdi_chan *chan, int bits)
 		XPD_DBG(SIGNAL, xpd, "RBS: TX: No layer1 yet. Keep going.\n");
 	}
 	if(!priv->is_cas) {
-		XPD_NOTICE(xpd, "RBS: TX: not in CAS mode. Ignore.\n");
+		XPD_DBG(SIGNAL, xpd, "RBS: TX: not in CAS mode. Ignore.\n");
 		return 0;
 	}
 	if (chan->sig == DAHDI_SIG_NONE) {
@@ -1766,7 +1784,7 @@ static void PRI_card_pcm_fromspan(xbus_t *xbus, xpd_t *xpd, xpacket_t *pack)
 	spin_unlock_irqrestore(&xpd->lock, flags);
 }
 
-/*! Copy PCM chunks from the packet we recieved to the xpd struct.
+/*! Copy PCM chunks from the packet we received to the xpd struct.
  * \param xbus	xbus of target xpd.
  * \param xpd	target xpd.
  * \param pack	Source packet.
@@ -1827,6 +1845,18 @@ static void PRI_card_pcm_tospan(xbus_t *xbus, xpd_t *xpd, xpacket_t *pack)
 	}
 	XPD_COUNTER(xpd, PCM_READ)++;
 	spin_unlock_irqrestore(&xpd->lock, flags);
+}
+
+int PRI_timing_priority(xbus_t *xbus, xpd_t *xpd)
+{
+	struct PRI_priv_data	*priv;
+
+	priv = xpd->priv;
+	BUG_ON(!priv);
+	if (priv->layer1_up)
+		return xpd->timing_priority;
+	XPD_DBG(SYNC, xpd, "No timing priority (no layer1)\n");
+	return -ENOENT;
 }
 
 /*---------------- PRI: HOST COMMANDS -------------------------------------*/
@@ -1919,6 +1949,7 @@ static void layer1_state(xpd_t *xpd, byte data_low)
 				send_idlebits(xpd, 1);
 		}
 		xpd->span.alarms = alarms;
+		elect_syncer("LAYER1");
 		dahdi_alarm_notify(&xpd->span);
 		set_clocking(xpd);
 	}
@@ -2047,7 +2078,13 @@ static void process_cas_dchan(xpd_t *xpd, byte regnum, byte data_low)
 		return;
 	}
 	if(priv->pri_protocol == PRI_PROTO_E1) {
+		if(regnum == REG_RS1_E)
+			return; /* Time slot 0: Ignored for E1 */
 		if(regnum < REG_RS2_E) {
+			/* Should not happen, but harmless. Ignore */
+			if (regnum == REG_RS1_E)
+				return;
+
 			XPD_NOTICE(xpd,
 				"%s: received register 0x%X in protocol %s. Ignore\n",
 				__FUNCTION__, regnum, pri_protocol_name(priv->pri_protocol));
@@ -2142,6 +2179,7 @@ static xproto_table_t PROTO_TABLE(PRI) = {
 		.card_pcm_recompute	= PRI_card_pcm_recompute,
 		.card_pcm_fromspan	= PRI_card_pcm_fromspan,
 		.card_pcm_tospan	= PRI_card_pcm_tospan,
+		.card_timing_priority	= PRI_timing_priority,
 		.card_ioctl	= PRI_card_ioctl,
 		.card_close	= PRI_card_close,
 		.card_register_reply	= PRI_card_register_reply,

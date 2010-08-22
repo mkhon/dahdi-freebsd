@@ -789,38 +789,8 @@ struct dahdi_count {
 #define DAHDI_FLAG_MTP2		DAHDI_FLAG(MTP2)
 #define DAHDI_FLAG_HDLC56	DAHDI_FLAG(HDLC56)
 
-struct dahdi_span {
-	spinlock_t lock;
+struct dahdi_span_ops {
 	struct module *owner;		/*!< Which module is exporting this span. */
-	void *pvt;			/*!< Private stuff */
-	char name[40];			/*!< Span name */
-	char desc[80];			/*!< Span description */
-	const char *spantype;		/*!< span type in text form */
-	const char *manufacturer;	/*!< span's device manufacturer */
-	char devicetype[80];		/*!< span's device type */
-	char location[40];		/*!< span device's location in system */
-	int deflaw;			/*!< Default law (DAHDI_MULAW or DAHDI_ALAW) */
-	int alarms;			/*!< Pending alarms on span */
-	unsigned long flags;
-	int irq;			/*!< IRQ for this span's hardware */
-	int lbo;			/*!< Span Line-Buildout */
-	int lineconfig;			/*!< Span line configuration */
-	int linecompat;			/*!< Span line compatibility */
-	int channels;			/*!< Number of channels in span */
-	int txlevel;			/*!< Tx level */
-	int rxlevel;			/*!< Rx level */
-	int syncsrc;			/*!< current sync src (gets copied here) */
-	struct dahdi_count count;	/*!< Performance and Error counters */
-
-	int maintstat;			/*!< Maintenance state */
-	wait_queue_head_t maintq;	/*!< Maintenance queue */
-	int mainttimer;			/*!< Maintenance timer */
-	
-	int irqmisses;			/*!< Interrupt misses */
-
-	int timingslips;			/*!< Clock slips */
-
-	struct dahdi_chan **chans;		/*!< Member channel structures */
 
 	/*   ==== Span Callback Operations ====   */
 	/*! Req: Set the requested chunk size.  This is the unit in which you must
@@ -843,7 +813,6 @@ struct dahdi_span {
 	/*! Opt: send sync to spans */
 	int (*sync_tick)(struct dahdi_span *span, int is_master);
 #endif
-
 	/* ====  Channel Callback Operations ==== */
 	/*! Opt: Set signalling type (if appropriate) */
 	int (*chanconfig)(struct dahdi_chan *chan, int sigtype);
@@ -857,10 +826,6 @@ struct dahdi_span {
 	/*! Opt: IOCTL */
 	int (*ioctl)(struct dahdi_chan *chan, unsigned int cmd, unsigned long data);
 	
-	/*! Opt: Provide echo cancellation on a channel */
-	int (*echocan_create)(struct dahdi_chan *chan, struct dahdi_echocanparams *ecp,
-			      struct dahdi_echocanparam *p, struct dahdi_echocan_state **ec);
-
 	/* Okay, now we get to the signalling.  You have several options: */
 
 	/* Option 1: If you're a T1 like interface, you can just provide a
@@ -881,24 +846,66 @@ struct dahdi_span {
 	   which handles the individual hook states  */
 	int (*sethook)(struct dahdi_chan *chan, int hookstate);
 	
-	/*! Opt: Dacs the contents of chan2 into chan1 if possible */
-	int (*dacs)(struct dahdi_chan *chan1, struct dahdi_chan *chan2);
-
 	/*! Opt: Used to tell an onboard HDLC controller that there is data ready to transmit */
 	void (*hdlc_hard_xmit)(struct dahdi_chan *chan);
+
+	/*! If the watchdog detects no received data, it will call the
+	   watchdog routine */
+	int (*watchdog)(struct dahdi_span *span, int cause);
 
 #ifdef	DAHDI_AUDIO_NOTIFY
 	/*! Opt: audio is used, don't optimize out */
 	int (*audio_notify)(struct dahdi_chan *chan, int yes);
 #endif
 
+	/*! Opt: Dacs the contents of chan2 into chan1 if possible */
+	int (*dacs)(struct dahdi_chan *chan1, struct dahdi_chan *chan2);
+
+	/*! Opt: Provide echo cancellation on a channel */
+	int (*echocan_create)(struct dahdi_chan *chan,
+			      struct dahdi_echocanparams *ecp,
+			      struct dahdi_echocanparam *p,
+			      struct dahdi_echocan_state **ec);
+};
+
+struct dahdi_span {
+	spinlock_t lock;
+	char name[40];			/*!< Span name */
+	char desc[80];			/*!< Span description */
+	const char *spantype;		/*!< span type in text form */
+	const char *manufacturer;	/*!< span's device manufacturer */
+	char devicetype[80];		/*!< span's device type */
+	char location[40];		/*!< span device's location in system */
+	int deflaw;			/*!< Default law (DAHDI_MULAW or DAHDI_ALAW) */
+	int alarms;			/*!< Pending alarms on span */
+	unsigned long flags;
+	int irq;			/*!< IRQ for this span's hardware */
+	int lbo;			/*!< Span Line-Buildout */
+	int lineconfig;			/*!< Span line configuration */
+	int linecompat;			/*!< Span line compatibility (0 for
+					     analog spans)*/
+	int channels;			/*!< Number of channels in span */
+	int txlevel;			/*!< Tx level */
+	int rxlevel;			/*!< Rx level */
+	int syncsrc;			/*!< current sync src (gets copied here) */
+	struct dahdi_count count;	/*!< Performance and Error counters */
+
+	int maintstat;			/*!< Maintenance state */
+	wait_queue_head_t maintq;	/*!< Maintenance queue */
+	int mainttimer;			/*!< Maintenance timer */
+
+	int irqmisses;			/*!< Interrupt misses */
+	int timingslips;		/*!< Clock slips */
+
+	struct dahdi_chan **chans;	/*!< Member channel structures */
+
+	const struct dahdi_span_ops *ops;	/*!< span callbacks. */
+
 	/* Used by DAHDI only -- no user servicable parts inside */
 	int spanno;			/*!< Span number for DAHDI */
 	int offset;			/*!< Offset within a given card */
-	int lastalarms;		/*!< Previous alarms */
-	/*! If the watchdog detects no received data, it will call the
-	   watchdog routine */
-	int (*watchdog)(struct dahdi_span *span, int cause);
+	int lastalarms;			/*!< Previous alarms */
+
 #ifdef CONFIG_DAHDI_WATCHDOG
 	int watchcounter;
 	int watchstate;
@@ -1228,14 +1235,38 @@ static inline short dahdi_txtone_nextsample(struct dahdi_chan *ss)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 31)
 #define KERN_CONT ""
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 26)
-#define clamp(x, low, high) min (max (low, x), high)
+#ifndef clamp
+#define clamp(x, low, high) min(max(low, x), high)
+#endif
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 25)
 
 /* Some distributions backported fatal_signal_pending so we'll use a macro to
- * override the inline functino definition. */
+ * override the inline function definition. */
 #define fatal_signal_pending(p) \
 	(signal_pending((p)) && sigismember(&(p)->pending.signal, SIGKILL))
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 22)
+#include <linux/ctype.h>
+/* A define of 'clamp_val' happened to be added in the patch
+ * linux-2.6-sata-prep-work-for-rhel5-3.patch kernel-2.6.spec that also
+ * backported support for strcasecmp to some later RHEL/Centos kernels.
+ * If you have an older kernel that breaks because strcasecmp is already
+ * defined, somebody out-smarted us. In that case, replace the line below
+ * with '#if 0' to get the code building, and file a bug report at
+ * https://issues.asterisk.org/ .
+ */
+#ifndef clamp_val
+static inline int strcasecmp(const char *s1, const char *s2)
+{
+	int c1, c2;
+
+	do {
+		c1 = tolower(*s1++);
+		c2 = tolower(*s2++);
+	} while (c1 == c2 && c1 != 0);
+	return c1 - c2;
+}
+#endif /* clamp_val */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 18)
 static inline void list_replace(struct list_head *old, struct list_head *new)
 {
@@ -1249,6 +1280,7 @@ static inline void list_replace(struct list_head *old, struct list_head *new)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 12)
 #define synchronize_rcu() synchronize_kernel()
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 11)
+#if !defined(HAVE_WAIT_FOR_COMPLETION_TIMEOUT)
 static inline unsigned long
 wait_for_completion_timeout(struct completion *x, unsigned long timeout)
 {
@@ -1261,10 +1293,12 @@ wait_for_completion_timeout(struct completion *x, unsigned long timeout)
 
 	return timeout;
 }
+#endif
 #endif /* 2.6.11 */
 #endif /* 2.6.12 */
 #endif /* 2.6.14 */
 #endif /* 2.6.18 */
+#endif /* 2.6.22 */
 #endif /* 2.6.25 */
 #endif /* 2.6.26 */
 #endif /* 2.6.31 */
@@ -1272,6 +1306,53 @@ wait_for_completion_timeout(struct completion *x, unsigned long timeout)
 #ifndef DMA_BIT_MASK
 #define DMA_BIT_MASK(n)	(((n) == 64) ? ~0ULL : ((1ULL<<(n))-1))
 #endif
+
+/* prink-wrapper macros */
+#define	DAHDI_PRINTK(level, category, fmt, ...)	\
+	printk(KERN_ ## level "%s%s-%s: " fmt, #level, category, \
+			THIS_MODULE->name, ## __VA_ARGS__)
+#define	span_printk(level, category, span, fmt, ...)	\
+	printk(KERN_ ## level "%s%s-%s: span-%d: " fmt, #level,	\
+		category, THIS_MODULE->name, (span)->spanno, ## __VA_ARGS__)
+#define	chan_printk(level, category, chan, fmt, ...)	\
+	printk(KERN_ ## level "%s%s-%s: %d: " fmt, #level,	\
+		category, THIS_MODULE->name, (chan)->channo, ## __VA_ARGS__)
+#define	dahdi_err(fmt, ...)	DAHDI_PRINTK(ERR, "", fmt, ## __VA_ARGS__)
+#define	span_info(span, fmt, ...)	span_printk(INFO, "", span, fmt, \
+						## __VA_ARGS__)
+#define	span_notice(span, fmt, ...)	span_printk(NOTICE, "", span, fmt, \
+						## __VA_ARGS__)
+#define	span_err(span, fmt, ...)	span_printk(ERR, "", span, fmt, \
+						## __VA_ARGS__)
+#define	chan_notice(chan, fmt, ...)	chan_printk(NOTICE, "", chan, fmt, \
+						## __VA_ARGS__)
+#define	chan_err(chan, fmt, ...)	chan_printk(ERR, "", chan, fmt, \
+						## __VA_ARGS__)
+
+/* The dbg_* ones use a magical variable 'debug' and the user should be
+ * aware of that.
+*/
+#ifdef DAHDI_PRINK_MACROS_USE_debug
+#ifndef	BIT	/* added in 2.6.24 */
+#define	BIT(i)		(1UL << (i))
+#endif
+/* Standard debug bit values. Any module may define others. They must
+ * be of the form DAHDI_DBG_*
+ */
+#define	DAHDI_DBG_GENERAL	BIT(0)
+#define	DAHDI_DBG_DEVICES	BIT(7)	/* instantiation/destruction etc. */
+#define	dahdi_dbg(bits, fmt, ...)	\
+	((void)((debug & (DAHDI_DBG_ ## bits)) && DAHDI_PRINTK(DEBUG, \
+			"-" #bits, "%s: " fmt, __func__, ## __VA_ARGS__)))
+#define	span_dbg(bits, span, fmt, ...)	\
+			((void)((debug & (DAHDI_DBG_ ## bits)) && \
+				span_printk(DEBUG, "-" #bits, span, "%s: " \
+					fmt, __func__, ## __VA_ARGS__)))
+#define	chan_dbg(bits, chan, fmt, ...)	\
+			((void)((debug & (DAHDI_DBG_ ## bits)) && \
+				chan_printk(DEBUG, "-" #bits, chan, \
+					"%s: " fmt, __func__, ## __VA_ARGS__)))
+#endif /* DAHDI_PRINK_MACROS_USE_debug */
 
 void *dahdi_get_private_data(struct file *file);
 

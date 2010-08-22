@@ -157,6 +157,8 @@ struct wctdm_span {
 	struct dahdi_span span;
 	int timing_priority;
 	int spanno;
+	struct wctdm *wc;
+	struct b400m_span *bspan;
 };
 
 struct wctdm_chan {
@@ -241,6 +243,7 @@ struct wctdm {
 	* voicebus ISR.
 	*/
 			int lasttxhook;
+			int oppending_ms;
 			spinlock_t lasttxhooklock;
 			int palarms;
 			struct dahdi_vmwi_info vmwisetting;
@@ -268,6 +271,9 @@ struct wctdm {
 	struct wctdm_span *aspan;			/* pointer to the spans[] holding the analog span */
 	struct wctdm_span *spans[MAX_SPANS];
 	struct wctdm_chan *chans[NUM_MODULES];
+#ifdef CONFIG_VOICEBUS_ECREFERENCE
+	struct dahdi_fifo *ec_reference[NUM_MODULES];
+#endif
 
 	/* Only care about digital spans here */
 	/* int span_timing_prio[MAX_SPANS - 1]; */
@@ -276,6 +282,7 @@ struct wctdm {
 
 	int initialized;				/* =1 when the entire card is ready to go */
 	unsigned long checkflag;			/* Internal state flags and task bits */
+	int companding;
 };
 
 /* Atomic flag bits for checkflag field */

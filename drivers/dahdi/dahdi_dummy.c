@@ -98,7 +98,7 @@ static struct hrtimer zaptimer;
 #define CLOCK_SRC "Linux26"
 static struct timer_list timer;
 static atomic_t shutdown;
-#define JIFFIES_INTERVAL (HZ/250) 	/* 4ms is fine for dahdi_dummy */
+#define JIFFIES_INTERVAL max(HZ/250, 1) 	/* 4ms is fine for dahdi_dummy */
 #endif
 
 /* Different bits of the debug variable: */
@@ -199,6 +199,10 @@ static void dahdi_dummy_timer(unsigned long param)
 }
 #endif
 
+static const struct dahdi_span_ops dummy_ops = {
+	.owner = THIS_MODULE,
+};
+
 static int dahdi_dummy_initialize(struct dahdi_dummy *ztd)
 {
 	/* DAHDI stuff */
@@ -208,13 +212,12 @@ static int dahdi_dummy_initialize(struct dahdi_dummy *ztd)
 	sprintf(ztd->chan->name, "DAHDI_DUMMY/%d/%d", 1, 0);
 	dahdi_copy_string(ztd->span.devicetype, "DAHDI Dummy Timing", sizeof(ztd->span.devicetype));
 	ztd->chan->chanpos = 1;
-	ztd->span.owner = THIS_MODULE;
 	ztd->span.chans = &ztd->chan;
 	ztd->span.channels = 0;		/* no channels on our span */
 	ztd->span.deflaw = DAHDI_LAW_MULAW;
 	init_waitqueue_head(&ztd->span.maintq);
-	ztd->span.pvt = ztd;
 	ztd->chan->pvt = ztd;
+	ztd->span.ops = &dummy_ops;
 	if (dahdi_register(&ztd->span, 0)) {
 		return -1;
 	}

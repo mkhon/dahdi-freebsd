@@ -35,6 +35,7 @@
 #include <sys/module.h>
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/init.h>

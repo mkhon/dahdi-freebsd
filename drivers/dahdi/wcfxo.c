@@ -639,6 +639,11 @@ static int wcfxo_setreg(struct wcfxo *wc, unsigned char reg, unsigned char value
 	return -1;
 }
 
+static inline struct wcfxo *wcfxo_from_span(struct dahdi_span *span)
+{
+	return container_of(span, struct wcfxo, span);
+}
+
 static int wcfxo_open(struct dahdi_chan *chan)
 {
 	struct wcfxo *wc = chan->pvt;
@@ -651,7 +656,7 @@ static int wcfxo_open(struct dahdi_chan *chan)
 static int wcfxo_watchdog(struct dahdi_span *span, int event)
 {
 	printk(KERN_INFO "FXO: Restarting DMA\n");
-	wcfxo_restart_dma(span->pvt);
+	wcfxo_restart_dma(wcfxo_from_span(span));
 	return 0;
 }
 
@@ -710,10 +715,17 @@ static int wcfxo_hooksig(struct dahdi_chan *chan, enum dahdi_txsig txsig)
 	return 0;
 }
 
+static const struct dahdi_span_ops wcfxo_span_ops = {
+	.owner = THIS_MODULE,
+	.hooksig = wcfxo_hooksig,
+	.open = wcfxo_open,
+	.close = wcfxo_close,
+	.watchdog = wcfxo_watchdog,
+};
+
 static int wcfxo_initialize(struct wcfxo *wc)
 {
 	/* DAHDI stuff */
-	wc->span.owner = THIS_MODULE;
 	sprintf(wc->span.name, "WCFXO/%d", wc->pos);
 	snprintf(wc->span.desc, sizeof(wc->span.desc) - 1, "%s Board %d", wc->variety, wc->pos + 1);
 	sprintf(wc->chan->name, "WCFXO/%d/%d", wc->pos, 0);
@@ -725,20 +737,16 @@ static int wcfxo_initialize(struct wcfxo *wc)
 	wc->chan->chanpos = 1;
 	wc->span.chans = &wc->chan;
 	wc->span.channels = 1;
-	wc->span.hooksig = wcfxo_hooksig;
 	wc->span.irq = dahdi_pci_get_irq(wc->dev);
-	wc->span.open = wcfxo_open;
-	wc->span.close = wcfxo_close;
 	wc->span.flags = DAHDI_FLAG_RBS;
 	wc->span.deflaw = DAHDI_LAW_MULAW;
-	wc->span.watchdog = wcfxo_watchdog;
 #ifdef ENABLE_TASKLETS
 	tasklet_init(&wc->wcfxo_tlet, wcfxo_tasklet, (unsigned long)wc);
 #endif
 	init_waitqueue_head(&wc->span.maintq);
 
-	wc->span.pvt = wc;
 	wc->chan->pvt = wc;
+	wc->span.ops = &wcfxo_span_ops;
 	if (dahdi_register(&wc->span, 0)) {
 		printk(KERN_NOTICE "Unable to register span with DAHDI\n");
 		return -1;

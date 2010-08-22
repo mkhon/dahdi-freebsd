@@ -24,6 +24,7 @@
 
 #include <linux/wait.h>
 #include <linux/interrupt.h>	/* for tasklets */
+#include <linux/kref.h>
 #include "xpd.h"
 #include "xframe_queue.h"
 #include "xbus-pcm.h"
@@ -127,7 +128,6 @@ void transportops_put(xbus_t *xbus);
  * Encapsulate all poll related data of a single xbus.
  */
 struct xbus_workqueue {
-	xbus_t			*xbus;
 	struct workqueue_struct	*wq;
 	struct work_struct	xpds_init_work;
 	bool			xpds_init_done;
@@ -135,8 +135,13 @@ struct xbus_workqueue {
 	int			num_units;
 	int			num_units_initialized;
 	wait_queue_head_t	wait_for_xpd_initialization;
+#ifdef	CONFIG_PROC_FS
+#ifdef	OLD_PROC
 	struct proc_dir_entry	*proc_xbus_waitfor_xpds;
+#endif
+#endif
 	spinlock_t		worker_lock;
+	struct semaphore	running_initialization;
 };
 
 /*
@@ -153,10 +158,10 @@ void put_xframe(struct xframe_queue *q, xframe_t *xframe);
 #define	FREE_SEND_XFRAME(xbus, xframe)	put_xframe(&(xbus)->send_pool, (xframe))
 #define	FREE_RECV_XFRAME(xbus, xframe)	put_xframe(&(xbus)->receive_pool, (xframe))
 
-xbus_t		*xbus_num(uint num);
-xbus_t		*get_xbus(const char *msg, xbus_t *xbus);
-void		put_xbus(const char *msg, xbus_t *xbus);
-int		refcount_xbus(xbus_t *xbus);
+xbus_t	*xbus_num(uint num);
+xbus_t	*get_xbus(const char *msg, uint num);
+void	put_xbus(const char *msg, xbus_t *xbus);
+int	refcount_xbus(xbus_t *xbus);
 
 /*
  * An xbus is a transport layer for Xorcom Protocol commands
@@ -189,6 +194,8 @@ struct xbus {
 
 	bool			self_ticking;
 	enum sync_mode		sync_mode;
+	/* Managed by low-level drivers: */
+	enum sync_mode		sync_mode_default;
 	struct timer_list	command_timer;
 	unsigned int		xbus_frag_count;
 	struct xframe_queue	pcm_tospan;
@@ -202,6 +209,8 @@ struct xbus {
 	/* Device-Model */
 	struct device		astribank;
 #define	dev_to_xbus(dev)	container_of(dev, struct xbus, astribank)
+	struct kref		kref;
+#define kref_to_xbus(k) container_of(k, struct xbus, kref)
 
 	spinlock_t		lock;
 
@@ -220,8 +229,7 @@ struct xbus {
 	int			sample_pos;
 #endif
 
-	struct xbus_workqueue	*worker;
-	struct semaphore	in_worker;
+	struct xbus_workqueue	worker;
 
 	/*
 	 * Sync adjustment
@@ -302,6 +310,7 @@ xpacket_t *xframe_next_packet(xframe_t *xframe, int len);
 
 xpd_t	*xpd_of(const xbus_t *xbus, int xpd_num);
 xpd_t	*xpd_byaddr(const xbus_t *xbus, uint unit, uint subunit);
+int	xbus_check_unique(xbus_t *xbus);
 bool	xbus_setstate(xbus_t *xbus, enum xbus_state newstate);
 bool	xbus_setflags(xbus_t *xbus, int flagbit, bool on);
 xbus_t	*xbus_new(struct xbus_ops *ops, ushort max_send_size, struct device *transport_device, void *priv);
@@ -323,6 +332,8 @@ void	xpd_device_unregister(xpd_t *xpd);
 
 int	xpp_driver_init(void);
 void	xpp_driver_exit(void);
+int	xbus_sysfs_transport_create(xbus_t *xbus);
+void	xbus_sysfs_transport_remove(xbus_t *xbus);
 int	xbus_sysfs_create(xbus_t *xbus);
 void	xbus_sysfs_remove(xbus_t *xbus);
 

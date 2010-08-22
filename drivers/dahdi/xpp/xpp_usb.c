@@ -78,6 +78,14 @@ static DEF_PARM(uint, drop_pcm_after, 6, 0644, "Number of consecutive tx_sluggis
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,0)
 #  warning "This module is tested only with 2.6 kernels"
 #endif
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 34)
+#  define usb_alloc_coherent(dev, size, mem_flags, dma) \
+	usb_buffer_alloc(dev, size, mem_flags, dma)
+#  define usb_free_coherent(dev, size, addr, dma) \
+	usb_buffer_free(dev, size, addr, dma)
+#endif
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,12)
 #  undef USB_FIELDS_MISSING
 #else
@@ -258,7 +266,9 @@ static void xpp_send_callback(USB_PASS_CB(urb));
 static void xpp_receive_callback(USB_PASS_CB(urb));
 static int xusb_probe		(struct usb_interface *interface, const struct usb_device_id *id);
 static void xusb_disconnect	(struct usb_interface *interface);
+#ifdef	CONFIG_PROC_FS
 static int xusb_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data);
+#endif
 
 /*------------------------------------------------------------------*/
 
@@ -308,7 +318,7 @@ static xframe_t *alloc_xframe(xbus_t *xbus, gfp_t gfp_flags)
 		return NULL;
 	}
 	usb_init_urb(&uframe->urb);
-	p = usb_buffer_alloc(xusb->udev, size, gfp_flags, &uframe->urb.transfer_dma);
+	p = usb_alloc_coherent(xusb->udev, size, gfp_flags, &uframe->urb.transfer_dma);
 	if(!p) {
 		if((rate_limit++ % 1003) == 0)
 			XUSB_ERR(xusb, "buffer allocation failed (%d)\n", rate_limit);
@@ -330,7 +340,7 @@ static void free_xframe(xbus_t *xbus, xframe_t *xframe)
 
 	BUG_ON(xbus->transport.priv != uframe->xusb);
 	//XUSB_INFO(uframe->xusb, "frame_free\n");
-	usb_buffer_free(urb->dev, uframe->transfer_buffer_length,
+	usb_free_coherent(urb->dev, uframe->transfer_buffer_length,
 			urb->transfer_buffer,
 			urb->transfer_dma);
 	memset(uframe, 0, sizeof(*uframe));
@@ -648,7 +658,9 @@ static int xusb_probe(struct usb_interface *interface, const struct usb_device_i
 	struct usb_host_interface	*iface_desc = usb_altnum_to_altsetting(interface, 0);
 	xusb_t			*xusb = NULL;
 	struct xusb_model_info	*model_info = (struct xusb_model_info*)id->driver_info;
+#ifdef CONFIG_PROC_FS
 	struct proc_dir_entry	*procsummary = NULL;
+#endif
 	xbus_t			*xbus = NULL;
 	unsigned long		flags;
 	int			retval = -ENOMEM;
@@ -776,11 +788,13 @@ probe_failed:
 		KZFREE(xusb);
 	}
 	if(xbus) {
+#ifdef CONFIG_PROC_FS
 		if(procsummary) {
 			XBUS_DBG(PROC, xbus, "Remove proc_entry: " PROC_USBXPP_SUMMARY "\n");
 			remove_proc_entry(PROC_USBXPP_SUMMARY, xbus->proc_xbus_dir);
 			procsummary = NULL;
 		}
+#endif
 		ERR("Calling xbus_disconnect()\n");
 		xbus_disconnect(xbus);		// Blocking until fully deactivated!
 	}

@@ -110,6 +110,7 @@ int total_registered_spans(void)
 	return atomic_read(&num_registered_spans);
 }
 
+#ifdef	CONFIG_PROC_FS
 static int xpd_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data);
 #ifdef	OLD_PROC
 static int proc_xpd_ztregister_read(char *page, char **start, off_t off, int count, int *eof, void *data);
@@ -117,31 +118,42 @@ static int proc_xpd_ztregister_write(struct file *file, const char __user *buffe
 static int proc_xpd_blink_read(char *page, char **start, off_t off, int count, int *eof, void *data);
 static int proc_xpd_blink_write(struct file *file, const char __user *buffer, unsigned long count, void *data);
 #endif
+#endif
 
 /*------------------------- XPD Management -------------------------*/
 
-static atomic_t *refcount_xpd(xpd_t *xpd)
+/*
+ * Called by put_xpd() when XPD has no more references.
+ */
+static void xpd_destroy(struct kref *kref)
 {
-	struct kref *kref = &xpd->xpd_dev.kobj.kref;
+	xpd_t	*xpd;
 
-	return &kref->refcount;
+	xpd = kref_to_xpd(kref);
+	XPD_DBG(DEVICES, xpd, "%s\n", __func__);
+	xpd_device_unregister(xpd);
+}
+
+int refcount_xpd(xpd_t *xpd)
+{
+	struct kref *kref = &xpd->kref;
+
+	return atomic_read(&kref->refcount);
 }
 
 xpd_t *get_xpd(const char *msg, xpd_t *xpd)
 {
-	struct device	*dev;
-
 	XPD_DBG(DEVICES, xpd, "%s: refcount_xpd=%d\n",
-		msg, atomic_read(refcount_xpd(xpd)));
-	dev = get_device(&xpd->xpd_dev);
-	return dev_to_xpd(dev);
+		msg, refcount_xpd(xpd));
+	kref_get(&xpd->kref);
+	return xpd;
 }
 
 void put_xpd(const char *msg, xpd_t *xpd)
 {
 	XPD_DBG(DEVICES, xpd, "%s: refcount_xpd=%d\n",
-		msg, atomic_read(refcount_xpd(xpd)));
-	put_device(&xpd->xpd_dev);
+		msg, refcount_xpd(xpd));
+	kref_put(&xpd->kref, xpd_destroy);
 }
 
 static void xpd_proc_remove(xbus_t *xbus, xpd_t *xpd)
@@ -216,9 +228,11 @@ static int xpd_proc_create(xbus_t *xbus, xpd_t *xpd)
 #endif
 #endif
 	return 0;
+#ifdef	CONFIG_PROC_FS
 err:
 	xpd_proc_remove(xbus, xpd);
 	return -EFAULT;
+#endif
 }
 
 void xpd_free(xpd_t *xpd)
@@ -243,6 +257,9 @@ void xpd_free(xpd_t *xpd)
 	}
 	KZFREE(xpd);
 	DBG(DEVICES, "refcount_xbus=%d\n", refcount_xbus(xbus));
+	/*
+	 * This must be last, so the xbus cannot be released before the xpd
+	 */
 	put_xbus(__FUNCTION__, xbus);		/* was taken in xpd_alloc() */
 }
 
@@ -327,7 +344,7 @@ static int xpd_read_proc(char *page, char **start, off_t off, int count, int *eo
 	len += sprintf(page + len, "xpd_state: %s (%d)\n",
 		xpd_statename(xpd->xpd_state), xpd->xpd_state);
 	len += sprintf(page + len, "open_counter=%d refcount=%d\n",
-		atomic_read(&xpd->open_counter), atomic_read(refcount_xpd(xpd)));
+		atomic_read(&xpd->open_counter), refcount_xpd(xpd));
 	len += sprintf(page + len, "Address: U=%d S=%d\n", xpd->addr.unit, xpd->addr.subunit);
 	len += sprintf(page + len, "Subunits: %d\n", xpd->subunits);
 	len += sprintf(page + len, "Type: %d.%d\n\n", xpd->type, xpd->subtype);
@@ -353,7 +370,7 @@ static int xpd_read_proc(char *page, char **start, off_t off, int count, int *eo
 	}
 	len += sprintf(page + len, "\n\t%-17s: ", "msg_waiting");
 	for_each_line(xpd, i) {
-		len += sprintf(page + len, "%d ", IS_SET(xpd->msg_waiting, i));
+		len += sprintf(page + len, "%d ", xpd->msg_waiting[i]);
 	}
 	len += sprintf(page + len, "\n\t%-17s: ", "ringing");
 	for_each_line(xpd, i) {
@@ -530,6 +547,7 @@ __must_check xpd_t *xpd_alloc(xbus_t *xbus,
 
 	atomic_set(&xpd->dahdi_registered, 0);
 	atomic_set(&xpd->open_counter, 0);
+	kref_init(&xpd->kref);
 
 	/* For USB-1 disable some channels */
 	if(MAX_SEND_SIZE(xbus) < RPACKET_SIZE(GLOBAL, PCM_WRITE)) {
@@ -549,8 +567,12 @@ __must_check xpd_t *xpd_alloc(xbus_t *xbus,
 	xbus_xpd_bind(xbus, xpd, unit, subunit);
 	if(xpd_proc_create(xbus, xpd) < 0)
 		goto err;
-	xbus = get_xbus(__FUNCTION__, xbus);	/* returned in xpd_free() */
-	xproto_get(type);			/* will be returned in xpd_free() */
+	/*
+	 * This makes sure the xbus cannot be removed before this xpd
+	 * is removed in xpd_free()
+	 */
+	xbus = get_xbus(__func__, xbus->num);	/* returned in xpd_free() */
+	xproto_get(type);		/* will be returned in xpd_free() */
 	return xpd;
 err:
 	if(xpd) {
@@ -601,7 +623,6 @@ void xbus_request_removal(xbus_t *xbus)
 					dahdi_qevent_lock(XPD_CHAN(xpd, j),DAHDI_EVENT_REMOVED);
 				}
 			}
-			xpd_device_unregister(xpd);
 		}
 	}
 }
@@ -831,12 +852,6 @@ static int proc_xpd_blink_write(struct file *file, const char __user *buffer, un
  */
 int xpp_open(struct dahdi_chan *chan)
 {
-#if 0
-	xpd_t		*xpd = chan->pvt;
-	xbus_t		*xbus = xpd->xbus;
-	int		pos = chan->chanpos - 1;
-	unsigned long	flags;
-#else
 	xpd_t		*xpd;
 	xbus_t		*xbus;
 	int		pos;
@@ -863,7 +878,6 @@ int xpp_open(struct dahdi_chan *chan)
 		put_xpd(__FUNCTION__, xpd);
 		return -ENODEV;
 	}
-#endif
 	spin_lock_irqsave(&xbus->lock, flags);
 	atomic_inc(&xpd->open_counter);
 	LINE_DBG(DEVICES, xpd, pos, "%s[%d]: open_counter=%d\n",
@@ -930,7 +944,7 @@ int xpp_ioctl(struct dahdi_chan *chan, unsigned int cmd, unsigned long arg)
 	return 0;
 }
 
-static int xpp_hooksig(struct dahdi_chan *chan, enum dahdi_txsig txsig)
+int xpp_hooksig(struct dahdi_chan *chan, enum dahdi_txsig txsig)
 {
 	xpd_t	*xpd = chan->pvt;
 	xbus_t	*xbus;
@@ -952,6 +966,7 @@ static int xpp_hooksig(struct dahdi_chan *chan, enum dahdi_txsig txsig)
 	DBG(SIGNAL, "Setting %s to %s (%d)\n", chan->name, txsig2str(txsig), txsig);
 	return CALL_XMETHOD(card_hooksig, xbus, xpd, pos, txsig);
 }
+EXPORT_SYMBOL(xpp_hooksig);
 
 /* Req: Set the requested chunk size.  This is the unit in which you must
    report results for conferencing, etc */
@@ -960,7 +975,7 @@ int xpp_setchunksize(struct dahdi_span *span, int chunksize);
 /* Enable maintenance modes */
 int xpp_maint(struct dahdi_span *span, int cmd)
 {
-	xpd_t		*xpd = span->pvt;
+	xpd_t		*xpd = container_of(span, struct xpd, span);
 	int		ret = 0;
 #if 0
 	char		loopback_data[] = "THE-QUICK-BROWN-FOX-JUMPED-OVER-THE-LAZY-DOG";
@@ -1054,6 +1069,23 @@ int dahdi_unregister_xpd(xpd_t *xpd)
 	return 0;
 }
 
+static const struct dahdi_span_ops xpp_span_ops = {
+	.owner = THIS_MODULE,
+	.open = xpp_open,
+	.close = xpp_close,
+	.ioctl = xpp_ioctl,
+	.maint = xpp_maint,
+};
+
+static const struct dahdi_span_ops xpp_rbs_span_ops = {
+	.owner = THIS_MODULE,
+	.hooksig = xpp_hooksig,
+	.open = xpp_open,
+	.close = xpp_close,
+	.ioctl = xpp_ioctl,
+	.maint = xpp_maint,
+};
+
 int dahdi_register_xpd(xpd_t *xpd)
 {
 	struct dahdi_span	*span;
@@ -1082,17 +1114,15 @@ int dahdi_register_xpd(xpd_t *xpd)
 	snprintf(span->name, MAX_SPANNAME, "%s/%s", xbus->busname, xpd->xpdname);
 	span->deflaw = DAHDI_LAW_MULAW;	/* default, may be overriden by card_* drivers */
 	init_waitqueue_head(&span->maintq);
-	span->pvt = xpd;
 	span->channels = cn;
 	span->chans = xpd->chans;
 
-	span->open = xpp_open;
-	span->close = xpp_close;
 	span->flags = DAHDI_FLAG_RBS;
 	if(xops->card_hooksig)
-		span->hooksig = xpp_hooksig;	/* Only with RBS bits */
-	span->ioctl = xpp_ioctl;
-	span->maint = xpp_maint;
+		span->ops = &xpp_rbs_span_ops;	/* Only with RBS bits */
+	else
+		span->ops = &xpp_span_ops;
+
 	/*
 	 * This actually describe the dahdi_spaninfo version 3
 	 * A bunch of unrelated data exported via a modified ioctl()
@@ -1125,21 +1155,11 @@ int dahdi_register_xpd(xpd_t *xpd)
 	 * No irq's for you today!
 	 */
 	span->irq = 0;
-#ifdef	DAHDI_SYNC_TICK
-	span->sync_tick = dahdi_sync_tick;
-#endif
-#ifdef	CONFIG_DAHDI_WATCHDOG
-	span->watchdog = xpp_watchdog;
-#endif
 
 	snprintf(xpd->span.desc, MAX_SPANDESC, "Xorcom XPD #%02d/%1d%1d: %s",
 			xbus->num, xpd->addr.unit, xpd->addr.subunit, xpd->type_name);
 	XPD_DBG(GENERAL, xpd, "Registering span '%s'\n", xpd->span.desc);
 	xpd->xops->card_dahdi_preregistration(xpd, 1);
-	if(!xpd->span.owner) {
-		XPD_ERR(xpd, "NO span.owner field -- bug in low-level driver\n");
-		WARN_ON(!xpd->span.owner);
-	}
 	if(dahdi_register(&xpd->span, prefmaster)) {
 		XPD_ERR(xpd, "Failed to dahdi_register span\n");
 		return -ENODEV;
@@ -1178,7 +1198,8 @@ static void do_cleanup(void)
 
 static int __init xpp_dahdi_init(void)
 {
-	int			ret = 0;
+	int	ret = 0;
+	void	*top = NULL;
 
 	INFO("revision %s MAX_XPDS=%d (%d*%d)\n", XPP_VERSION,
 			MAX_XPDS, MAX_UNIT, MAX_SUBUNIT);
@@ -1193,13 +1214,14 @@ static int __init xpp_dahdi_init(void)
 		ret = -EIO;
 		goto err;
 	}
+	top = xpp_proc_toplevel;
 #endif
 	ret = xbus_core_init();
 	if(ret) {
 		ERR("xbus_core_init failed (%d)\n", ret);
 		goto err;
 	}
-	ret = xbus_pcm_init(xpp_proc_toplevel);
+	ret = xbus_pcm_init(top);
 	if(ret) {
 		ERR("xbus_pcm_init failed (%d)\n", ret);
 		xbus_core_shutdown();

@@ -389,9 +389,14 @@ static void ztdynamic_run(void)
 #define ztdynamic_run __ztdynamic_run
 #endif
 
+static inline struct dahdi_dynamic *dynamic_from_span(struct dahdi_span *span)
+{
+	return container_of(span, struct dahdi_dynamic, span);
+}
+
 void dahdi_dynamic_receive(struct dahdi_span *span, unsigned char *msg, int msglen)
 {
-	struct dahdi_dynamic *ztd = span->pvt;
+	struct dahdi_dynamic *ztd = dynamic_from_span(span);
 	int newerr=0;
 	int sflags;
 	int xlen;
@@ -619,8 +624,7 @@ static int ztd_rbsbits(struct dahdi_chan *chan, int bits)
 
 static int ztd_open(struct dahdi_chan *chan)
 {
-	struct dahdi_dynamic *z;
-	z = chan->span->pvt;
+	struct dahdi_dynamic *z = dynamic_from_span(chan->span);
 	if (likely(z)) {
 		if (unlikely(z->dead))
 			return -ENODEV;
@@ -632,7 +636,7 @@ static int ztd_open(struct dahdi_chan *chan)
 static int ztd_chanconfig(struct dahdi_chan *chan, int sigtype)
 {
 	unsigned long flags;
-	struct dahdi_dynamic *z = chan->span->pvt;
+	struct dahdi_dynamic *z = dynamic_from_span(chan->span);
 
 	if (!z)
 		return 0;
@@ -654,8 +658,7 @@ static int ztd_chanconfig(struct dahdi_chan *chan, int sigtype)
 
 static int ztd_close(struct dahdi_chan *chan)
 {
-	struct dahdi_dynamic *z;
-	z = chan->span->pvt;
+	struct dahdi_dynamic *z = dynamic_from_span(chan->span);
 	if (z) {
 		z->usecount--;
 		if (z->dead && !z->usecount)
@@ -668,7 +671,7 @@ static void ztd_hdlc_xmit(struct dahdi_chan *chan)
 {
 	int res;
 	unsigned size = DAHDI_CHUNKSIZE - 1;
-	struct dahdi_dynamic *z = chan->span->pvt;
+	struct dahdi_dynamic *z = dynamic_from_span(chan->span);
 
 	chan->writechunk[0] = 0;
 	res = dahdi_hdlc_getbuf(chan, chan->writechunk + 1, &size);
@@ -691,7 +694,7 @@ static void ztd_hdlc_xmit(struct dahdi_chan *chan)
 static void ztd_hdlc_hard_xmit(struct dahdi_chan *chan)
 {
 	struct dahdi_chan *sigchan;
-	struct dahdi_dynamic *z = chan->span->pvt;
+	struct dahdi_dynamic *z = dynamic_from_span(chan->span);
 
 	rcu_read_lock();
 	if ((sigchan = z->sigchan) == NULL) {
@@ -713,6 +716,15 @@ static void ztd_hdlc_hard_xmit(struct dahdi_chan *chan)
 	atomic_set(&z->sigactive, 1);
 	ztd_hdlc_xmit(sigchan);
 }
+
+static const struct dahdi_span_ops dynamic_ops = {
+	.owner = THIS_MODULE,
+	.rbsbits = ztd_rbsbits,
+	.open = ztd_open,
+	.close = ztd_close,
+	.chanconfig = ztd_chanconfig,
+	.hdlc_hard_xmit = ztd_hdlc_hard_xmit
+};
 
 static int create_dynamic(struct dahdi_dynamic_span *zds)
 {
@@ -772,17 +784,11 @@ static int create_dynamic(struct dahdi_dynamic_span *zds)
 	z->timing = zds->timing;
 	sprintf(z->span.name, "DYN/%s/%s", zds->driver, zds->addr);
 	sprintf(z->span.desc, "Dynamic '%s' span at '%s'", zds->driver, zds->addr);
-	z->span.owner = THIS_MODULE;
 	z->span.channels = zds->numchans;
-	z->span.pvt = z;
 	z->span.deflaw = DAHDI_LAW_MULAW;
 	z->span.flags |= DAHDI_FLAG_RBS;
 	z->span.chans = z->chans;
-	z->span.rbsbits = ztd_rbsbits;
-	z->span.open = ztd_open;
-	z->span.close = ztd_close;
-	z->span.chanconfig = ztd_chanconfig;
-	z->span.hdlc_hard_xmit = ztd_hdlc_hard_xmit;
+	z->span.ops = &dynamic_ops;
 	z->sigchan = NULL;
 	atomic_set(&z->sigactive, 0);
 	for (x=0; x < z->span.channels; x++) {

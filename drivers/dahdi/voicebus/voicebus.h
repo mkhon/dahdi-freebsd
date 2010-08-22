@@ -62,6 +62,27 @@
 /* Define this in order to create a debugging network interface. */
 #undef VOICEBUS_NET_DEBUG
 
+/* Define this to only run the processing in an interrupt handler
+ * (and not tasklet). */
+#undef CONFIG_VOICEBUS_INTERRUPT
+
+#define CONFIG_VOICEBUS_ITHREAD
+
+/* Define this to use a FIFO for the software echocan reference.
+ * (experimental) */
+#undef CONFIG_VOICEBUS_ECREFERENCE
+
+#ifdef CONFIG_VOICEBUS_ECREFERENCE
+
+struct dahdi_fifo;
+unsigned int __dahdi_fifo_put(struct dahdi_fifo *fifo, u8 *data, size_t size);
+unsigned int __dahdi_fifo_get(struct dahdi_fifo *fifo, u8 *data, size_t size);
+void dahdi_fifo_free(struct dahdi_fifo *fifo);
+struct dahdi_fifo *dahdi_fifo_alloc(size_t maxsize, gfp_t alloc_flags);
+
+#endif
+
+
 struct voicebus;
 
 struct vbb {
@@ -99,11 +120,25 @@ struct voicebus_descriptor_list {
 };
 
 /* Bit definitions for struct voicebus.flags */
+#define VOICEBUS_SHUTDOWN			0
 #define VOICEBUS_STOP				1
 #define VOICEBUS_STOPPED			2
 #define VOICEBUS_LATENCY_LOCKED			3
-#define VOICEBUS_NORMAL_MODE			4
-#define VOICEBUS_USERMODE			5
+#define VOICEBUS_HARD_UNDERRUN			4
+
+/**
+ * voicebus_mode
+ *
+ * NORMAL:	For non-hx8 boards.  Uses idle_buffers.
+ * BOOT:	For hx8 boards.  For sending single packets at a time.
+ * RELAXED:	Normal operating mode for Hx8 Boards.  Does not use
+ *		idle_buffers.
+ */
+enum voicebus_mode {
+	NORMAL = 0,
+	BOOT = 1,
+	HX8 = 2,
+};
 
 /**
  * struct voicebus - Represents physical interface to voicebus card.
@@ -141,6 +176,11 @@ struct voicebus {
 #endif
 	const int		*debug;
 	struct tasklet_struct 	tasklet;
+	enum voicebus_mode	mode;
+
+#if defined(CONFIG_VOICEBUS_INTERRUPT)
+	atomic_t		deferred_disabled_count;
+#endif
 
 #if defined(CONFIG_VOICEBUS_TIMER)
 	struct timer_list	timer;
@@ -148,11 +188,11 @@ struct voicebus {
 
 	struct work_struct	underrun_work;
 	const struct voicebus_operations *ops;
-	struct completion	stopped_completion;
 	unsigned long		flags;
 	unsigned int		min_tx_buffer_count;
 	unsigned int		max_latency;
 	struct list_head	tx_complete;
+	struct list_head	free_rx;
 
 #ifdef VOICEBUS_NET_DEBUG
 	struct sk_buff_head captured_packets;
@@ -175,10 +215,10 @@ extern struct kmem_cache *voicebus_vbb_cache;
 #endif /* !__FreeBSD__ */
 
 int __voicebus_init(struct voicebus *vb, const char *board_name,
-		    int normal_mode);
+		    enum voicebus_mode mode);
 void voicebus_release(struct voicebus *vb);
 int voicebus_start(struct voicebus *vb);
-int voicebus_stop(struct voicebus *vb);
+void voicebus_stop(struct voicebus *vb);
 struct vbb *voicebus_alloc(struct voicebus *vb, int malloc_flags);
 void voicebus_free(struct voicebus *vb, struct vbb *vbb);
 int voicebus_transmit(struct voicebus *vb, struct vbb *vbb);
@@ -187,13 +227,13 @@ int voicebus_current_latency(struct voicebus *vb);
 
 static inline int voicebus_init(struct voicebus *vb, const char *board_name)
 {
-	return __voicebus_init(vb, board_name, 1);
+	return __voicebus_init(vb, board_name, NORMAL);
 }
 
 static inline int
-voicebus_no_idle_init(struct voicebus *vb, const char *board_name)
+voicebus_boot_init(struct voicebus *vb, const char *board_name)
 {
-	return __voicebus_init(vb, board_name, 0);
+	return __voicebus_init(vb, board_name, BOOT);
 }
 
 /**
@@ -225,7 +265,12 @@ static inline int voicebus_is_latency_locked(const struct voicebus *vb)
 
 static inline void voicebus_set_normal_mode(struct voicebus *vb)
 {
-	set_bit(VOICEBUS_NORMAL_MODE, &vb->flags);
+	vb->mode = NORMAL;
+}
+
+static inline void voicebus_set_hx8_mode(struct voicebus *vb)
+{
+	vb->mode = HX8;
 }
 
 /**
@@ -234,10 +279,11 @@ static inline void voicebus_set_normal_mode(struct voicebus *vb)
 static inline void
 voicebus_set_maxlatency(struct voicebus *vb, unsigned int max_latency)
 {
-	spin_lock_bh(&vb->lock);
+	unsigned long flags;
+	spin_lock_irqsave(&vb->lock, flags);
 	vb->max_latency = clamp(max_latency,
 				vb->min_tx_buffer_count,
 				VOICEBUS_DEFAULT_MAXLATENCY);
-	spin_unlock_bh(&vb->lock);
+	spin_unlock_irqrestore(&vb->lock, flags);
 }
 #endif /* __VOICEBUS_H__ */

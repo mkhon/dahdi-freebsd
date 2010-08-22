@@ -36,7 +36,6 @@
 
 #include <dev/pci/pcivar.h>
 
-typedef int bool;
 #define fatal_signal_pending(x)	0
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
@@ -51,9 +50,9 @@ typedef int bool;
 #include <linux/workqueue.h>
 #include <linux/delay.h>
 #include <linux/sched.h>
-#include <stdbool.h>
 #endif /* !__FreeBSD__ */
 
+#include <stdbool.h>
 #include <dahdi/kernel.h>
 
 #include "wct4xxp/wct4xxp.h"	/* For certain definitions */
@@ -74,7 +73,6 @@ static int alarmdebounce = 2500; /* LOF/LFA def to 2.5s AT&T TR54016*/
 static int losalarmdebounce = 2500; /* LOS def to 2.5s AT&T TR54016*/
 static int aisalarmdebounce = 2500; /* AIS(blue) def to 2.5s AT&T TR54016*/
 static int yelalarmdebounce = 500; /* RAI(yellow) def to 0.5s AT&T devguide */
-static int loopback = 0;
 static int t1e1override = -1;
 static int unchannelized = 0;
 static int latency = VOICEBUS_DEFAULT_LATENCY;
@@ -86,9 +84,9 @@ static int vpmnlptype = DEFAULT_NLPTYPE;
 static int vpmnlpthresh = DEFAULT_NLPTHRESH;
 static int vpmnlpmaxsupp = DEFAULT_NLPMAXSUPP;
 
-static int echocan_create(struct dahdi_chan *chan, struct dahdi_echocanparams *ecp,
-			   struct dahdi_echocanparam *p, struct dahdi_echocan_state **ec);
 static void echocan_free(struct dahdi_chan *chan, struct dahdi_echocan_state *ec);
+static int t1xxp_clear_maint(struct dahdi_span *span);
+static int check_and_load_vpm(struct t1 *wc);
 
 static const struct dahdi_echocan_features vpm150m_ec_features = {
 	.NLP_automatic = 1,
@@ -125,6 +123,7 @@ static struct command *get_free_cmd(struct t1 *wc)
 
 	cmd = uma_zalloc(cmd_cache, M_WAITOK | M_ZERO);
 	if (cmd) {
+		init_completion(&cmd->complete);
 		INIT_LIST_HEAD(&cmd->node);
 	}
 	return cmd;
@@ -147,6 +146,7 @@ static struct command *get_free_cmd(struct t1 *wc)
 	cmd = kmem_cache_alloc(cmd_cache, GFP_ATOMIC);
 	if (cmd) {
 		memset(cmd, 0, sizeof(*cmd));
+		init_completion(&cmd->complete);
 		INIT_LIST_HEAD(&cmd->node);
 	}
 	return cmd;
@@ -154,6 +154,7 @@ static struct command *get_free_cmd(struct t1 *wc)
 
 static void free_cmd(struct t1 *wc, struct command *cmd)
 {
+	destroy_completion(&cmd->complete);
 	kmem_cache_free(cmd_cache, cmd);
 }
 #endif /* !__FreeBSD__ */
@@ -174,8 +175,6 @@ static struct command *get_pending_cmd(struct t1 *wc)
 static void submit_cmd(struct t1 *wc, struct command *cmd)
 {
 	unsigned long flags;
-	if (cmd->flags & (__CMD_RD | __CMD_PINS))
-		init_completion(&cmd->complete);
 	spin_lock_irqsave(&wc->cmd_list_lock, flags);
 	list_add_tail(&cmd->node, &wc->pending_cmds);
 	spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
@@ -187,6 +186,11 @@ static void resend_cmds(struct t1 *wc)
 	spin_lock_irqsave(&wc->cmd_list_lock, flags);
 	list_splice_init(&wc->active_cmds, &wc->pending_cmds);
 	spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
+
+	spin_lock_irqsave(&wc->reglock, flags);
+	if (wc->vpmadt032)
+		vpmadt032_resend(wc->vpmadt032);
+	spin_unlock_irqrestore(&wc->reglock, flags);
 }
 
 static void cmd_dequeue(struct t1 *wc, unsigned char *writechunk, int eframe, int slot)
@@ -249,7 +253,7 @@ static inline void cmd_decipher(struct t1 *wc, const u8 *readchunk)
 		if (cmd->flags & (__CMD_WR | __CMD_LEDS)) {
 			/* Nobody is waiting on writes...so let's just
 			 * free them here. */
-			list_del(&cmd->node);
+			list_del_init(&cmd->node);
 			free_cmd(wc, cmd);
 		} else {
 			cmd->data |= readchunk[CMD_BYTE(cmd->cs_slot, 2, IS_VPM)];
@@ -294,8 +298,7 @@ static inline void cmd_decipher_vpmadt032(struct t1 *wc, const u8 *readchunk)
 	cmd->data  = (0xff & readchunk[CMD_BYTE(2, 1, 1)]) << 8;
 	cmd->data |= readchunk[CMD_BYTE(2, 2, 1)];
 	if (cmd->desc & __VPM150M_WR) {
-		/* Writes do not need any acknowledgement */
-		list_add_tail(&cmd->node, &vpm->free_cmds);
+		kfree(cmd);
 	} else {
 		cmd->desc |= __VPM150M_FIN;
 		complete(&cmd->complete);
@@ -604,6 +607,7 @@ static int t1_getreg(struct t1 *wc, int addr)
 {
 	struct command *cmd =  NULL;
 	unsigned long ret;
+	unsigned long flags;
 
 	might_sleep();
 
@@ -614,17 +618,31 @@ static int t1_getreg(struct t1 *wc, int addr)
 	cmd->data = 0x00;
 	cmd->flags = __CMD_RD;
 	submit_cmd(wc, cmd);
-	ret = wait_for_completion_timeout(&cmd->complete, HZ*2);
+	ret = wait_for_completion_timeout(&cmd->complete, HZ*10);
 	if (unlikely(!ret)) {
-		spin_lock_bh(&wc->cmd_list_lock);
-		list_del(&cmd->node);
-		spin_unlock_bh(&wc->cmd_list_lock);
-		if (printk_ratelimit()) {
-			dev_warn(&wc->vb.pdev->dev,
-				 "Timeout in %s\n", __func__);
+		spin_lock_irqsave(&wc->cmd_list_lock, flags);
+		if (!list_empty(&cmd->node)) {
+			/* Since we've removed this command from the list, we
+			 * can go ahead and free it right away. */
+			list_del_init(&cmd->node);
+			spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
+			if (printk_ratelimit()) {
+				dev_warn(&wc->vb.pdev->dev,
+					 "Timeout in %s\n", __func__);
+			}
+			free_cmd(wc, cmd);
+			return -EIO;
+		} else {
+			/* Looks like this command was removed from the list by
+			 * someone else already. Let's wait for them to complete
+			 * it so that we don't free up the memory. */
+			spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
+			ret = wait_for_completion_timeout(&cmd->complete, HZ*2);
+			WARN_ON(!ret);
+			ret = cmd->data;
+			free_cmd(wc, cmd);
+			return ret;
 		}
-		free_cmd(wc, cmd);
-		return -EIO;
 	}
 	ret = cmd->data;
 	free_cmd(wc, cmd);
@@ -648,6 +666,7 @@ static void t1_setleds(struct t1 *wc, int leds)
 static inline int t1_getpins(struct t1 *wc, int inisr)
 {
 	struct command *cmd;
+	unsigned long flags;
 	unsigned long ret;
 
 	cmd = get_free_cmd(wc);
@@ -659,9 +678,9 @@ static inline int t1_getpins(struct t1 *wc, int inisr)
 	submit_cmd(wc, cmd);
 	ret = wait_for_completion_timeout(&cmd->complete, HZ*2);
 	if (unlikely(!ret)) {
-		spin_lock_bh(&wc->cmd_list_lock);
-		list_del(&cmd->node);
-		spin_unlock_bh(&wc->cmd_list_lock);
+		spin_lock_irqsave(&wc->cmd_list_lock, flags);
+		list_del_init(&cmd->node);
+		spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
 		if (printk_ratelimit()) {
 			dev_warn(&wc->vb.pdev->dev,
 				 "Timeout in %s\n", __func__);
@@ -674,27 +693,34 @@ static inline int t1_getpins(struct t1 *wc, int inisr)
 	return ret;
 }
 
-static void __t1xxp_set_clear(struct t1 *wc, int channo)
+static void __t1xxp_set_clear(struct t1 *wc)
 {
-	int i,j;
+	int i, offset;
 	int ret;
-	unsigned short val=0;
-	
+	unsigned short reg[3] = {0, 0, 0};
+
+	/* Calculate all states on all 24 channels using the channel
+	   flags, then write all 3 clear channel registers at once */
+
 	for (i = 0; i < 24; i++) {
-		j = (i / 8);
-		if (wc->span.chans[i]->flags & DAHDI_FLAG_CLEAR) 
-			val |= 1 << (7 - (i % 8));
-		if (((i % 8)==7) &&  /* write byte every 8 channels */
-		    ((channo < 0) ||    /* channo=-1 means all channels */ 
-		     (j == (channo-1)/8) )) { /* only the register for this channo */    
-			ret = t1_setreg(wc, 0x2f + j, val);
-			if (ret < 0) {
-				t1_info(wc, "set_clear failed for chan %d!\n",
-					i);
-			}
-			val = 0;
-		}
+		offset = i/8;
+		if (wc->span.chans[i]->flags & DAHDI_FLAG_CLEAR)
+			reg[offset] |= 1 << (7 - (i % 8));
+		else
+			reg[offset] &= ~(1 << (7 - (i % 8)));
 	}
+
+	ret = t1_setreg(wc, CCB1, reg[0]);
+	if (ret < 0)
+		t1_info(wc, "Unable to set clear/rbs mode!\n");
+
+	ret = t1_setreg(wc, CCB2, reg[1]);
+	if (ret < 0)
+		t1_info(wc, "Unable to set clear/rbs mode!\n");
+
+	ret = t1_setreg(wc, CCB3, reg[2]);
+	if (ret < 0)
+		t1_info(wc, "Unable to set clear/rbs mode!\n");
 }
 
 static void free_wc(struct t1 *wc)
@@ -715,9 +741,20 @@ static void free_wc(struct t1 *wc)
 	spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
 	while (!list_empty(&list)) {
 		cmd = list_entry(list.next, struct command, node);
-		list_del(&cmd->node);
+		list_del_init(&cmd->node);
 		free_cmd(wc, cmd);
 	}
+
+	if (wc->wq)
+		destroy_workqueue(wc->wq);
+
+#ifdef CONFIG_VOICEBUS_ECREFERENCE
+	for (x = 0; x < ARRAY_SIZE(wc->ec_reference); ++x) {
+		if (wc->ec_reference[x])
+			dahdi_fifo_free(wc->ec_reference[x]);
+	}
+#endif
+
 #if defined(__FreeBSD__)
 	spin_lock_destroy(&wc->reglock);
 	spin_lock_destroy(&wc->cmd_list_lock);
@@ -788,8 +825,6 @@ static void t1_configure_t1(struct t1 *wc, int lineconfig, int txlevel)
 		mytxlevel = txlevel - 4;
 	fmr1 = 0x9e; /* FMR1: Mode 0, T1 mode, CRC on for ESF, 2.048 Mhz system data rate, no XAIS */
 	fmr2 = 0x20; /* FMR2: no payload loopback, don't auto yellow alarm */
-	if (loopback)
-		fmr2 |= 0x4;
 
 	if (j1mode)
 		fmr4 = 0x1c;
@@ -873,8 +908,6 @@ static void t1_configure_e1(struct t1 *wc, int lineconfig)
 	fmr2 = 0x03; /* FMR2: Auto transmit remote alarm, auto loss of multiframe recovery, no payload loopback */
 	if (unchannelized)
 		fmr2 |= 0x30;
-	if (loopback)
-		fmr2 |= 0x4;
 	if (lineconfig & DAHDI_CONFIG_CRC4) {
 		fmr1 |= 0x08;	/* CRC4 transmit */
 		fmr2 |= 0xc0;	/* CRC4 receive */
@@ -947,22 +980,42 @@ static void t1xxp_framer_start(struct t1 *wc, struct dahdi_span *span)
 		t1_configure_e1(wc, span->lineconfig);
 	} else { /* is a T1 card */
 		t1_configure_t1(wc, span->lineconfig, span->txlevel);
-		__t1xxp_set_clear(wc, -1);
+		__t1xxp_set_clear(wc);
 	}
 
 	set_bit(DAHDI_FLAGBIT_RUNNING, &wc->span.flags);
 }
 
+static void set_span_devicetype(struct t1 *wc)
+{
+	strncpy(wc->span.devicetype, wc->variety,
+		sizeof(wc->span.devicetype) - 1);
+
+#if defined(VPM_SUPPORT)
+	if (wc->vpmadt032) {
+		strncat(wc->span.devicetype, " (VPMADT032)",
+			sizeof(wc->span.devicetype) - 1);
+	}
+#endif
+}
+
 static int t1xxp_startup(struct dahdi_span *span)
 {
-	struct t1 *wc = span->pvt;
-	int i;
+	struct t1 *wc = container_of(span, struct t1, span);
+#ifndef CONFIG_VOICEBUS_ECREFERENCE
+	unsigned int i;
+#endif
 
+	check_and_load_vpm(wc);
+	set_span_devicetype(wc);
+
+#ifndef CONFIG_VOICEBUS_ECREFERENCE
 	/* initialize the start value for the entire chunk of last ec buffer */
 	for (i = 0; i < span->channels; i++) {
 		memset(wc->ec_chunk1[i], DAHDI_LIN2X(0, span->chans[i]), DAHDI_CHUNKSIZE);
 		memset(wc->ec_chunk2[i], DAHDI_LIN2X(0, span->chans[i]), DAHDI_CHUNKSIZE);
 	}
+#endif
 
 	/* Reset framer with proper parameters and start */
 	t1xxp_framer_start(wc, span);
@@ -973,7 +1026,7 @@ static int t1xxp_startup(struct dahdi_span *span)
 
 static int t1xxp_shutdown(struct dahdi_span *span)
 {
-	struct t1 *wc = span->pvt;
+	struct t1 *wc = container_of(span, struct t1, span);
 	t1_setreg(wc, 0x46, 0x41);	/* GCR: Interrupt on Activation/Deactivation of AIX, LOS */
 	clear_bit(DAHDI_FLAGBIT_RUNNING, &span->flags);
 	return 0;
@@ -984,28 +1037,8 @@ static int t1xxp_chanconfig(struct dahdi_chan *chan, int sigtype)
 	struct t1 *wc = chan->pvt;
 	if (test_bit(DAHDI_FLAGBIT_RUNNING, &chan->span->flags) &&
 		(wc->spantype != TYPE_E1)) {
-		__t1xxp_set_clear(wc, chan->channo);
+		__t1xxp_set_clear(wc);
 	}
-	return 0;
-}
-
-static int t1xxp_spanconfig(struct dahdi_span *span, struct dahdi_lineconfig *lc)
-{
-	struct t1 *wc = span->pvt;
-
-	/* Do we want to SYNC on receive or not */
-	if (lc->sync) {
-		set_bit(7, &wc->ctlreg);
-		span->syncsrc = span->spanno;
-	} else {
-		clear_bit(7, &wc->ctlreg);
-		span->syncsrc = 0;
-	}
-
-	/* If already running, apply changes immediately */
-	if (test_bit(DAHDI_FLAGBIT_RUNNING, &span->flags))
-		return t1xxp_startup(span);
-
 	return 0;
 }
 
@@ -1143,76 +1176,176 @@ static inline void t1_check_sigbits(struct t1 *wc)
 	}
 }
 
-static int t1xxp_maint(struct dahdi_span *span, int cmd)
+struct maint_work_struct {
+	struct work_struct work;
+	struct t1 *wc;
+	int cmd;
+	struct dahdi_span *span;
+};
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+static void t1xxp_maint_work(void *data)
 {
-	struct t1 *wc = span->pvt;
+	struct maint_work_struct *w = data;
+#else
+static void t1xxp_maint_work(struct work_struct *work)
+{
+	struct maint_work_struct *w = container_of(work,
+					struct maint_work_struct, work);
+#endif
+
+	struct t1 *wc = w->wc;
+	struct dahdi_span *span = w->span;
 	int reg = 0;
+	int cmd = w->cmd;
 
 	if (wc->spantype == TYPE_E1) {
 		switch (cmd) {
 		case DAHDI_MAINT_NONE:
-			t1_info(wc, "XXX Turn off local and remote "
-				"loops E1 XXX\n");
+			t1_info(wc, "Clearing all maint modes\n");
+			t1xxp_clear_maint(span);
 			break;
 		case DAHDI_MAINT_LOCALLOOP:
-			t1_info(wc, "XXX Turn on local loopback E1 XXX\n");
+			t1xxp_clear_maint(span);
+			reg = t1_getreg(wc, LIM0);
+			if (reg < 0)
+				goto cleanup;
+			t1_setreg(wc, LIM0, reg | LIM0_LL);
 			break;
 		case DAHDI_MAINT_REMOTELOOP:
-			t1_info(wc, "XXX Turn on remote loopback E1 XXX\n");
-			break;
 		case DAHDI_MAINT_LOOPUP:
-			t1_info(wc, "XXX Send loopup code E1 XXX\n");
-			break;
 		case DAHDI_MAINT_LOOPDOWN:
-			t1_info(wc, "XXX Send loopdown code E1 XXX\n");
-			break;
 		case DAHDI_MAINT_LOOPSTOP:
-			t1_info(wc, "XXX Stop sending loop codes E1 XXX\n");
-			break;
+			t1_info(wc, "Only local loop supported in E1 mode\n");
+			goto cleanup;
 		default:
 			t1_info(wc, "Unknown E1 maint command: %d\n", cmd);
-			break;
+			goto cleanup;
 		}
 	} else {
 		switch (cmd) {
 		case DAHDI_MAINT_NONE:
- 			/* Turn off local loop */
- 			reg = t1_getreg(wc, LIM0);
- 			t1_setreg(wc, LIM0, reg & ~LIM0_LL);
- 
- 			/* Turn off remote loop & jitter attenuator */
- 			reg = t1_getreg(wc, LIM1);
- 			t1_setreg(wc, LIM1, reg & ~(LIM1_RL | LIM1_JATT));
+			t1xxp_clear_maint(span);
 			break;
 		case DAHDI_MAINT_LOCALLOOP:
+			t1xxp_clear_maint(span);
  			reg = t1_getreg(wc, LIM0);
- 			t1_setreg(wc, LIM0, reg | LIM0_LL);
+			if (reg < 0)
+				goto cleanup;
+			t1_setreg(wc, LIM0, reg | LIM0_LL);
 			break;
  		case DAHDI_MAINT_NETWORKLINELOOP:
+			t1xxp_clear_maint(span);
  			reg = t1_getreg(wc, LIM1);
- 			t1_setreg(wc, LIM1, reg | LIM1_RL);
+			if (reg < 0)
+				goto cleanup;
+			t1_setreg(wc, LIM1, reg | LIM1_RL);
  			break;
  		case DAHDI_MAINT_NETWORKPAYLOADLOOP:
+			t1xxp_clear_maint(span);
  			reg = t1_getreg(wc, LIM1);
- 			t1_setreg(wc, LIM1, reg | (LIM1_RL | LIM1_JATT));
+			if (reg < 0)
+				goto cleanup;
+			t1_setreg(wc, LIM1, reg | (LIM1_RL | LIM1_JATT));
 			break;
 		case DAHDI_MAINT_LOOPUP:
+			t1xxp_clear_maint(span);
 			t1_setreg(wc, 0x21, 0x50);
 			break;
 		case DAHDI_MAINT_LOOPDOWN:
+			t1xxp_clear_maint(span);
 			t1_setreg(wc, 0x21, 0x60);
 			break;
 		case DAHDI_MAINT_LOOPSTOP:
-			t1_setreg(wc, 0x21, 0x40);
+			t1xxp_clear_maint(w->span);
+			t1_setreg(w->wc, 0x21, 0x40);
 			break;
 		default:
 			t1_info(wc, "Unknown T1 maint command: %d\n", cmd);
-			break;
+			return;
 		}
 	}
 
+cleanup:
+	kfree(w);
+	return;
+}
+
+static int t1xxp_maint(struct dahdi_span *span, int cmd)
+{
+	struct maint_work_struct *work;
+	struct t1 *wc = container_of(span, struct t1, span);
+
+	if (wc->spantype == TYPE_E1) {
+		switch (cmd) {
+		case DAHDI_MAINT_NONE:
+		case DAHDI_MAINT_LOCALLOOP:
+			break;
+		case DAHDI_MAINT_REMOTELOOP:
+		case DAHDI_MAINT_LOOPUP:
+		case DAHDI_MAINT_LOOPDOWN:
+		case DAHDI_MAINT_LOOPSTOP:
+			t1_info(wc, "Only local loop supported in E1 mode\n");
+			return -ENOSYS;
+		default:
+			t1_info(wc, "Unknown E1 maint command: %d\n", cmd);
+			return -ENOSYS;
+		}
+	} else {
+		switch (cmd) {
+		case DAHDI_MAINT_NONE:
+		case DAHDI_MAINT_LOCALLOOP:
+		case DAHDI_MAINT_NETWORKLINELOOP:
+		case DAHDI_MAINT_NETWORKPAYLOADLOOP:
+		case DAHDI_MAINT_LOOPUP:
+		case DAHDI_MAINT_LOOPDOWN:
+		case DAHDI_MAINT_LOOPSTOP:
+			break;
+		default:
+			t1_info(wc, "Unknown T1 maint command: %d\n", cmd);
+			return -ENOSYS;
+		}
+	}
+
+	work = kmalloc(sizeof(*work), GFP_ATOMIC);
+	if (!work) {
+		t1_info(wc, "Failed to allocate memory for "
+			"DAHDI_MAINT_LOOPSTOP\n");
+		return -ENOMEM;
+	}
+
+	work->span = span;
+	work->wc = wc;
+	work->cmd = cmd;
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+	INIT_WORK(&work->work, t1xxp_maint_work, work);
+#else
+	INIT_WORK(&work->work, t1xxp_maint_work);
+#endif
+	queue_work(wc->wq, &work->work);
 	return 0;
 }
+
+static int t1xxp_clear_maint(struct dahdi_span *span)
+{
+	struct t1 *wc = container_of(span, struct t1, span);
+	int reg = 0;
+
+	/* Turn off local loop */
+	reg = t1_getreg(wc, LIM0);
+	if (reg < 0)
+		return -EIO;
+	t1_setreg(wc, LIM0, reg & ~LIM0_LL);
+
+	/* Turn off remote loop & jitter attenuator */
+	reg = t1_getreg(wc, LIM1);
+	if (reg < 0)
+		return -EIO;
+	t1_setreg(wc, LIM1, reg & ~(LIM1_RL | LIM1_JATT));
+	return 0;
+}
+
 
 static int t1xxp_open(struct dahdi_chan *chan)
 {
@@ -1226,14 +1359,18 @@ static int t1xxp_close(struct dahdi_chan *chan)
 
 static int t1xxp_ioctl(struct dahdi_chan *chan, unsigned int cmd, unsigned long data)
 {
+	struct t4_regs regs;
+	unsigned int x;
+	struct t1 *wc;
+
 	switch (cmd) {
 	case WCT4_GET_REGS:
-		/* Since all register access was moved into the voicebus
-		 * module....this was removed.  Although...why does the client
-		 * library need access to the registers (debugging)? \todo ..
-		 */
-		WARN_ON(1);
-		return -ENOSYS;
+		wc = chan->pvt;
+		for (x = 0; x < sizeof(regs.regs) / sizeof(regs.regs[0]); x++)
+			regs.regs[x] = t1_getreg(wc, x);
+
+		if (copy_to_user((void __user *) data, &regs, sizeof(regs)))
+			return -EFAULT;
 		break;
 	default:
 		return -ENOTTY;
@@ -1241,15 +1378,16 @@ static int t1xxp_ioctl(struct dahdi_chan *chan, unsigned int cmd, unsigned long 
 	return 0;
 }
 
-static int echocan_create(struct dahdi_chan *chan, struct dahdi_echocanparams *ecp,
-			  struct dahdi_echocanparam *p, struct dahdi_echocan_state **ec)
+static int t1xxp_echocan_create(struct dahdi_chan *chan,
+				struct dahdi_echocanparams *ecp,
+				struct dahdi_echocanparam *p,
+				struct dahdi_echocan_state **ec)
 {
 	struct t1 *wc = chan->pvt;
 	enum adt_companding comp;
 
-	if (!wc->vpmadt032) {
+	if (!vpmsupport || !wc->vpmadt032 || !test_bit(4, &wc->ctlreg))
 		return -ENODEV;
-	}
 
 	*ec = wc->ec[chan->chanpos - 1];
 	(*ec)->ops = &vpm150m_ec_ops;
@@ -1271,117 +1409,9 @@ static void echocan_free(struct dahdi_chan *chan, struct dahdi_echocan_state *ec
 	vpmadt032_echocan_free(wc->vpmadt032, chan->chanpos - 1, ec);
 }
 
-static void set_span_devicetype(struct t1 *wc)
-{
-	strncpy(wc->span.devicetype, wc->variety, sizeof(wc->span.devicetype) - 1);
-
-#if defined(VPM_SUPPORT)
-	if (wc->vpmadt032)
-		strncat(wc->span.devicetype, " (VPMADT032)", sizeof(wc->span.devicetype) - 1);
-#endif
-}
-
-static int t1_software_init(struct t1 *wc)
-{
-	int x;
-	int num;
-	struct pci_dev *pdev = wc->vb.pdev;
-
-#if !defined(__FreeBSD__)
-	/* Find position */
-	for (x = 0; x < sizeof(ifaces) / sizeof(ifaces[0]); x++) {
-		if (ifaces[x] == wc) {
-			debug_printk(wc, 1, "software init for card %d\n", x);
-			break;
-		}
-	}
-
-	if (x == sizeof(ifaces) / sizeof(ifaces[0]))
-		return -1;
-#endif /* !__FreeBSD__ */
-
-	t4_serial_setup(wc);
-
-	num = x;
-	sprintf(wc->span.name, "WCT1/%d", num);
-	snprintf(wc->span.desc, sizeof(wc->span.desc) - 1, "%s Card %d", wc->variety, num);
-	wc->span.manufacturer = "Digium";
-	set_span_devicetype(wc);
-
-	snprintf(wc->span.location, sizeof(wc->span.location) - 1,
-		"PCI Bus %02d Slot %02d", dahdi_pci_get_bus(pdev),
-		dahdi_pci_get_slot(pdev) + 1);
-
-	wc->span.owner = THIS_MODULE;
-	wc->span.spanconfig = t1xxp_spanconfig;
-	wc->span.chanconfig = t1xxp_chanconfig;
-	wc->span.irq = dahdi_pci_get_irq(pdev);
-	wc->span.startup = t1xxp_startup;
-	wc->span.shutdown = t1xxp_shutdown;
-	wc->span.rbsbits = t1xxp_rbsbits;
-	wc->span.maint = t1xxp_maint;
-	wc->span.open = t1xxp_open;
-	wc->span.close = t1xxp_close;
-	wc->span.ioctl = t1xxp_ioctl;
-#ifdef VPM_SUPPORT
-	if (vpmsupport)
-		wc->span.echocan_create = echocan_create;
-#endif
-
-	if (wc->spantype == TYPE_E1) {
-		if (unchannelized)
-			wc->span.channels = 32;
-		else
-			wc->span.channels = 31;
-		wc->span.spantype = "E1";
-		wc->span.linecompat = DAHDI_CONFIG_HDB3 | DAHDI_CONFIG_CCS | DAHDI_CONFIG_CRC4;
-		wc->span.deflaw = DAHDI_LAW_ALAW;
-	} else {
-		wc->span.channels = 24;
-		wc->span.spantype = "T1";
-		wc->span.linecompat = DAHDI_CONFIG_AMI | DAHDI_CONFIG_B8ZS | DAHDI_CONFIG_D4 | DAHDI_CONFIG_ESF;
-		wc->span.deflaw = DAHDI_LAW_MULAW;
-	}
-	wc->span.chans = wc->chans;
-	set_bit(DAHDI_FLAGBIT_RBS, &wc->span.flags);
-	wc->span.pvt = wc;
-	init_waitqueue_head(&wc->span.maintq);
-	for (x = 0; x < wc->span.channels; x++) {
-		sprintf(wc->chans[x]->name, "WCT1/%d/%d", num, x + 1);
-		wc->chans[x]->sigcap = DAHDI_SIG_EM | DAHDI_SIG_CLEAR | DAHDI_SIG_EM_E1 | 
-				      DAHDI_SIG_FXSLS | DAHDI_SIG_FXSGS | DAHDI_SIG_MTP2 |
-				      DAHDI_SIG_FXSKS | DAHDI_SIG_FXOLS | DAHDI_SIG_DACS_RBS |
-				      DAHDI_SIG_FXOGS | DAHDI_SIG_FXOKS | DAHDI_SIG_CAS | DAHDI_SIG_SF;
-		wc->chans[x]->pvt = wc;
-		wc->chans[x]->chanpos = x + 1;
-	}
-	if (dahdi_register(&wc->span, 0)) {
-		t1_info(wc, "Unable to register span with DAHDI\n");
-		return -1;
-	}
-
-	set_bit(INITIALIZED, &wc->bit_flags);
-
-	return 0;
-}
-
-#if 0
-
-#ifdef VPM_SUPPORT
-static inline unsigned char t1_vpm_in(struct t1 *wc, int unit, const unsigned int addr) 
-{
-		return t1_getreg_full(wc, addr, unit);
-}
-
-static inline unsigned char t1_vpm_out(struct t1 *wc, int unit, const unsigned int addr, const unsigned char val) 
-{
-		return t1_setreg(wc, addr, val, unit);
-}
-
-#endif
-#endif
-
-static void setchanconfig_from_state(struct vpmadt032 *vpm, int channel, GpakChannelConfig_t *chanconfig)
+static void
+setchanconfig_from_state(struct vpmadt032 *vpm, int channel,
+			 GpakChannelConfig_t *chanconfig)
 {
 	const struct vpmadt032_options *options;
 	GpakEcanParms_t *p;
@@ -1424,11 +1454,252 @@ static void setchanconfig_from_state(struct vpmadt032 *vpm, int channel, GpakCha
 		sizeof(chanconfig->EcanParametersB));
 }
 
+#ifdef VPM_SUPPORT
+static int check_and_load_vpm(struct t1 *wc)
+{
+	int res;
+	unsigned long flags;
+	struct vpmadt032_options options;
+
+	if (!vpmsupport) {
+		t1_info(wc, "VPM Support Disabled\n");
+		vpmadt032_free(wc->vpmadt032);
+		wc->vpmadt032 = NULL;
+		return 0;
+	}
+
+	/* The firmware may already be loaded. */
+	if (wc->vpmadt032) {
+		u16 version;
+		res = gpakPingDsp(wc->vpmadt032->dspid, &version);
+		if (!res)
+			return 0;
+	}
+
+	memset(&options, 0, sizeof(options));
+	options.debug = debug;
+	options.vpmnlptype = vpmnlptype;
+	options.vpmnlpthresh = vpmnlpthresh;
+	options.vpmnlpmaxsupp = vpmnlpmaxsupp;
+	options.channels = (TYPE_T1 == wc->spantype) ? 24 : 32;
+
+	/* We do not want to check that the VPM is alive until after we're
+	 * done setting it up here, an hour should cover it... */
+	wc->vpm_check = jiffies + HZ*3600;
+
+	wc->vpmadt032 = vpmadt032_alloc(&options, wc->name);
+	if (!wc->vpmadt032)
+		return -ENOMEM;
+
+	wc->vpmadt032->setchanconfig_from_state = setchanconfig_from_state;
+
+	res = vpmadt032_init(wc->vpmadt032, &wc->vb);
+	if (-ENODEV == res) {
+		struct vpmadt032 *vpm = wc->vpmadt032;
+		/* There does not appear to be a VPMADT032 installed. */
+		clear_bit(4, &wc->ctlreg);
+		spin_lock_irqsave(&wc->reglock, flags);
+		wc->vpmadt032 = NULL;
+		spin_unlock_irqrestore(&wc->reglock, flags);
+		vpmadt032_free(vpm);
+		return res;
+
+	} else if (res) {
+		/* There was some problem during initialization, but it passed
+		 * the address test, let's try again in a bit. */
+		wc->vpm_check = jiffies + HZ/2;
+		return -EAGAIN;
+	}
+
+	if (config_vpmadt032(wc->vpmadt032, wc)) {
+		clear_bit(4, &wc->ctlreg);
+		wc->vpm_check = jiffies + HZ/2;
+		return -EAGAIN;
+	}
+
+	/* turn on vpm (RX audio from vpm module) */
+	set_bit(4, &wc->ctlreg);
+	wc->vpm_check = jiffies + HZ*5;
+	if (vpmtsisupport) {
+		debug_printk(wc, 1, "enabling VPM TSI pin\n");
+		/* turn on vpm timeslot interchange pin */
+		set_bit(0, &wc->ctlreg);
+	}
+
+	return 0;
+}
+#else
+static inline int check_and_load_vpm(const struct t1 *wc)
+{
+	return 0;
+}
+#endif
+
+static void t1_chan_set_sigcap(struct dahdi_span *span, int x)
+{
+	struct t1 *wc = container_of(span, struct t1, span);
+	struct dahdi_chan *chan = wc->chans[x];
+	chan->sigcap = DAHDI_SIG_CLEAR;
+	/* E&M variant supported depends on span type */
+	if (wc->spantype == TYPE_E1) {
+		/* E1 sigcap setup */
+		if (span->lineconfig & DAHDI_CONFIG_CCS) {
+			/* CCS setup */
+			chan->sigcap |= DAHDI_SIG_MTP2 | DAHDI_SIG_SF;
+			return;
+		}
+		/* clear out sig and sigcap for channel 16 on E1 CAS
+		 * lines, otherwise, set it correctly */
+		if (x == 15) {
+			/* CAS signaling channel setup */
+			wc->chans[15]->sigcap = 0;
+			wc->chans[15]->sig = 0;
+			return;
+		}
+		/* normal CAS setup */
+		chan->sigcap |= DAHDI_SIG_EM_E1 | DAHDI_SIG_FXSLS |
+			DAHDI_SIG_FXSGS | DAHDI_SIG_FXSKS | DAHDI_SIG_SF |
+			DAHDI_SIG_FXOLS | DAHDI_SIG_FXOGS | DAHDI_SIG_FXOKS |
+			DAHDI_SIG_CAS | DAHDI_SIG_DACS_RBS;
+	} else {
+		/* T1 sigcap setup */
+		chan->sigcap |= DAHDI_SIG_EM | DAHDI_SIG_FXSLS |
+			DAHDI_SIG_FXSGS | DAHDI_SIG_FXSKS | DAHDI_SIG_MTP2 |
+			DAHDI_SIG_SF | DAHDI_SIG_FXOLS | DAHDI_SIG_FXOGS |
+			DAHDI_SIG_FXOKS | DAHDI_SIG_CAS | DAHDI_SIG_DACS_RBS;
+	}
+}
+
+static int
+t1xxp_spanconfig(struct dahdi_span *span, struct dahdi_lineconfig *lc)
+{
+	struct t1 *wc = container_of(span, struct t1, span);
+	int i;
+
+	/* Do we want to SYNC on receive or not */
+	if (lc->sync) {
+		set_bit(7, &wc->ctlreg);
+		span->syncsrc = span->spanno;
+	} else {
+		clear_bit(7, &wc->ctlreg);
+		span->syncsrc = 0;
+	}
+
+	/* make sure that sigcaps gets updated if necessary */
+	for (i = 0; i < wc->span.channels; i++)
+		t1_chan_set_sigcap(span, i);
+
+	/* If already running, apply changes immediately */
+	if (test_bit(DAHDI_FLAGBIT_RUNNING, &span->flags))
+		return t1xxp_startup(span);
+
+	return 0;
+}
+
+static const struct dahdi_span_ops t1_span_ops = {
+	.owner = THIS_MODULE,
+	.spanconfig = t1xxp_spanconfig,
+	.chanconfig = t1xxp_chanconfig,
+	.startup = t1xxp_startup,
+	.shutdown = t1xxp_shutdown,
+	.rbsbits = t1xxp_rbsbits,
+	.maint = t1xxp_maint,
+	.open = t1xxp_open,
+	.close = t1xxp_close,
+	.ioctl = t1xxp_ioctl,
+#ifdef VPM_SUPPORT
+	.echocan_create = t1xxp_echocan_create,
+#endif
+};
+
+static int t1_software_init(struct t1 *wc)
+{
+	int x;
+	int num;
+	struct pci_dev *pdev = wc->vb.pdev;
+
+#if !defined(__FreeBSD__)
+	/* Find position */
+	for (x = 0; x < ARRAY_SIZE(ifaces); ++x) {
+		if (ifaces[x] == wc) {
+			debug_printk(wc, 1, "software init for card %d\n", x);
+			break;
+		}
+	}
+
+	if (x == ARRAY_SIZE(ifaces))
+		return -1;
+#endif /* !__FreeBSD__ */
+
+	t4_serial_setup(wc);
+
+	num = x;
+	sprintf(wc->span.name, "WCT1/%d", num);
+	snprintf(wc->span.desc, sizeof(wc->span.desc) - 1, "%s Card %d", wc->variety, num);
+	wc->span.manufacturer = "Digium";
+	set_span_devicetype(wc);
+
+	snprintf(wc->span.location, sizeof(wc->span.location) - 1,
+		"PCI Bus %02d Slot %02d", dahdi_pci_get_bus(pdev),
+		dahdi_pci_get_slot(pdev) + 1);
+
+	wc->span.irq = dahdi_pci_get_irq(pdev);
+
+	if (wc->spantype == TYPE_E1) {
+		if (unchannelized)
+			wc->span.channels = 32;
+		else
+			wc->span.channels = 31;
+		wc->span.spantype = "E1";
+		wc->span.linecompat = DAHDI_CONFIG_AMI | DAHDI_CONFIG_HDB3 |
+			DAHDI_CONFIG_CCS | DAHDI_CONFIG_CRC4;
+		wc->span.deflaw = DAHDI_LAW_ALAW;
+	} else {
+		wc->span.channels = 24;
+		wc->span.spantype = "T1";
+		wc->span.linecompat = DAHDI_CONFIG_AMI | DAHDI_CONFIG_B8ZS |
+			DAHDI_CONFIG_D4 | DAHDI_CONFIG_ESF;
+		wc->span.deflaw = DAHDI_LAW_MULAW;
+	}
+	wc->span.chans = wc->chans;
+	set_bit(DAHDI_FLAGBIT_RBS, &wc->span.flags);
+	init_waitqueue_head(&wc->span.maintq);
+	for (x = 0; x < wc->span.channels; x++) {
+		sprintf(wc->chans[x]->name, "WCT1/%d/%d", num, x + 1);
+		t1_chan_set_sigcap(&wc->span, x);
+		wc->chans[x]->pvt = wc;
+		wc->chans[x]->chanpos = x + 1;
+	}
+	wc->span.ops = &t1_span_ops;
+	if (dahdi_register(&wc->span, 0)) {
+		t1_info(wc, "Unable to register span with DAHDI\n");
+		return -1;
+	}
+
+	set_bit(INITIALIZED, &wc->bit_flags);
+
+	return 0;
+}
+
+#if 0
+
+#ifdef VPM_SUPPORT
+static inline unsigned char t1_vpm_in(struct t1 *wc, int unit, const unsigned int addr) 
+{
+		return t1_getreg_full(wc, addr, unit);
+}
+
+static inline unsigned char t1_vpm_out(struct t1 *wc, int unit, const unsigned int addr, const unsigned char val) 
+{
+		return t1_setreg(wc, addr, val, unit);
+}
+
+#endif
+#endif
+
 static int t1_hardware_post_init(struct t1 *wc)
 {
-	struct vpmadt032_options options;
 	unsigned int reg;
-	int res;
 	int x;
 
 	/* T1 or E1 */
@@ -1460,43 +1731,6 @@ static int t1_hardware_post_init(struct t1 *wc)
 
 	t1_setleds(wc, wc->ledstate);
 
-#ifdef VPM_SUPPORT
-	if (!fatal_signal_pending(current) && vpmsupport) {
-		memset(&options, 0, sizeof(options));
-		options.debug = debug;
-		options.vpmnlptype = vpmnlptype;
-		options.vpmnlpthresh = vpmnlpthresh;
-		options.vpmnlpmaxsupp = vpmnlpmaxsupp;
-		options.channels = (wc->spantype == TYPE_T1) ? 24 : 32;
-
-		wc->vpmadt032 = vpmadt032_alloc(&options, wc->name);
-		if (!wc->vpmadt032)
-			return -ENOMEM;
-
-		wc->vpmadt032->setchanconfig_from_state = setchanconfig_from_state;
-
-		res = vpmadt032_init(wc->vpmadt032, &wc->vb);
-		if (res) {
-			vpmadt032_free(wc->vpmadt032);
-			wc->vpmadt032=NULL;
-			return -EIO;
-		}
-
-		config_vpmadt032(wc->vpmadt032, wc);
-
-		set_span_devicetype(wc);
-		t1_info(wc, "VPM present and operational "
-			"(Firmware version %x)\n", wc->vpmadt032->version);
-		wc->ctlreg |= 0x10; /* turn on vpm (RX audio from vpm module) */
-		if (vpmtsisupport) {
-			debug_printk(wc, 1, "enabling VPM TSI pin\n");
-			wc->ctlreg |= 0x01; /* turn on vpm timeslot interchange pin */
-		}
-	} else {
-		t1_info(wc, "VPM Support Disabled\n");
-		wc->vpmadt032 = NULL;
-	}
-#endif
 	return 0;
 }
 
@@ -1717,11 +1951,19 @@ static inline void t1_transmitprep(struct t1 *wc, u8 *writechunk)
 	int x;
 	int y;
 	int chan;
+	unsigned long flags;
 
 	/* Calculate Transmission */
 	if (likely(test_bit(INITIALIZED, &wc->bit_flags))) {
 		dahdi_transmit(&wc->span);
 	}
+
+#ifdef CONFIG_VOICEBUS_ECREFERENCE
+	for (chan = 0; chan < wc->span.channels; chan++) {
+		__dahdi_fifo_put(wc->ec_reference[chan],
+			    wc->chans[chan]->writechunk, DAHDI_CHUNKSIZE);
+	}
+#endif
 
 	for (x = 0; x < DAHDI_CHUNKSIZE; x++) {
 		if (likely(test_bit(INITIALIZED, &wc->bit_flags))) {
@@ -1730,15 +1972,14 @@ static inline void t1_transmitprep(struct t1 *wc, u8 *writechunk)
 		}
 
 		/* process the command queue */
-		for (y = 0; y < 7; y++) {
+		for (y = 0; y < 7; y++)
 			cmd_dequeue(wc, writechunk, x, y);
-		}
+
 #ifdef VPM_SUPPORT
-		if(likely(wc->vpmadt032)) {
-			spin_lock(&wc->reglock);
+		spin_lock_irqsave(&wc->reglock, flags);
+		if (wc->vpmadt032)
 			cmd_dequeue_vpmadt032(wc, writechunk, x);
-			spin_unlock(&wc->reglock);
-		}
+		spin_unlock_irqrestore(&wc->reglock, flags);
 #endif
 
 		if (x < DAHDI_CHUNKSIZE - 1) {
@@ -1747,6 +1988,8 @@ static inline void t1_transmitprep(struct t1 *wc, u8 *writechunk)
 		}
 		writechunk += (EFRAME_SIZE + EFRAME_GAP);
 	}
+
+
 }
 
 /**
@@ -1763,6 +2006,7 @@ static inline bool is_good_frame(const u8 *sframe)
 static inline void t1_receiveprep(struct t1 *wc, const u8* readchunk)
 {
 	int x,chan;
+	unsigned long flags;
 	unsigned char expected;
 
 	if (!is_good_frame(readchunk))
@@ -1790,22 +2034,33 @@ static inline void t1_receiveprep(struct t1 *wc, const u8* readchunk)
 		}
 		cmd_decipher(wc, readchunk);
 #ifdef VPM_SUPPORT
-		if (wc->vpmadt032) {
-			spin_lock(&wc->reglock);
+		spin_lock_irqsave(&wc->reglock, flags);
+		if (wc->vpmadt032)
 			cmd_decipher_vpmadt032(wc, readchunk);
-			spin_unlock(&wc->reglock);
-		}
+		spin_unlock_irqrestore(&wc->reglock, flags);
 #endif
 		readchunk += (EFRAME_SIZE + EFRAME_GAP);
 	}
 	
 	/* echo cancel */
 	if (likely(test_bit(INITIALIZED, &wc->bit_flags))) {
+#ifdef CONFIG_VOICEBUS_ECREFERENCE
+		unsigned char buffer[DAHDI_CHUNKSIZE];
+		for (x = 0; x < wc->span.channels; x++) {
+			__dahdi_fifo_get(wc->ec_reference[x], buffer,
+				    ARRAY_SIZE(buffer));
+			dahdi_ec_chunk(wc->chans[x], wc->chans[x]->readchunk,
+				       buffer);
+		}
+#else
 		for (x = 0; x < wc->span.channels; x++) {
 			dahdi_ec_chunk(wc->chans[x], wc->chans[x]->readchunk, wc->ec_chunk2[x]);
-			memcpy(wc->ec_chunk2[x],wc->ec_chunk1[x],DAHDI_CHUNKSIZE);
-			memcpy(wc->ec_chunk1[x],wc->chans[x]->writechunk,DAHDI_CHUNKSIZE);
+			memcpy(wc->ec_chunk2[x], wc->ec_chunk1[x],
+				DAHDI_CHUNKSIZE);
+			memcpy(wc->ec_chunk1[x], wc->chans[x]->writechunk,
+				DAHDI_CHUNKSIZE);
 		}
+#endif
 		dahdi_receive(&wc->span);
 	}
 }
@@ -1840,27 +2095,195 @@ static void timer_work_func(struct work_struct *work)
 {
 	struct t1 *wc = container_of(work, struct t1, timer_work);
 #endif
-	/* Called once every 100 ms */
-	if (unlikely(!test_bit(INITIALIZED, &wc->bit_flags)))
-		return;
 	t1_do_counters(wc);
 	t1_check_alarms(wc);
 	t1_check_sigbits(wc);
-	mod_timer(&wc->timer, jiffies + HZ/10);
+	if (test_bit(INITIALIZED, &wc->bit_flags))
+		mod_timer(&wc->timer, jiffies + HZ/10);
 }
 
-static void
-te12xp_timer(unsigned long data)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+static void vpm_check_func(void *data)
 {
-	struct t1 *wc = (struct t1 *)data;
-	schedule_work(&wc->timer_work);
+	struct t1 *wc = data;
+#else
+static void vpm_check_func(struct work_struct *work)
+{
+	struct t1 *wc = container_of(work, struct t1, vpm_check_work);
+#endif
+	int res;
+	u16 version;
+
+	if (!test_bit(INITIALIZED, &wc->bit_flags))
+		return;
+
+	if (test_bit(4, &wc->ctlreg)) {
+		res = gpakPingDsp(wc->vpmadt032->dspid, &version);
+		if (!res) {
+			set_bit(4, &wc->ctlreg);
+			wc->vpm_check = jiffies + HZ*5;
+			return;
+		}
+
+		clear_bit(4, &wc->ctlreg);
+		t1_info(wc, "VPMADT032 is non-responsive.  Resetting.\n");
+	}
+
+
+	if (!test_bit(INITIALIZED, &wc->bit_flags))
+		return;
+
+	res = vpmadt032_reset(wc->vpmadt032);
+	if (res) {
+		t1_info(wc, "Failed VPMADT032 reset. VPMADT032 is disabled.\n");
+		wc->vpm_check = jiffies + HZ*5;
+		return;
+	}
+
+	if (!test_bit(INITIALIZED, &wc->bit_flags))
+		return;
+
+	res = config_vpmadt032(wc->vpmadt032, wc);
+	if (res) {
+		/* We failed the configuration, let's try again. */
+		t1_info(wc, "Failed to configure the ports.  Retrying.\n");
+
+		if (!test_bit(INITIALIZED, &wc->bit_flags))
+			return;
+		queue_work(wc->vpmadt032->wq, &wc->vpm_check_work);
+		return;
+	}
+
+	if (!test_bit(INITIALIZED, &wc->bit_flags))
+		return;
+
+	/* Looks like the reset went ok so we can put the VPM module back in
+	 * the TDM path. */
+	set_bit(4, &wc->ctlreg);
+	t1_info(wc, "VPMADT032 is reenabled.\n");
+	wc->vpm_check = jiffies + HZ*5;
 	return;
+}
+
+static void te12xp_timer(unsigned long data)
+{
+	unsigned long flags;
+	struct t1 *wc = (struct t1 *)data;
+
+	if (unlikely(!test_bit(INITIALIZED, &wc->bit_flags)))
+		return;
+
+	queue_work(wc->wq, &wc->timer_work);
+
+	spin_lock_irqsave(&wc->reglock, flags);
+	if (!wc->vpmadt032)
+		goto unlock_exit;
+
+	if (time_after(wc->vpm_check, jiffies))
+		goto unlock_exit;
+
+	queue_work(wc->vpmadt032->wq, &wc->vpm_check_work);
+
+unlock_exit:
+	spin_unlock_irqrestore(&wc->reglock, flags);
+	return;
+}
+
+static void t1_handle_error(struct voicebus *vb)
+{
+	unsigned long flags;
+	struct t1 *wc = container_of(vb, struct t1, vb);
+
+	spin_lock_irqsave(&wc->reglock, flags);
+	if (!wc->vpmadt032)
+		goto unlock_exit;
+	clear_bit(4, &wc->ctlreg);
+	queue_work(wc->vpmadt032->wq, &wc->vpm_check_work);
+
+unlock_exit:
+	spin_unlock_irqrestore(&wc->reglock, flags);
 }
 
 static const struct voicebus_operations voicebus_operations = {
 	.handle_receive = t1_handle_receive,
 	.handle_transmit = t1_handle_transmit,
+	.handle_error = t1_handle_error,
 };
+
+#ifdef CONFIG_VOICEBUS_SYSFS
+static ssize_t voicebus_current_latency_show(struct device *dev,
+					     struct device_attribute *attr,
+					     char *buf)
+{
+	unsigned long flags;
+	struct t1 *wc = dev_get_drvdata(dev);
+	unsigned int current_latency;
+	spin_lock_irqsave(&wc->vb.lock, flags);
+	current_latency = wc->vb.min_tx_buffer_count;
+	spin_unlock_irqrestore(&wc->vb.lock, flags);
+	return sprintf(buf, "%d\n", current_latency);
+}
+
+static DEVICE_ATTR(voicebus_current_latency, 0400,
+		   voicebus_current_latency_show, NULL);
+
+
+static ssize_t vpm_firmware_version_show(struct device *dev,
+				struct device_attribute *attr,
+				char *buf)
+{
+	int res;
+	u16 version = 0;
+	struct t1 *wc = dev_get_drvdata(dev);
+
+	if (wc->vpmadt032) {
+		res = gpakPingDsp(wc->vpmadt032->dspid, &version);
+		if (res) {
+			t1_info(wc, "Failed gpakPingDsp %d\n", res);
+			version = -1;
+		}
+	}
+
+	return sprintf(buf, "%x.%02x\n", (version & 0xff00) >> 8, (version & 0xff));
+}
+
+static DEVICE_ATTR(vpm_firmware_version, 0400,
+		   vpm_firmware_version_show, NULL);
+
+static void create_sysfs_files(struct t1 *wc)
+{
+	int ret;
+	ret = device_create_file(&wc->vb.pdev->dev,
+				 &dev_attr_voicebus_current_latency);
+	if (ret) {
+		dev_info(&wc->vb.pdev->dev,
+			"Failed to create device attributes.\n");
+	}
+
+	ret = device_create_file(&wc->vb.pdev->dev,
+				 &dev_attr_vpm_firmware_version);
+	if (ret) {
+		dev_info(&wc->vb.pdev->dev,
+			"Failed to create device attributes.\n");
+	}
+}
+
+static void remove_sysfs_files(struct t1 *wc)
+{
+	device_remove_file(&wc->vb.pdev->dev,
+			   &dev_attr_vpm_firmware_version);
+
+	device_remove_file(&wc->vb.pdev->dev,
+			   &dev_attr_voicebus_current_latency);
+}
+
+#else
+
+static inline void create_sysfs_files(struct t1 *wc) { return; }
+static inline void remove_sysfs_files(struct t1 *wc) { return; }
+
+#endif /* CONFIG_VOICEBUS_SYSFS */
+
 
 #if defined(__FreeBSD__)
 static int te12xp_init_one(device_t dev, const struct pci_device_id *ent)
@@ -1920,6 +2343,28 @@ static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_devi
 	INIT_WORK(&wc->timer_work, timer_work_func);
 #	endif
 
+#	if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+	INIT_WORK(&wc->vpm_check_work, vpm_check_func, wc);
+#	else
+	INIT_WORK(&wc->vpm_check_work, vpm_check_func);
+#	endif
+
+#ifdef CONFIG_VOICEBUS_ECREFERENCE
+	for (x = 0; x < ARRAY_SIZE(wc->ec_reference); ++x) {
+		/* 256 is used here since it is the largest power of two that
+		 * will contain 8 * VOICBUS_DEFAULT_LATENCY */
+		wc->ec_reference[x] = dahdi_fifo_alloc(256, GFP_KERNEL);
+
+		if (IS_ERR(wc->ec_reference[x])) {
+			res = PTR_ERR(wc->ec_reference[x]);
+			wc->ec_reference[x] = NULL;
+			free_wc(wc);
+			return res;
+		}
+
+	}
+#endif /* CONFIG_VOICEBUS_ECREFERENCE */
+
 	snprintf(wc->name, sizeof(wc->name)-1, "wcte12xp%d", index);
 	wc->vb.ops = &voicebus_operations;
 #if defined(__FreeBSD__)
@@ -1934,10 +2379,17 @@ static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_devi
 	if (res)
 		goto err;
 	
-	if (VOICEBUS_DEFAULT_LATENCY != latency) {
-		voicebus_set_minlatency(&wc->vb, latency);
-		voicebus_set_maxlatency(&wc->vb, max_latency);
+	wc->wq = create_singlethread_workqueue(wc->name);
+	if (!wc->wq) {
+		kfree(wc);
+		return -ENOMEM;
 	}
+
+	voicebus_set_minlatency(&wc->vb, latency);
+	voicebus_set_maxlatency(&wc->vb, max_latency);
+	max_latency = wc->vb.max_latency;
+
+	create_sysfs_files(wc);
 
 	voicebus_lock_latency(&wc->vb);
 	if (voicebus_start(&wc->vb)) {
@@ -1986,34 +2438,35 @@ static void __devexit te12xp_remove_one(struct pci_dev *pdev)
 	struct t1 *wc = pci_get_drvdata(pdev);
 #endif
 #ifdef VPM_SUPPORT
-	unsigned long flags;
 	struct vpmadt032 *vpm = wc->vpmadt032;
 #endif
 	if (!wc)
 		return;
 
-#ifdef VPM_SUPPORT
-	if(vpm) {
-		wc->vpmadt032 = NULL;
-		clear_bit(VPM150M_DTMFDETECT, &vpm->control);
-		clear_bit(VPM150M_ACTIVE, &vpm->control);
-	}
-#endif
+	remove_sysfs_files(wc);
+
 	clear_bit(INITIALIZED, &wc->bit_flags);
+
 	del_timer_sync(&wc->timer);
 #if !defined(__FreeBSD__)
-	flush_scheduled_work();
+	flush_workqueue(wc->wq);
+#ifdef VPM_SUPPORT
+	if (vpm)
+		flush_workqueue(vpm->wq);
+#endif
 #endif
 
 	voicebus_release(&wc->vb);
 
 #ifdef VPM_SUPPORT
 	if(vpm) {
-		spin_lock_irqsave(&wc->reglock, flags);
-		spin_unlock_irqrestore(&wc->reglock, flags);
+		wc->vpmadt032 = NULL;
+		clear_bit(VPM150M_DTMFDETECT, &vpm->control);
+		clear_bit(VPM150M_ACTIVE, &vpm->control);
 		vpmadt032_free(vpm);
 	}
 #endif
+
 	t1_release(wc);
 }
 
@@ -2122,12 +2575,23 @@ MODULE_DEPEND(te12xp, dahdi, 1, 1, 1);
 MODULE_DEPEND(te12xp, dahdi_voicebus, 1, 1, 1);
 MODULE_DEPEND(te12xp, firmware, 1, 1, 1);
 #else /* !__FreeBSD__ */
+#if LINUX_KERNEL_VERSION >= KERNEL_VERSION(2, 6, 12)
+static void te12xp_shutdown(struct pci_dev *pdev)
+{
+	struct t1 *wc = pci_get_drvdata(pdev);
+	voicebus_stop(&wc->vb);
+}
+#endif
+
 MODULE_DEVICE_TABLE(pci, te12xp_pci_tbl);
 
 static struct pci_driver te12xp_driver = {
 	.name = "wcte12xp",
 	.probe = te12xp_init_one,
 	.remove = __devexit_p(te12xp_remove_one),
+#if LINUX_KERNEL_VERSION >= KERNEL_VERSION(2, 6, 12)
+	.shutdown = te12xp_shutdown,
+#endif
 	.id_table = te12xp_pci_tbl,
 };
 
@@ -2167,7 +2631,6 @@ static void __exit te12xp_cleanup(void)
 #endif /* !__FreeBSD__ */
 
 module_param(debug, int, S_IRUGO | S_IWUSR);
-module_param(loopback, int, S_IRUGO | S_IWUSR);
 module_param(t1e1override, int, S_IRUGO | S_IWUSR);
 module_param(j1mode, int, S_IRUGO | S_IWUSR);
 module_param(alarmdebounce, int, S_IRUGO | S_IWUSR);
@@ -2175,6 +2638,7 @@ module_param(losalarmdebounce, int, S_IRUGO | S_IWUSR);
 module_param(aisalarmdebounce, int, S_IRUGO | S_IWUSR);
 module_param(yelalarmdebounce, int, S_IRUGO | S_IWUSR);
 module_param(latency, int, S_IRUGO);
+module_param(max_latency, int, S_IRUGO);
 #ifdef VPM_SUPPORT
 module_param(vpmsupport, int, S_IRUGO);
 module_param(vpmtsisupport, int, S_IRUGO);

@@ -1423,7 +1423,7 @@ static int pciradio_open(struct dahdi_chan *chan)
 static int pciradio_watchdog(struct dahdi_span *span, int event)
 {
 	printk(KERN_INFO "PCI RADIO: Restarting DMA\n");
-	pciradio_restart_dma(span->pvt);
+	pciradio_restart_dma(container_of(span, struct pciradio, span));
 	return 0;
 }
 
@@ -1458,12 +1458,20 @@ static int pciradio_hooksig(struct dahdi_chan *chan, enum dahdi_txsig txsig)
 	return 0;
 }
 
+static const struct dahdi_span_ops pciradio_span_ops = {
+	.owner = THIS_MODULE,
+	.hooksig = pciradio_hooksig,
+	.open = pciradio_open,
+	.close = pciradio_close,
+	.ioctl = pciradio_ioctl,
+	.watchdog = pciradio_watchdog,
+};
+
 static int pciradio_initialize(struct pciradio *rad)
 {
 	int x;
 
 	/* DAHDI stuff */
-	rad->span.owner = THIS_MODULE;
 	sprintf(rad->span.name, "PCIRADIO/%d", rad->pos);
 	sprintf(rad->span.desc, "Board %d", rad->pos + 1);
 	rad->span.deflaw = DAHDI_LAW_MULAW;
@@ -1478,15 +1486,10 @@ static int pciradio_initialize(struct pciradio *rad)
 	}
 	rad->span.chans = &rad->chans;
 	rad->span.channels = rad->nchans;
-	rad->span.hooksig = pciradio_hooksig;
-	rad->span.open = pciradio_open;
-	rad->span.close = pciradio_close;
 	rad->span.flags = DAHDI_FLAG_RBS;
-	rad->span.ioctl = pciradio_ioctl;
-	rad->span.watchdog = pciradio_watchdog;
+	rad->span.ops = &pciradio_span_ops;
 	init_waitqueue_head(&rad->span.maintq);
 
-	rad->span.pvt = rad;
 	if (dahdi_register(&rad->span, 0)) {
 		printk(KERN_NOTICE "Unable to register span with DAHDI\n");
 		return -1;

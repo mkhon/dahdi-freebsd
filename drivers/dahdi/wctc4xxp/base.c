@@ -1,7 +1,6 @@
-/*
- * Wildcard TC400B Driver
+/* Wildcard TC400B Driver
  *
- * Copyright (C) 2006-2009, Digium, Inc.
+ * Copyright (C) 2006-2010, Digium, Inc.
  *
  * All rights reserved.
  *
@@ -53,6 +52,8 @@
 #include <linux/etherdevice.h>
 #include <linux/timer.h>
 #endif /* !__FreeBSD__ */
+
+#include <stdbool.h>
 
 #include "dahdi/kernel.h"
 
@@ -234,6 +235,13 @@ ip_fast_csum(const void *iph, unsigned int ihl)
 typedef	unsigned gfp_t;		/* Added in 2.6.14 */
 #endif
 #endif
+
+
+/* define CONFIG_WCTC4XXP_POLLING to operate in a pure polling mode.  This is
+ * was placed in as a debugging tool for a particluar system that wasn't
+ * routing the interrupt properly. Therefore it is off by default and the
+ * driver must be recompiled to enable it. */
+#undef CONFIG_WCTC4XXP_POLLING
 
 /* The total number of active channels over which the driver will start polling
  * the card every 10 ms. */
@@ -548,14 +556,14 @@ struct wcdte {
 	struct pci_dev *pdev;
 	unsigned int   intmask;
 #if defined(__FreeBSD__)
-	struct resource *io_res;
-	int io_rid;
+	struct resource *mem_res;
+	int mem_rid;
 
 	struct resource *irq_res;		/* resource for irq */
 	int irq_rid;
 	void *irq_handle;
 #else
-	unsigned long  iobase;
+	void __iomem	*iobase;
 #endif
 	struct wctc4xxp_descriptor_ring *txd;
 	struct wctc4xxp_descriptor_ring *rxd;
@@ -1194,7 +1202,7 @@ wctc4xxp_submit(struct wctc4xxp_descriptor_ring *dr, struct tcb *c)
 
 	SET_OWNED(d); /* That's it until the hardware is done with it. */
 	dr->pending[dr->tail] = c;
-	dr->tail = ++dr->tail & DRING_MASK;
+	dr->tail = (dr->tail + 1) & DRING_MASK;
 	++dr->count;
 	spin_unlock_irqrestore(&dr->lock, flags);
 	return 0;
@@ -1252,10 +1260,11 @@ static inline void
 __wctc4xxp_setctl(struct wcdte *wc, unsigned int addr, unsigned int val)
 {
 #if defined(__FreeBSD__)
-	bus_space_write_4(rman_get_bustag(wc->io_res),
-	    rman_get_bushandle(wc->io_res), addr, val);
+	bus_space_write_4(rman_get_bustag(wc->mem_res),
+	    rman_get_bushandle(wc->mem_res), addr, val);
 #else
-	outl(val, wc->iobase + addr);
+	writel(val, wc->iobase + addr);
+	readl(wc->iobase + addr);
 #endif
 }
 
@@ -1263,10 +1272,10 @@ static inline unsigned int
 __wctc4xxp_getctl(struct wcdte *wc, unsigned int addr)
 {
 #if defined(__FreeBSD__)
-	return bus_space_read_4(rman_get_bustag(wc->io_res),
-	    rman_get_bushandle(wc->io_res), addr);
+	return bus_space_read_4(rman_get_bustag(wc->mem_res),
+	    rman_get_bushandle(wc->mem_res), addr);
 #else
-	return inl(wc->iobase + addr);
+	return readl(wc->iobase + addr);
 #endif
 }
 
@@ -2195,10 +2204,13 @@ wctc4xxp_operation_release(struct dahdi_transcoder_channel *dtc)
 #endif
 
 	atomic_dec(&wc->open_channels);
+
+#if !defined(CONFIG_WCTC4XXP_POLLING)
 	if (atomic_read(&wc->open_channels) < POLLING_CALL_THRESHOLD) {
 		if (test_bit(DTE_POLLING, &wc->flags))
 			wctc4xxp_disable_polling(wc);
 	}
+#endif
 
 	packets_received = atomic_read(&cpvt->stats.packets_received);
 	packets_sent = atomic_read(&cpvt->stats.packets_sent);
@@ -2343,6 +2355,8 @@ wctc4xxp_read(FOP_READ_ARGS_DECL)
 	struct tcb *cmd;
 	struct rtp_packet *packet;
 	ssize_t payload_bytes;
+	ssize_t returned_bytes = 0;
+	unsigned long flags;
 
 	BUG_ON(!dtc);
 	BUG_ON(!cpvt);
@@ -2355,53 +2369,70 @@ wctc4xxp_read(FOP_READ_ARGS_DECL)
 
 	cmd = get_ready_cmd(dtc);
 	if (!cmd) {
-		if (file->f_flags & O_NONBLOCK) {
+		if (file->f_flags & O_NONBLOCK)
 			return -EAGAIN;
-		} else {
-			ret = wait_event_interruptible(dtc->ready,
+		ret = wait_event_interruptible(dtc->ready,
 				dahdi_tc_is_data_waiting(dtc));
 #if !defined(__FreeBSD__)
-			if (-ERESTARTSYS == ret) {
-				/* Signal interrupted the wait */
-				return -EINTR;
-			}
+		if (-ERESTARTSYS == ret)
+			return -EINTR;
 #endif
-			/* List went not empty. */
-			cmd = get_ready_cmd(dtc);
-		}
+		/* List went not empty. */
+		cmd = get_ready_cmd(dtc);
 	}
 
-	BUG_ON(!cmd);
-	packet = cmd->data;
+	do {
+		BUG_ON(!cmd);
+		packet = cmd->data;
 
-	payload_bytes = be16_to_cpu(packet->udphdr.len) -
-		sizeof(struct rtphdr) - sizeof(struct udphdr);
+		payload_bytes = be16_to_cpu(packet->udphdr.len) -
+					sizeof(struct rtphdr) -
+					sizeof(struct udphdr);
 
-	if (count < payload_bytes) {
-		if (printk_ratelimit()) {
-			DTE_PRINTK(ERR,
-			  "Cannot copy %zd bytes into %zd byte user " \
-			  "buffer.\n", payload_bytes, count);
+		if (count < (payload_bytes + returned_bytes)) {
+			if (returned_bytes) {
+				/* If we have already returned at least one
+				 * packets worth of data, we'll add this next
+				 * packet to the head of the receive queue so
+				 * it will be picked up next time. */
+				spin_lock_irqsave(&cpvt->lock, flags);
+				list_add(&cmd->node, &cpvt->rx_queue);
+				dahdi_tc_set_data_waiting(dtc);
+				spin_unlock_irqrestore(&cpvt->lock, flags);
+				return returned_bytes;
+			}
+
+			if (printk_ratelimit()) {
+				DTE_PRINTK(ERR,
+				  "Cannot copy %zd bytes into %zd byte user " \
+				  "buffer.\n", payload_bytes, count);
+			}
+			free_cmd(cmd);
+			return -EFBIG;
 		}
-		free_cmd(cmd);
-		return -EFBIG;
-	}
 
-	atomic_inc(&cpvt->stats.packets_received);
+		atomic_inc(&cpvt->stats.packets_received);
 
 #if defined(__FreeBSD__)
-	if (unlikely(uiomove(packet->payload, payload_bytes, uio))) {
+		ret = uiomove(packet->payload, payload_bytes, uio);
 #else
-	if (unlikely(copy_to_user(frame, &packet->payload[0], payload_bytes))) {
+		ret = copy_to_user(&frame[returned_bytes],
+				   &packet->payload[0], payload_bytes);
 #endif
-		DTE_PRINTK(ERR, "Failed to copy data in %s\n", __func__);
+		if (unlikely(ret)) {
+			DTE_PRINTK(ERR, "Failed to copy data in %s\n",
+				   __func__);
+			free_cmd(cmd);
+			return -EFAULT;
+		}
+
+		returned_bytes += payload_bytes;
+
 		free_cmd(cmd);
-		return -EFAULT;
-	}
 
-	free_cmd(cmd);
+	} while ((cmd = get_ready_cmd(dtc)));
 
-	return payload_bytes;
+	return returned_bytes;
 }
 
 /* Called with a frame in the srcfmt to be transcoded into the dstfmt. */
@@ -2512,19 +2543,18 @@ wctc4xxp_send_ack(struct wcdte *wc, u8 seqno, __be16 channel)
 	wctc4xxp_transmit_cmd(wc, cmd);
 }
 
-static void
-do_rx_response_packet(struct wcdte *wc, struct tcb *cmd)
+static bool do_rx_response_packet(struct wcdte *wc, struct tcb *cmd)
 {
 	const struct csm_encaps_hdr *listhdr, *rxhdr;
 	struct tcb *pos, *temp;
 	unsigned long flags;
-	u32 handled = 0;
+	bool handled = false;
 	rxhdr = cmd->data;
-	if (0xffff == rxhdr->channel) {
+	if (SUPERVISOR_CHANNEL == rxhdr->channel) {
 		/* We received a duplicate response. */
 		if (rxhdr->seq_num == wc->last_rx_seq_num) {
 			free_cmd(cmd);
-			return;
+			return false;
 		}
 		wc->last_rx_seq_num = rxhdr->seq_num;
 	}
@@ -2545,7 +2575,7 @@ do_rx_response_packet(struct wcdte *wc, struct tcb *cmd)
 			if (pos->flags & TX_COMPLETE)
 				complete(&pos->complete);
 			spin_unlock(&pos->lock);
-			handled = 1;
+			handled = true;
 
 			break;
 		}
@@ -2557,7 +2587,10 @@ do_rx_response_packet(struct wcdte *wc, struct tcb *cmd)
 			"Freeing unhandled response ch:(%04x)\n",
 			be16_to_cpu(rxhdr->channel));
 		free_cmd(cmd);
+		return false;
 	}
+
+	return true;
 }
 
 static void
@@ -2651,12 +2684,20 @@ receive_csm_encaps_packet(struct wcdte *wc, struct tcb *cmd)
 	const struct csm_encaps_hdr *hdr = cmd->data;
 
 	if (!(hdr->control & CONTROL_MESSAGE_PACKET)) {
-		if (!(hdr->control & CONTROL_SUPPRESS_ACK))
-			wctc4xxp_send_ack(wc, hdr->seq_num, hdr->channel);
-
+		const bool suppress_ack = ((hdr->control & CONTROL_SUPPRESS_ACK) > 0);
 		if (is_response(hdr)) {
-			do_rx_response_packet(wc, cmd);
+			u8 seq_num = hdr->seq_num;
+			__be16 channel = hdr->channel;
+
+			if (do_rx_response_packet(wc, cmd) && !suppress_ack)
+				wctc4xxp_send_ack(wc, seq_num, channel);
+
 		} else if (0xc1 == hdr->type) {
+			if (!suppress_ack) {
+				wctc4xxp_send_ack(wc, hdr->seq_num,
+						  hdr->channel);
+			}
+
 			if (0x75 == hdr->class) {
 				DTE_PRINTK(WARNING,
 				   "Received alert (0x%04x) from dsp\n",
@@ -2664,6 +2705,10 @@ receive_csm_encaps_packet(struct wcdte *wc, struct tcb *cmd)
 			}
 			free_cmd(cmd);
 		} else if (0xd4 == hdr->type) {
+			if (!suppress_ack) {
+				wctc4xxp_send_ack(wc, hdr->seq_num,
+						  hdr->channel);
+			}
 			if (hdr->params[0] != le16_to_cpu(0xffff)) {
 				DTE_PRINTK(WARNING,
 				   "DTE Failed self test (%04x).\n",
@@ -2679,10 +2724,18 @@ receive_csm_encaps_packet(struct wcdte *wc, struct tcb *cmd)
 			}
 			free_cmd(cmd);
 		} else if (MONITOR_LIVE_INDICATION_TYPE == hdr->type) {
+			if (!suppress_ack) {
+				wctc4xxp_send_ack(wc, hdr->seq_num,
+						  hdr->channel);
+			}
 			DTE_PRINTK(WARNING, "Received diagnostic message:\n");
 			print_command(wc, cmd);
 			free_cmd(cmd);
 		} else {
+			if (!suppress_ack) {
+				wctc4xxp_send_ack(wc, hdr->seq_num,
+						  hdr->channel);
+			}
 			DTE_PRINTK(WARNING,
 			  "Unknown command type received. %02x\n", hdr->type);
 			free_cmd(cmd);
@@ -3158,6 +3211,10 @@ wctc4xxp_load_firmware(struct wcdte *wc, const struct firmware *firmware)
 	if (!cmd)
 		return -ENOMEM;
 
+#if defined(CONFIG_WCTC4XXP_POLLING)
+	wctc4xxp_enable_polling(wc);
+#endif
+
 	while (byteloc < (firmware_size-20)) {
 		last_byteloc = byteloc;
 		length = (firmware_data[byteloc] << 8) |
@@ -3173,14 +3230,24 @@ wctc4xxp_load_firmware(struct wcdte *wc, const struct firmware *firmware)
 		if (cmd->flags & DTE_CMD_TIMEOUT) {
 			free_cmd(cmd);
 			DTE_PRINTK(ERR, "Failed to load firmware.\n");
+#if defined(CONFIG_WCTC4XXP_POLLING)
+			wctc4xxp_disable_polling(wc);
+#endif
 			return -EIO;
 		}
 	}
 	free_cmd(cmd);
 	if (!wait_event_timeout(wc->waitq, wctc4xxp_is_ready(wc), 15*HZ)) {
 		DTE_PRINTK(ERR, "Failed to boot firmware.\n");
+#if defined(CONFIG_WCTC4XXP_POLLING)
+		wctc4xxp_disable_polling(wc);
+#endif
 		return -EIO;
 	}
+
+#if defined(CONFIG_WCTC4XXP_POLLING)
+	wctc4xxp_disable_polling(wc);
+#endif
 	return 0;
 }
 
@@ -3661,6 +3728,13 @@ wctc4xxp_add_to_device_list(struct wcdte *wc)
 	spin_unlock(&wctc4xxp_list_lock);
 	return pos;
 }
+
+static void wctc4xxp_remove_from_device_list(struct wcdte *wc)
+{
+	spin_lock(&wctc4xxp_list_lock);
+	list_del(&wc->node);
+	spin_unlock(&wctc4xxp_list_lock);
+}
 #endif /* !__FreeBSD__ */
 
 struct wctc4xxp_desc {
@@ -3714,9 +3788,9 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	wc->pdev->dev = dev;
 
         /* allocate memory resource */
-	wc->io_rid = PCIR_BAR(0);
-	wc->io_res = bus_alloc_resource_any(dev, SYS_RES_MEMORY, &wc->io_rid, RF_ACTIVE);
-	if (wc->io_res == NULL) {
+	wc->mem_rid = PCIR_BAR(1);
+	wc->mem_res = bus_alloc_resource_any(dev, SYS_RES_MEMORY, &wc->mem_rid, RF_ACTIVE);
+	if (wc->mem_res == NULL) {
 		device_printf(wc->pdev->dev, "Can't allocate memory resource\n");
 		return (-ENXIO);
 	}
@@ -3728,12 +3802,23 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	position_on_list = wctc4xxp_add_to_device_list(wc);
 	snprintf(wc->board_name, sizeof(wc->board_name)-1, "%s%d",
 		d->short_name, position_on_list);
-	wc->iobase           = pci_resource_start(pdev, 0);
+	wc->iobase           = pci_iomap(pdev, 1, 0);
 	wc->pdev             = pdev;
 	wc->pos              = position_on_list;
 #endif
 	wc->variety          = d->long_name;
 	wc->last_rx_seq_num  = -1;
+
+#if !defined(__FreeBSD__)
+	if (!request_mem_region(pci_resource_start(pdev, 1),
+	    pci_resource_len(pdev, 1), wc->board_name)) {
+		dev_err(&pdev->dev, "IO Registers are in use by another "
+			"module.\n");
+		wctc4xxp_remove_from_device_list(wc);
+		kfree(wc);
+		return -EIO;
+	}
+#endif
 
 	init_MUTEX(&wc->chansem);
 	spin_lock_init(&wc->reglock);
@@ -3753,16 +3838,11 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 #if !defined(__FreeBSD__)
 	DTE_PRINTK(INFO, "Attached to device at %s.\n", pci_name(wc->pdev));
 
-	/* Keep track of whether we need to free the region */
-	if (!request_region(wc->iobase, 0xff, wc->board_name)) {
-		/* \todo put in error message. */
-		DTE_PRINTK(WARNING,
-		    "Failed to reserve the I/O ports for this device.\n");
-		return -EIO;
-	}
-
 	if (pci_set_dma_mask(wc->pdev, DMA_BIT_MASK(32))) {
-		release_region(wc->iobase, 0xff);
+		release_mem_region(pci_resource_start(wc->pdev, 1),
+			pci_resource_len(wc->pdev, 1));
+		if (wc->iobase)
+			pci_iounmap(wc->pdev, wc->iobase);
 		DTE_PRINTK(WARNING, "No suitable DMA available.\n");
 		return -EIO;
 	}
@@ -3909,6 +3989,9 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (res)
 		goto error_exit_hwinit;
 
+#if defined(CONFIG_WCTC4XXP_POLLING)
+	wctc4xxp_enable_polling(wc);
+#endif
 	res = wctc4xxp_setup_channels(wc);
 	if (res)
 		goto error_exit_hwinit;
@@ -3931,6 +4014,9 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	return 0;
 
 error_exit_hwinit:
+#if defined(CONFIG_WCTC4XXP_POLLING)
+	wctc4xxp_disable_polling(wc);
+#endif
 	wctc4xxp_stop_dma(wc);
 	wctc4xxp_cleanup_command_list(wc);
 #if defined(__FreeBSD__)
@@ -3962,15 +4048,16 @@ error_exit_swinit:
 	kfree(wc->rxd);
 #if defined(__FreeBSD__)
 	/* release I/O region */
-	if (wc->io_res != NULL) {
-		bus_release_resource(wc->pdev->dev, SYS_RES_IOPORT, wc->io_rid, wc->io_res);
-		wc->io_res = NULL;
+	if (wc->mem_res != NULL) {
+		bus_release_resource(wc->pdev->dev, SYS_RES_MEMORY, wc->mem_rid, wc->mem_res);
+		wc->mem_res = NULL;
 	}
 #else
-	release_region(wc->iobase, 0xff);
-	spin_lock(&wctc4xxp_list_lock);
-	list_del(&wc->node);
-	spin_unlock(&wctc4xxp_list_lock);
+	release_mem_region(pci_resource_start(wc->pdev, 1),
+		pci_resource_len(wc->pdev, 1));
+	if (wc->iobase)
+		pci_iounmap(wc->pdev, wc->iobase);
+	wctc4xxp_remove_from_device_list(wc);
 	kfree(wc);
 #endif
 	return res;
@@ -4006,9 +4093,7 @@ static void __devexit wctc4xxp_remove_one(struct pci_dev *pdev)
 		return;
 
 #if !defined(__FreeBSD__)
-	spin_lock(&wctc4xxp_list_lock);
-	list_del(&wc->node);
-	spin_unlock(&wctc4xxp_list_lock);
+	wctc4xxp_remove_from_device_list(wc);
 #endif
 
 	set_bit(DTE_SHUTDOWN, &wc->flags);
@@ -4053,13 +4138,16 @@ static void __devexit wctc4xxp_remove_one(struct pci_dev *pdev)
 
 	/* Free Resources */
 #if defined(__FreeBSD__)
-	/* release I/O region */
-	if (wc->io_res != NULL) {
-		bus_release_resource(wc->pdev->dev, SYS_RES_IOPORT, wc->io_rid, wc->io_res);
-		wc->io_res = NULL;
+	/* release memory region */
+	if (wc->mem_res != NULL) {
+		bus_release_resource(wc->pdev->dev, SYS_RES_MEMORY, wc->mem_rid, wc->mem_res);
+		wc->mem_res = NULL;
 	}
 #else
-	release_region(wc->iobase, 0xff);
+	release_mem_region(pci_resource_start(wc->pdev, 1),
+		pci_resource_len(wc->pdev, 1));
+	if (wc->iobase)
+		pci_iounmap(wc->pdev, wc->iobase);
 #endif
 	wctc4xxp_cleanup_descriptor_ring(wc->txd);
 	kfree(wc->txd);

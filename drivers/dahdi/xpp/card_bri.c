@@ -56,6 +56,7 @@ enum xhfc_states {
 	ST_NT_DEACTIVTING	= 4,	/* G4	*/
 };
 
+#ifdef CONFIG_PROC_FS
 static const char *xhfc_state_name(bool is_nt, enum xhfc_states state)
 {
 	const char	*p;
@@ -92,6 +93,7 @@ static const char *xhfc_state_name(bool is_nt, enum xhfc_states state)
 	}
 	return p;
 }
+#endif
 
 /* xhfc Layer1 physical commands */
 #define HFC_L1_ACTIVATE_TE		0x01
@@ -157,7 +159,9 @@ typedef union {
 static int write_state_register(xpd_t *xpd, byte value);
 static bool bri_packet_is_valid(xpacket_t *pack);
 static void bri_packet_dump(const char *msg, xpacket_t *pack);
+#ifdef	CONFIG_PROC_FS
 static int proc_bri_info_read(char *page, char **start, off_t off, int count, int *eof, void *data);
+#endif
 static int bri_spanconfig(struct dahdi_span *span, struct dahdi_lineconfig *lc);
 static int bri_chanconfig(struct dahdi_chan *chan, int sigtype);
 static int bri_startup(struct dahdi_span *span);
@@ -799,14 +803,12 @@ static int bri_proc_create(xbus_t *xbus, xpd_t *xpd)
 	priv->bri_info = create_proc_read_entry(PROC_BRI_INFO_FNAME, 0444, xpd->proc_xpd_dir, proc_bri_info_read, xpd);
 	if(!priv->bri_info) {
 		XPD_ERR(xpd, "Failed to create proc file '%s'\n", PROC_BRI_INFO_FNAME);
-		goto err;
+		bri_proc_remove(xbus, xpd);
+		return -EINVAL;
 	}
 	SET_PROC_DIRENTRY_OWNER(priv->bri_info);
 #endif
 	return 0;
-err:
-	bri_proc_remove(xbus, xpd);
-	return -EINVAL;
 }
 
 static xpd_t *BRI_card_new(xbus_t *xbus, int unit, int subunit, const xproto_table_t *proto_table,
@@ -859,6 +861,28 @@ static int BRI_card_remove(xbus_t *xbus, xpd_t *xpd)
 	return 0;
 }
 
+static const struct dahdi_span_ops BRI_span_ops = {
+	.owner = THIS_MODULE,
+	.spanconfig = bri_spanconfig,
+	.chanconfig = bri_chanconfig,
+	.startup = bri_startup,
+	.shutdown = bri_shutdown,
+#ifndef	CONFIG_DAHDI_BRI_DCHANS
+	.hdlc_hard_xmit = bri_hdlc_hard_xmit,
+#endif
+	.open = xpp_open,
+	.close = xpp_close,
+	.hooksig = xpp_hooksig,	/* Only with RBS bits */
+	.ioctl = xpp_ioctl,
+	.maint = xpp_maint,
+#ifdef	DAHDI_SYNC_TICK
+	.sync_tick = dahdi_sync_tick,
+#endif
+#ifdef	CONFIG_DAHDI_WATCHDOG
+	.watchdog = xpp_watchdog,
+#endif
+};
+
 static int BRI_card_dahdi_preregistration(xpd_t *xpd, bool on)
 {
 	xbus_t			*xbus;
@@ -874,7 +898,6 @@ static int BRI_card_dahdi_preregistration(xpd_t *xpd, bool on)
 		/* Nothing to do yet */
 		return 0;
 	}
-	xpd->span.owner = THIS_MODULE;
 	xpd->span.spantype = "BRI";
 	xpd->span.linecompat = DAHDI_CONFIG_AMI | DAHDI_CONFIG_CCS;
 	xpd->span.deflaw = DAHDI_LAW_ALAW;
@@ -910,13 +933,7 @@ static int BRI_card_dahdi_preregistration(xpd_t *xpd, bool on)
 		}
 	}
 	CALL_XMETHOD(card_pcm_recompute, xbus, xpd, 0);
-	xpd->span.spanconfig = bri_spanconfig;
-	xpd->span.chanconfig = bri_chanconfig;
-	xpd->span.startup = bri_startup;
-	xpd->span.shutdown = bri_shutdown;
-#ifndef	CONFIG_DAHDI_BRI_DCHANS
-	xpd->span.hdlc_hard_xmit = bri_hdlc_hard_xmit;
-#endif
+	xpd->span.ops = &BRI_span_ops;
 	return 0;
 }
 
@@ -1169,7 +1186,7 @@ static int BRI_card_close(xpd_t *xpd, lineno_t pos)
  */
 static int bri_spanconfig(struct dahdi_span *span, struct dahdi_lineconfig *lc)
 {
-	xpd_t		*xpd = span->pvt;
+	xpd_t		*xpd = container_of(span, struct xpd, span);
 	const char	*framingstr = "";
 	const char	*codingstr = "";
 	const char	*crcstr = "";
@@ -1225,7 +1242,7 @@ static int bri_chanconfig(struct dahdi_chan *chan, int sigtype)
  */
 static int bri_startup(struct dahdi_span *span)
 {
-	xpd_t			*xpd = span->pvt;
+	xpd_t			*xpd = container_of(span, struct xpd, span);
 	struct BRI_priv_data	*priv;
 	struct dahdi_chan	*dchan;
 
@@ -1261,7 +1278,7 @@ static int bri_startup(struct dahdi_span *span)
  */
 static int bri_shutdown(struct dahdi_span *span)
 {
-	xpd_t			*xpd = span->pvt;
+	xpd_t			*xpd = container_of(span, struct xpd, span);
 	struct BRI_priv_data	*priv;
 
 	BUG_ON(!xpd);
@@ -1669,6 +1686,7 @@ static xproto_table_t PROTO_TABLE(BRI) = {
 		.card_pcm_recompute	= BRI_card_pcm_recompute,
 		.card_pcm_fromspan	= BRI_card_pcm_fromspan,
 		.card_pcm_tospan	= BRI_card_pcm_tospan,
+		.card_timing_priority	= generic_timing_priority,
 		.card_ioctl	= BRI_card_ioctl,
 		.card_open	= BRI_card_open,
 		.card_close	= BRI_card_close,
@@ -1694,6 +1712,7 @@ static void bri_packet_dump(const char *msg, xpacket_t *pack)
 }
 /*------------------------- REGISTER Handling --------------------------*/
 
+#ifdef	CONFIG_PROC_FS
 static int proc_bri_info_read(char *page, char **start, off_t off, int count, int *eof, void *data)
 {
 	int			len = 0;
@@ -1719,7 +1738,7 @@ static int proc_bri_info_read(char *page, char **start, off_t off, int count, in
 					priv->state_register.bits.v_su_info0,
 					priv->state_register.bits.v_g2_g3);
 	} else
-		len += sprintf(page + len, "Unkown\n");
+		len += sprintf(page + len, "Unknown\n");
 	if(IS_NT(xpd)) {
 		len += sprintf(page + len, "T1 Timer: %d\n", priv->t1);
 	} else {
@@ -1756,6 +1775,7 @@ static int proc_bri_info_read(char *page, char **start, off_t off, int count, in
 		len = 0;
 	return len;
 }
+#endif
 
 static DRIVER_ATTR_READER(dchan_hardhdlc_show, drv,buf)
 {

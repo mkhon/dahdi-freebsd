@@ -238,6 +238,9 @@ sub write_pri_info {
 sub port_setup($) {
 	my $port = shift;
 	my $portno = $port->{PORT_NUM};
+	my $pri_protocol = $port->get_pri_protocol;
+
+	PRI::gen "$portno WD 28 40"; 	# XPM2.XLT Tristate
 
 	my $cmr5 = sprintf("%x", ($portno << 5));
 
@@ -245,7 +248,6 @@ sub port_setup($) {
 
 	PRI::gen "$portno WD 26 F6"; 	# XPM0: Pulse Shape Programming for R1=18Ohms 
 	PRI::gen "$portno WD 27 02"; 	# XPM1: ...3V Pulse Level at the line (Vp-p=6v)
-	PRI::gen "$portno WD 28 00"; 	# XPM2: ~XLT (transmit line is not in the high impedance state)
 
 					# if (unchannelized)
 	#PRI::gen "$portno WD 1F 22";	# LOOP (Channel Looback): 
@@ -302,10 +304,13 @@ sub port_setup($) {
 	PRI::gen "$portno WD 3F $sic2";	# SIC2: No FFS, no center receive elastic buffer, data active at phase ($sic >> 1)
 		
 	# enable the following interrupt sources
+	PRI::gen "$portno WD 14 F7"; 	# IMR0 (Interrupt Mask Register2): Enable CASC_E1/RSC_T1
 	PRI::gen "$portno WD 16 00"; 	# IMR2 (Interrupt Mask Register2): Enable ALL
 		
 	PRI::gen "$portno WD 17 3F"; 	# IMR3 ~ES, ~SEC (Enable ES and SEC interrupts)
 	PRI::gen "$portno WD 18 00"; 	# IMR4: Enable ALL
+	PRI::gen "$portno WD 46 80"; 	# GCR: (Global Configuration Register)
+					#      VIS (Masked Interrupts Visible)
 
 	PRI::gen "$portno WD 08 04";	# IPC: SYNC is 8 Khz
 
@@ -334,9 +339,25 @@ sub port_setup($) {
 					#      MDS  (Mode Select) = 100 (No address comparison)
 					#      HRAC (Receiver Active - HDLC channel 1) 
 					#      RFT2 (HDLC Receive FIFO is 64 byte deep)
-	PRI::gen "$portno WD 09 18";	# CCR1 (Common Configuration Register1)
+	my $ccr1 = 0x18;		# CCR1 (Common Configuration Register1)
 					#      EITS (Enable Internal Time Slot 0 to 31 Signalling)
 					#      ITF  (Interframe Time Fill)
+	my $sysfs_pri_protocol;
+	if (defined $pri_protocol) {
+		$sysfs_pri_protocol = $pri_protocol;
+	} else {
+		my $file = sprintf "/sys/bus/xpds/devices/%02d:%1d:%1d/pri_protocol",
+				$ENV{XBUS_NUMBER}, $ENV{UNIT_NUMBER}, $portno;
+		open(F, $file) || die "$0: Failed opening '$file'";
+		$sysfs_pri_protocol = <F>;
+		close F;
+		chomp $sysfs_pri_protocol;
+	}
+	if($sysfs_pri_protocol eq 'T1') {
+		$ccr1 |= 0x80;		#      RSCC (Serial CAS Format Selection)
+	}
+
+	PRI::gen "$portno WD 09 %02X", $ccr1;
 	PRI::gen "$portno WD 0A 04";	# CCR2 (Common Configuration Register2)
 					#      RCRC (enable CRC - HDLC channel 1enable CRC - HDLC channel 1)
 	PRI::gen "$portno WD 0C 00";	# RTR1 (Receive  Time Slot register 1)

@@ -116,16 +116,22 @@ struct t1 {
 	unsigned long bit_flags;
 	unsigned long alarmtimer;
 	unsigned char ledstate;
-	unsigned char ec_chunk1[32][DAHDI_CHUNKSIZE];
-	unsigned char ec_chunk2[32][DAHDI_CHUNKSIZE];
 	struct dahdi_span span;						/* Span */
 	struct dahdi_chan *chans[32];					/* Channels */
 	struct dahdi_echocan_state *ec[32];				/* Echocan state for channels */
+#ifdef CONFIG_VOICEBUS_ECREFERENCE
+	struct dahdi_fifo *ec_reference[32];
+#else
+	unsigned char ec_chunk1[32][DAHDI_CHUNKSIZE];
+	unsigned char ec_chunk2[32][DAHDI_CHUNKSIZE];
+#endif
 	unsigned long ctlreg;
 	struct voicebus vb;
 	atomic_t txints;
 	int vpm100;
 	struct vpmadt032 *vpmadt032;
+	unsigned long vpm_check;
+	struct work_struct vpm_check_work;
 	unsigned long dtmfactive;
 	unsigned long dtmfmask;
 	unsigned long dtmfmutemask;
@@ -135,6 +141,7 @@ struct t1 {
 	struct list_head active_cmds;
 	struct timer_list timer;
 	struct work_struct timer_work;
+	struct workqueue_struct *wq;
 };
 
 #define t1_info(t1, format, arg...)         \
@@ -146,5 +153,10 @@ struct t1 {
 #define LIM1		0x37
 #define LIM1_RL 	(1<<1)
 #define LIM1_JATT	(1<<2)
+
+/* Clear Channel Registers */
+#define CCB1		0x2f
+#define CCB2		0x30
+#define CCB3		0x31
 
 #endif

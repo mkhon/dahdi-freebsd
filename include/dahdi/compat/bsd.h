@@ -268,6 +268,7 @@ int down_interruptible(struct semaphore *s);
 int down_trylock(struct semaphore *s);
 void up(struct semaphore *s);
 
+#define DECLARE_MUTEX(s)	struct semaphore s
 #define init_MUTEX(s)		_sema_init((s), 1)
 #define destroy_MUTEX(s)	_sema_destroy(s)
 

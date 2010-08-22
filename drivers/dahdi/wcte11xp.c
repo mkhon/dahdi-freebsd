@@ -509,9 +509,14 @@ static int t1xxp_ioctl(struct dahdi_chan *chan, unsigned int cmd, unsigned long 
 	return 0;
 }
 
+static inline struct t1 *t1_from_span(struct dahdi_span *span)
+{
+	return container_of(span, struct t1, span);
+}
+
 static int t1xxp_maint(struct dahdi_span *span, int cmd)
 {
-	struct t1 *wc = span->pvt;
+	struct t1 *wc = t1_from_span(span);
 
 	if (wc->spantype == TYPE_E1) {
 		switch(cmd) {
@@ -948,7 +953,7 @@ static void t1xxp_framer_start(struct t1 *wc, struct dahdi_span *span)
 
 static int t1xxp_startup(struct dahdi_span *span)
 {
-	struct t1 *wc = span->pvt;
+	struct t1 *wc = t1_from_span(span);
 
 	int i,alreadyrunning = span->flags & DAHDI_FLAG_RUNNING;
 
@@ -976,7 +981,7 @@ static int t1xxp_startup(struct dahdi_span *span)
 
 static int t1xxp_shutdown(struct dahdi_span *span)
 {
-	struct t1 *wc = span->pvt;
+	struct t1 *wc = t1_from_span(span);
 	unsigned long flags;
 
 	spin_lock_irqsave(&wc->lock, flags);
@@ -1006,7 +1011,7 @@ static int t1xxp_chanconfig(struct dahdi_chan *chan, int sigtype)
 
 static int t1xxp_spanconfig(struct dahdi_span *span, struct dahdi_lineconfig *lc)
 {
-	struct t1 *wc = span->pvt;
+	struct t1 *wc = t1_from_span(span);
 
 	/* Do we want to SYNC on receive or not */
 	wc->sync = (lc->sync) ? 1 : 0;
@@ -1016,6 +1021,19 @@ static int t1xxp_spanconfig(struct dahdi_span *span, struct dahdi_lineconfig *lc
 
 	return 0;
 }
+
+static const struct dahdi_span_ops t1xxp_span_ops = {
+	.owner = THIS_MODULE,
+	.startup = t1xxp_startup,
+	.shutdown = t1xxp_shutdown,
+	.rbsbits = t1xxp_rbsbits,
+	.maint = t1xxp_maint,
+	.open = t1xxp_open,
+	.close = t1xxp_close,
+	.spanconfig = t1xxp_spanconfig,
+	.chanconfig = t1xxp_chanconfig,
+	.ioctl = t1xxp_ioctl,
+};
 
 static int t1xxp_software_init(struct t1 *wc)
 {
@@ -1031,22 +1049,13 @@ static int t1xxp_software_init(struct t1 *wc)
 		return -1;
 	t4_serial_setup(wc);
 	wc->num = x;
-	wc->span.owner = THIS_MODULE;
 	sprintf(wc->span.name, "WCT1/%d", wc->num);
 	snprintf(wc->span.desc, sizeof(wc->span.desc) - 1, "%s Card %d", wc->variety, wc->num);
 	wc->span.manufacturer = "Digium";
 	dahdi_copy_string(wc->span.devicetype, wc->variety, sizeof(wc->span.devicetype));
 	snprintf(wc->span.location, sizeof(wc->span.location) - 1,
 		 "PCI Bus %02d Slot %02d", dahdi_pci_get_bus(wc->dev), dahdi_pci_get_slot(wc->dev) + 1);
-	wc->span.spanconfig = t1xxp_spanconfig;
-	wc->span.chanconfig = t1xxp_chanconfig;
 	wc->span.irq = dahdi_pci_get_irq(wc->dev);
-	wc->span.startup = t1xxp_startup;
-	wc->span.shutdown = t1xxp_shutdown;
-	wc->span.rbsbits = t1xxp_rbsbits;
-	wc->span.maint = t1xxp_maint;
-	wc->span.open = t1xxp_open;
-	wc->span.close = t1xxp_close;
 	if (wc->spantype == TYPE_E1) {
 		if (unchannelized)
 			wc->span.channels = 32;
@@ -1063,8 +1072,6 @@ static int t1xxp_software_init(struct t1 *wc)
 	}
 	wc->span.chans = wc->chans;
 	wc->span.flags = DAHDI_FLAG_RBS;
-	wc->span.ioctl = t1xxp_ioctl;
-	wc->span.pvt = wc;
 	init_waitqueue_head(&wc->span.maintq);
 	for (x=0;x<wc->span.channels;x++) {
 		sprintf(wc->chans[x]->name, "WCT1/%d/%d", wc->num, x + 1);
@@ -1075,6 +1082,7 @@ static int t1xxp_software_init(struct t1 *wc)
 		wc->chans[x]->pvt = wc;
 		wc->chans[x]->chanpos = x + 1;
 	}
+	wc->span.ops = &t1xxp_span_ops;
 	if (dahdi_register(&wc->span, 0)) {
 		printk(KERN_NOTICE "Unable to register span with DAHDI\n");
 		return -1;

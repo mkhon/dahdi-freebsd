@@ -205,6 +205,16 @@ static DEVICE_ATTR_READER(waitfor_xpds_show, dev, buf)
 	return len;
 }
 
+static DEVICE_ATTR_READER(refcount_xbus_show, dev, buf)
+{
+	xbus_t			*xbus;
+	int			len;
+
+	xbus = dev_to_xbus(dev);
+	len = sprintf(buf, "%d\n", refcount_xbus(xbus));
+	return len;
+}
+
 static DEVICE_ATTR_READER(driftinfo_show, dev, buf)
 {
 	xbus_t			*xbus;
@@ -290,6 +300,7 @@ static struct device_attribute xbus_dev_attrs[] = {
         __ATTR_RO(label),
 	__ATTR_RO(status),
 	__ATTR_RO(timing),
+	__ATTR_RO(refcount_xbus),
 	__ATTR_RO(waitfor_xpds),
 	__ATTR_RO(driftinfo),
 	__ATTR(cls,		S_IWUSR, NULL, cls_store),
@@ -429,6 +440,16 @@ static void astribank_release(struct device *dev)
 	XBUS_INFO(xbus, "[%s] Astribank Release\n", xbus->label);
 	xbus_free(xbus);
 }
+
+static void toplevel_release(struct device *dev)
+{
+	NOTICE("%s\n", __func__);
+}
+
+static struct device toplevel_device = {
+	.release	= toplevel_release,
+	/* No Parent */
+};
 
 static struct bus_type toplevel_bus_type = {
 	.name           = "astribanks",
@@ -677,6 +698,19 @@ static DEVICE_ATTR_READER(timing_priority_show, dev, buf)
 	return len;
 }
 
+static DEVICE_ATTR_READER(refcount_xpd_show, dev, buf)
+{
+	xpd_t			*xpd;
+	int			len = 0;
+
+	BUG_ON(!dev);
+	xpd = dev_to_xpd(dev);
+	if (!xpd)
+		return -ENODEV;
+	len += sprintf(buf + len, "%d\n", refcount_xpd(xpd));
+	return len;
+}
+
 static int xpd_match(struct device *dev, struct device_driver *driver)
 {
 	struct xpd_driver	*xpd_driver;
@@ -701,6 +735,7 @@ static struct device_attribute xpd_dev_attrs[] = {
         __ATTR_RO(type),
         __ATTR_RO(offhook),
         __ATTR_RO(timing_priority),
+	__ATTR_RO(refcount_xpd),
         __ATTR_NULL,
 };
 
@@ -756,8 +791,6 @@ int xpd_device_register(xbus_t *xbus, xpd_t *xpd)
 		XPD_ERR(xpd, "%s: device_register failed: %d\n", __FUNCTION__, ret);
 		return ret;
 	}
-	get_xpd(__FUNCTION__, xpd);
-	BUG_ON(!xpd);
 	return 0;
 }
 
@@ -779,6 +812,41 @@ void xpd_device_unregister(xpd_t *xpd)
 
 /*--------- Sysfs Device handling ----*/
 
+void xbus_sysfs_transport_remove(xbus_t *xbus)
+{
+	struct device	*astribank;
+
+	BUG_ON(!xbus);
+	XBUS_DBG(DEVICES, xbus, "\n");
+	astribank = &xbus->astribank;
+	sysfs_remove_link(&astribank->kobj, "transport");
+}
+
+int xbus_sysfs_transport_create(xbus_t *xbus)
+{
+	struct device	*astribank;
+	struct device	*transport_device;
+	int		ret = 0;
+
+	BUG_ON(!xbus);
+	XBUS_DBG(DEVICES, xbus, "\n");
+	astribank = &xbus->astribank;
+	BUG_ON(!astribank);
+	transport_device = xbus->transport.transport_device;
+	if (!transport_device) {
+		XBUS_ERR(xbus, "%s: Missing transport_device\n", __func__);
+		return -ENODEV;
+	}
+	ret = sysfs_create_link(&astribank->kobj, &transport_device->kobj,
+			"transport");
+	if (ret < 0) {
+		XBUS_ERR(xbus, "%s: sysfs_create_link failed: %d\n",
+				__func__, ret);
+		dev_set_drvdata(astribank, NULL);
+	}
+	return ret;
+}
+
 void xbus_sysfs_remove(xbus_t *xbus)
 {
 	struct device	*astribank;
@@ -786,12 +854,11 @@ void xbus_sysfs_remove(xbus_t *xbus)
 	BUG_ON(!xbus);
 	XBUS_DBG(DEVICES, xbus, "\n");
 	astribank = &xbus->astribank;
-	BUG_ON(!astribank);
-	sysfs_remove_link(&astribank->kobj, "transport");
 	if(!dev_get_drvdata(astribank))
 		return;
 	BUG_ON(dev_get_drvdata(astribank) != xbus);
-	device_unregister(&xbus->astribank);
+	device_unregister(astribank);
+	dev_set_drvdata(astribank, NULL);
 }
 
 int xbus_sysfs_create(xbus_t *xbus)
@@ -801,10 +868,9 @@ int xbus_sysfs_create(xbus_t *xbus)
 
 	BUG_ON(!xbus);
 	astribank = &xbus->astribank;
-	BUG_ON(!astribank);
 	XBUS_DBG(DEVICES, xbus, "\n");
 	astribank->bus = &toplevel_bus_type;
-	astribank->parent = xbus->transport.transport_device;
+	astribank->parent = &toplevel_device;
 	dev_set_name(astribank, "xbus-%02d", xbus->num);
 	dev_set_drvdata(astribank, xbus);
 	astribank->release = astribank_release;
@@ -812,15 +878,7 @@ int xbus_sysfs_create(xbus_t *xbus)
 	if(ret) {
 		XBUS_ERR(xbus, "%s: device_register failed: %d\n", __FUNCTION__, ret);
 		dev_set_drvdata(astribank, NULL);
-		goto out;
 	}
-	ret = sysfs_create_link(&astribank->kobj, &astribank->parent->kobj, "transport");
-	if(ret < 0) {
-		XBUS_ERR(xbus, "%s: sysfs_create_link failed: %d\n", __FUNCTION__, ret);
-		dev_set_drvdata(astribank, NULL);
-		goto out;
-	}
-out:
 	return ret;
 }
 
@@ -829,6 +887,12 @@ int __init xpp_driver_init(void)
 	int	ret;
 
 	DBG(DEVICES, "SYSFS\n");
+	dev_set_name(&toplevel_device, "astribanks");
+	ret = device_register(&toplevel_device);
+	if (ret) {
+		ERR("%s: toplevel device_register failed: %d\n", __func__, ret);
+		goto failed_toplevel;
+	}
 	if((ret = bus_register(&toplevel_bus_type)) < 0) {
 		ERR("%s: bus_register(%s) failed. Error number %d",
 			__FUNCTION__, toplevel_bus_type.name, ret);
@@ -850,6 +914,8 @@ failed_xpd_bus:
 failed_xpp_driver:
 	bus_unregister(&toplevel_bus_type);
 failed_bus:
+	device_unregister(&toplevel_device);
+failed_toplevel:
 	return ret;
 }
 
@@ -859,6 +925,7 @@ void xpp_driver_exit(void)
 	bus_unregister(&xpd_type);
 	driver_unregister(&xpp_driver);
 	bus_unregister(&toplevel_bus_type);
+	device_unregister(&toplevel_device);
 }
 
 EXPORT_SYMBOL(xpd_driver_register);

@@ -167,7 +167,8 @@ struct xpd {
 	xpp_line_t	no_pcm;			/* Temporary: disable PCM (for USB-1) */
 	xpp_line_t	offhook_state;		/* Actual chip state: 0 - ONHOOK, 1 - OFHOOK */
 	xpp_line_t	oht_pcm_pass;		/* Transfer on-hook PCM */
-	xpp_line_t	msg_waiting;		/* Voice Mail Waiting Indication */
+	/* Voice Mail Waiting Indication: */
+	unsigned int	msg_waiting[CHANNELS_PERXPD];
 	xpp_line_t	digital_outputs;	/* 0 - no, 1 - yes */
 	xpp_line_t	digital_inputs;		/* 0 - no, 1 - yes */
 	xpp_line_t	digital_signalling;	/* BRI signalling channels */
@@ -176,6 +177,8 @@ struct xpd {
 	enum xpd_state	xpd_state;
 	struct device	xpd_dev;
 #define	dev_to_xpd(dev)	container_of(dev, struct xpd, xpd_dev)
+	struct kref		kref;
+#define kref_to_xpd(k) container_of(k, struct xpd, kref)
 
 	/* Assure atomicity of changes to pcm_len and wanted_pcm_mask */
 	spinlock_t	lock_recompute_pcm;
@@ -257,6 +260,7 @@ int	xpd_driver_register(struct device_driver *driver);
 void	xpd_driver_unregister(struct device_driver *driver);
 xpd_t	*get_xpd(const char *msg, xpd_t *xpd);
 void	put_xpd(const char *msg, xpd_t *xpd);
+int	refcount_xpd(xpd_t *xpd);
 
 #endif
 

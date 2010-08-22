@@ -123,6 +123,11 @@ static int alarmdebounce = 500;
 static int vpmsupport = 1;
 static int timer_1_ms = 2000;
 static int timer_3_ms = 30000;
+#if defined(__FreeBSD__)
+static char companding[5] = "alaw";
+#else
+static char *companding = "alaw";
+#endif
 
 #if !defined(mmiowb)
 #define mmiowb() barrier()
@@ -158,20 +163,19 @@ struct devtype {
 static struct devtype wcb4xxp =  {"Wildcard B410P", .ports = 4, .card_type = B410P  };
 static struct devtype hfc2s =	 {"HFC-2S Junghanns.NET duoBRI PCI", .ports = 2, .card_type = DUOBRI };
 static struct devtype hfc4s =	 {"HFC-4S Junghanns.NET quadBRI PCI", .ports = 4, .card_type = QUADBRI };
-static struct devtype hfc8s =	 {"HFC-4S Junghanns.NET octoBRI PCI", .ports = 8, .card_type = OCTOBRI };
+static struct devtype hfc8s =	 {"HFC-8S Junghanns.NET octoBRI PCI", .ports = 8, .card_type = OCTOBRI };
 static struct devtype hfc2s_OV = {"OpenVox B200P", .ports = 2, .card_type = B200P_OV };
 static struct devtype hfc4s_OV = {"OpenVox B400P", .ports = 4, .card_type = B400P_OV };
 static struct devtype hfc8s_OV = {"OpenVox B800P", .ports = 8, .card_type = B800P_OV };
 static struct devtype hfc2s_BN = {"BeroNet BN2S0", .ports = 2, .card_type = BN2S0 };
 static struct devtype hfc4s_BN = {"BeroNet BN4S0", .ports = 4, .card_type = BN4S0 };
 static struct devtype hfc8s_BN = {"BeroNet BN8S0", .ports = 8, .card_type = BN8S0 };
+static struct devtype hfc4s_SW = {"Swyx 4xS0 SX2 QuadBri", .ports = 4, .card_type = BSWYX_SX2 };
 static struct devtype hfc4s_EV = {"CCD HFC-4S Eval. Board", .ports = 4,
 					.card_type = QUADBRI_EVAL };
  
 #define CARD_HAS_EC(card) ((card)->card_type == B410P)
 
-static int echocan_create(struct dahdi_chan *chan, struct dahdi_echocanparams *ecp,
-			   struct dahdi_echocanparam *p, struct dahdi_echocan_state **ec);
 static void echocan_free(struct dahdi_chan *chan, struct dahdi_echocan_state *ec);
 
 static const struct dahdi_echocan_features my_ec_features = {
@@ -786,12 +790,18 @@ static void ec_init(struct b4xxp *b4)
 			ec_write(b4, i, 0x33 - j, (mask >> (j << 3)) & 0xff);
 
 /* Setup convergence rate */
-		if (DBG)
-			dev_info(b4->dev, "setting A-law mode\n");
-
 		b = ec_read(b4, i, 0x20);
 		b &= 0xe0;
-		b |= 0x13;
+		b |= 0x12;
+		if (!strcasecmp(companding, "alaw")) {
+			if (DBG)
+				dev_info(b4->dev, "Setting alaw mode\n");
+			b |= 0x01;
+		} else {
+			if (DBG)
+				dev_info(b4->dev, "Setting ulaw mode");
+		}
+
 		ec_write(b4, i, 0x20, b);
 		if (DBG)
 			dev_info(b4->dev, "reg 0x20 is 0x%02x\n", b);
@@ -1220,6 +1230,10 @@ static void b4xxp_set_sync_src(struct b4xxp *b4, int port)
 {
 	int b;
 
+#if 0
+	printk("Setting sync to be port %d\n", (port >= 0) ? port + 1 : port);
+#endif
+
 	if (port == -1) 		/* automatic */
 		b = 0;
 	else
@@ -1247,7 +1261,10 @@ static int b4xxp_find_sync(struct b4xxp *b4)
 		}
 	}
 
-	return src - 1;
+	if (src >= 0)
+		return src - 1;
+	else
+		return src;
 }
 
 /*
@@ -1380,8 +1397,7 @@ static void hfc_update_st_timers(struct b4xxp *b4)
 				dahdi_alarm_notify(&s->span);
 				if (DBG_ALARM)
 					dev_info(b4->dev, "span %d: alarm %d debounced\n", i + 1, s->newalarm);
-				if (!s->te_mode)
-					b4xxp_set_sync_src(b4, b4xxp_find_sync(b4));
+				b4xxp_set_sync_src(b4, b4xxp_find_sync(b4));
 			}
 		}
 	}
@@ -1976,6 +1992,9 @@ static void b4xxp_init_stage2(struct b4xxp *b4)
 	flush_pci();
 	b4xxp_setreg8(b4, R_PCM_MD1, V_PLL_ADJ_00 | V_PCM_DR_2048);
 
+	b4xxp_setreg8(b4, R_PWM_MD, 0xa0);
+	b4xxp_setreg8(b4, R_PWM0, 0x1b);
+
 /*
  * set up the flow controller.
  * B channel map: (4 ports cards with Hardware Echo Cancel present & active)
@@ -2179,11 +2198,16 @@ static void b4xxp_update_leds(struct b4xxp *b4)
 	}
 }
 
-static int echocan_create(struct dahdi_chan *chan, struct dahdi_echocanparams *ecp,
-			  struct dahdi_echocanparam *p, struct dahdi_echocan_state **ec)
+static int b4xxp_echocan_create(struct dahdi_chan *chan,
+				struct dahdi_echocanparams *ecp,
+				struct dahdi_echocanparam *p,
+				struct dahdi_echocan_state **ec)
 {
-	struct b4xxp_span *bspan = chan->span->pvt;
+	struct b4xxp_span *bspan = container_of(chan->span, struct b4xxp_span, span);
 	int channel;
+
+	if (!vpmsupport || !CARD_HAS_EC(bspan->parent))
+		return -ENODEV;
 
 	if (chan->chanpos == 3) {
 		printk(KERN_WARNING "Cannot enable echo canceller on D channel of span %d; failing request\n", chan->span->offset);
@@ -2211,7 +2235,7 @@ static int echocan_create(struct dahdi_chan *chan, struct dahdi_echocanparams *e
 
 static void echocan_free(struct dahdi_chan *chan, struct dahdi_echocan_state *ec)
 {
-	struct b4xxp_span *bspan = chan->span->pvt;
+	struct b4xxp_span *bspan = container_of(chan->span, struct b4xxp_span, span);
 	int channel;
 
 	memset(ec, 0, sizeof(*ec));
@@ -2239,7 +2263,7 @@ static int b4xxp_ioctl(struct dahdi_chan *chan, unsigned int cmd, unsigned long 
 
 static int b4xxp_startup(struct dahdi_span *span)
 {
-	struct b4xxp_span *bspan = span->pvt;
+	struct b4xxp_span *bspan = container_of(span, struct b4xxp_span, span);
 	struct b4xxp *b4 = bspan->parent;
 
 	if (!b4->running)
@@ -2250,7 +2274,7 @@ static int b4xxp_startup(struct dahdi_span *span)
 
 static int b4xxp_shutdown(struct dahdi_span *span)
 {
-	struct b4xxp_span *bspan = span->pvt;
+	struct b4xxp_span *bspan = container_of(span, struct b4xxp_span, span);
 
 	hfc_disable_interrupts(bspan->parent);
 	return 0;
@@ -2273,18 +2297,19 @@ static void b4xxp_reset_span(struct b4xxp_span *bspan)
 static int b4xxp_spanconfig(struct dahdi_span *span, struct dahdi_lineconfig *lc)
 {
 	int i;
-	struct b4xxp_span *bspan = span->pvt;
+	struct b4xxp_span *bspan = container_of(span, struct b4xxp_span, span);
 	struct b4xxp *b4 = bspan->parent;
 
 	if (DBG)
 		dev_info(b4->dev, "Configuring span %d\n", span->spanno);
 
 #if 0
-	if (lc->sync > 0 && bspan->te_mode) {
+	if (lc->sync > 0 && !bspan->te_mode) {
 		dev_info(b4->dev, "Span %d is not in NT mode, removing from sync source list\n", span->spanno);
 		lc->sync = 0;
 	}
 #endif
+
 	if (lc->sync < 0 || lc->sync > 4) {
 		dev_info(b4->dev, "Span %d has invalid sync priority (%d), removing from sync source list\n", span->spanno, lc->sync);
 		lc->sync = 0;
@@ -2403,6 +2428,19 @@ static void b4xxp_hdlc_hard_xmit(struct dahdi_chan *chan)
 
 /* internal functions, not specific to the hardware or DAHDI */
 
+static const struct dahdi_span_ops b4xxp_span_ops = {
+	.owner = THIS_MODULE,
+	.spanconfig = b4xxp_spanconfig,
+	.chanconfig = b4xxp_chanconfig,
+	.startup = b4xxp_startup,
+	.shutdown = b4xxp_shutdown,
+	.open = b4xxp_open,
+	.close  = b4xxp_close,
+	.ioctl = b4xxp_ioctl,
+	.hdlc_hard_xmit = b4xxp_hdlc_hard_xmit,
+	.echocan_create = b4xxp_echocan_create,
+};
+
 /* initialize the span/chan structures. Doesn't touch hardware, although the callbacks might. */
 static void init_spans(struct b4xxp *b4)
 {
@@ -2416,13 +2454,15 @@ static void init_spans(struct b4xxp *b4)
 		bspan->parent = b4;
 
 		bspan->span.irq = dahdi_pci_get_irq(b4->pdev);
-		bspan->span.pvt = bspan;
 		bspan->span.spantype = (bspan->te_mode) ? "TE" : "NT";
 		bspan->span.offset = i;
 		bspan->span.channels = WCB4XXP_CHANNELS_PER_SPAN;
 		bspan->span.flags = 0;
 
-		bspan->span.deflaw = DAHDI_LAW_ALAW;
+		if (!strcasecmp(companding, "ulaw"))
+			bspan->span.deflaw = DAHDI_LAW_MULAW;
+		else
+			bspan->span.deflaw = DAHDI_LAW_ALAW;
 		/* For simplicty, we'll accept all line modes since BRI
 		 * ignores this setting anyway.*/
 		bspan->span.linecompat = DAHDI_CONFIG_AMI | 
@@ -2437,18 +2477,7 @@ static void init_spans(struct b4xxp *b4)
 		sprintf(bspan->span.location, "PCI Bus %02d Slot %02d",
 			dahdi_pci_get_bus(b4->pdev), dahdi_pci_get_slot(b4->pdev) + 1);
 
-		bspan->span.owner = THIS_MODULE;
-		bspan->span.spanconfig = b4xxp_spanconfig;
-		bspan->span.chanconfig = b4xxp_chanconfig;
-		bspan->span.startup = b4xxp_startup;
-		bspan->span.shutdown = b4xxp_shutdown;
-		bspan->span.open = b4xxp_open;
-		bspan->span.close  = b4xxp_close;
-		bspan->span.ioctl = b4xxp_ioctl;
-		bspan->span.hdlc_hard_xmit = b4xxp_hdlc_hard_xmit;
-		if (vpmsupport && CARD_HAS_EC(b4))
-			bspan->span.echocan_create = echocan_create;
-
+		bspan->span.ops = &b4xxp_span_ops;
 /* HDLC stuff */
 		bspan->sigchan = NULL;
 		bspan->sigactive = 0;
@@ -2932,7 +2961,10 @@ static struct pci_device_id b4xx_ids[] __devinitdata =
 {
 	{ 0xd161, 0xb410, PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long)&wcb4xxp },
 	{ 0x1397, 0x16b8, 0x1397, 0xb552, 0, 0, (unsigned long)&hfc8s },
+	{ 0x1397, 0x16b8, 0x1397, 0xb55b, 0, 0, (unsigned long)&hfc8s },
 	{ 0x1397, 0x08b4, 0x1397, 0xb520, 0, 0, (unsigned long)&hfc4s },
+	{ 0x1397, 0x08b4, 0x1397, 0xb550, 0, 0, (unsigned long)&hfc4s },
+	{ 0x1397, 0x08b4, 0x1397, 0xb752, 0, 0, (unsigned long)&hfc4s },
 	{ 0x1397, 0x08b4, 0x1397, 0xb556, 0, 0, (unsigned long)&hfc2s },
 	{ 0x1397, 0x08b4, 0x1397, 0xe884, 0, 0, (unsigned long)&hfc2s_OV },
 	{ 0x1397, 0x08b4, 0x1397, 0xe888, 0, 0, (unsigned long)&hfc4s_OV },
@@ -2943,6 +2975,7 @@ static struct pci_device_id b4xx_ids[] __devinitdata =
 	{ 0x1397, 0x08b4, 0x1397, 0xb550, 0, 0, (unsigned long)&hfc4s_BN },
 	{ 0x1397, 0x16b8, 0x1397, 0xb562, 0, 0, (unsigned long)&hfc8s_BN },
 	{ 0x1397, 0x16b8, 0x1397, 0xb56b, 0, 0, (unsigned long)&hfc8s_BN },
+	{ 0x1397, 0x08b4, 0x1397, 0xb540, 0, 0, (unsigned long)&hfc4s_SW },
 	{ 0x1397, 0x08b4, 0x1397, 0x08b4, 0, 0, (unsigned long)&hfc4s_EV },
 	{0, }
 
@@ -3250,6 +3283,7 @@ module_param(alarmdebounce, int, S_IRUGO | S_IWUSR);
 module_param(vpmsupport, int, S_IRUGO);
 module_param(timer_1_ms, int, S_IRUGO | S_IWUSR);
 module_param(timer_3_ms, int, S_IRUGO | S_IWUSR);
+module_param(companding, charp, S_IRUGO);
 
 #if !defined(__FreeBSD__)
 MODULE_PARM_DESC(debug, "bitmap: 1=general 2=dtmf 4=regops 8=fops 16=ec 32=st state 64=hdlc 128=alarm");
@@ -3264,6 +3298,8 @@ MODULE_PARM_DESC(alarmdebounce, "msec to wait before set/clear alarm condition")
 MODULE_PARM_DESC(vpmsupport, "1=enable hardware EC, 0=disable hardware EC");
 MODULE_PARM_DESC(timer_1_ms, "NT: msec to wait for link activation, TE: unused.");
 MODULE_PARM_DESC(timer_3_ms, "TE: msec to wait for link activation, NT: unused.");
+MODULE_PARM_DESC(companding, "Change the companding to \"alaw\" or \"ulaw\""\
+				"(alaw by default)");
 
 MODULE_AUTHOR("Digium Incorporated <support@digium.com>");
 MODULE_DESCRIPTION("B410P & Similars multi-port BRI module driver.");

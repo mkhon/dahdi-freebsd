@@ -56,8 +56,10 @@ static const char rcsid[] = "$Id$";
 #endif
 
 #ifdef	PROTOCOL_DEBUG
+#ifdef	CONFIG_PROC_FS
 #define	PROC_XBUS_COMMAND	"command"
 static int proc_xbus_command_write(struct file *file, const char __user *buffer, unsigned long count, void *data);
+#endif
 #endif
 
 /* Command line parameters */
@@ -66,20 +68,60 @@ static DEF_PARM(uint, command_queue_length, 800, 0444, "Maximal command queue le
 static DEF_PARM(uint, poll_timeout, 1000, 0644, "Timeout (in jiffies) waiting for units to reply");
 static DEF_PARM_BOOL(rx_tasklet, 0, 0644, "Use receive tasklets");
 
+#ifdef	CONFIG_PROC_FS
 static int xbus_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data);
 #ifdef	OLD_PROC
 static int xbus_read_waitfor_xpds(char *page, char **start, off_t off, int count, int *eof, void *data);
+#endif
 #endif
 static void transport_init(xbus_t *xbus, struct xbus_ops *ops, ushort max_send_size, struct device *transport_device, void *priv);
 static void transport_destroy(xbus_t *xbus);
 
 /* Data structures */
 static spinlock_t		xbuses_lock = SPIN_LOCK_UNLOCKED;
+#ifdef	CONFIG_PROC_FS
 static struct proc_dir_entry	*proc_xbuses = NULL;
+#endif
 
 static struct xbus_desc {
 	xbus_t			*xbus;
 } xbuses_array[MAX_BUSES];
+
+static xbus_t *xbus_byhwid(const char *hwid)
+{
+	int	i;
+	xbus_t	*xbus;
+
+	for (i = 0; i < ARRAY_SIZE(xbuses_array); i++) {
+		xbus = xbuses_array[i].xbus;
+		if (xbus && strcmp(hwid, xbus->label) == 0)
+			return xbus;
+	}
+	return NULL;
+}
+
+int xbus_check_unique(xbus_t *xbus)
+{
+	if (!xbus)
+		return -ENOENT;
+	if (xbus->label) {
+		xbus_t	*xbus_old;
+
+		XBUS_DBG(DEVICES, xbus, "Checking LABEL='%s'\n", xbus->label);
+		xbus_old = xbus_byhwid(xbus->label);
+		if (xbus_old && xbus_old != xbus) {
+			XBUS_NOTICE(xbus_old,
+				"Duplicate LABEL='%s'. Leave %s unused. refcount_xbus=%d\n",
+				xbus_old->label,
+				xbus->busname,
+				refcount_xbus(xbus_old));
+			return -EBUSY;
+		}
+	} else {
+		XBUS_NOTICE(xbus, "MISSING BOARD LABEL!!!\n");
+	}
+	return 0;
+}
 
 const char *xbus_statename(enum xbus_state st)
 {
@@ -135,26 +177,44 @@ static void finalize_xbuses_array(void)
 	}
 }
 
-xbus_t *get_xbus(const char *msg, xbus_t *xbus)
+/*
+ * Called by put_xbus() when XBUS has no more references.
+ */
+static void xbus_destroy(struct kref *kref)
 {
-	struct device	*dev;
+	xbus_t	*xbus;
 
-	XBUS_DBG(DEVICES, xbus, "%s: refcount_xbus=%d\n",
-		msg, refcount_xbus(xbus));
-	dev = get_device(&xbus->astribank);
-	return dev_to_xbus(dev);
+	xbus = kref_to_xbus(kref);
+	XBUS_NOTICE(xbus, "%s\n", __func__);
+	xbus_sysfs_remove(xbus);
+}
+
+xbus_t *get_xbus(const char *msg, uint num)
+{
+	unsigned long	flags;
+	xbus_t		*xbus;
+
+	spin_lock_irqsave(&xbuses_lock, flags);
+	xbus = xbus_num(num);
+	if (xbus != NULL) {
+		kref_get(&xbus->kref);
+		XBUS_DBG(DEVICES, xbus, "%s: refcount_xbus=%d\n",
+			msg, refcount_xbus(xbus));
+	}
+	spin_unlock_irqrestore(&xbuses_lock, flags);
+	return xbus;
 }
 
 void put_xbus(const char *msg, xbus_t *xbus)
 {
 	XBUS_DBG(DEVICES, xbus, "%s: refcount_xbus=%d\n",
 		msg, refcount_xbus(xbus));
-	put_device(&xbus->astribank);
+	kref_put(&xbus->kref, xbus_destroy);
 }
 
 int refcount_xbus(xbus_t *xbus)
 {
-	struct kref *kref = &xbus->astribank.kobj.kref;
+	struct kref *kref = &xbus->kref;
 
 	return atomic_read(&kref->refcount);
 }
@@ -752,7 +812,7 @@ static int new_card(xbus_t *xbus,
 		);
 	xops = &proto_table->xops;
 	BUG_ON(!xops);
-	xbus->worker->num_units += subunits - 1;
+	xbus->worker.num_units += subunits - 1;
 	for(i = 0; i < subunits; i++) {
 		int	subunit_ports = proto_table->ports_per_subunit;
 
@@ -795,7 +855,7 @@ static int new_card(xbus_t *xbus,
 				unit, i, ret);
 			goto out;
 		}
-		xbus->worker->num_units_initialized++;
+		xbus->worker.num_units_initialized++;
 	}
 out:
 	xproto_put(proto_table);	/* ref count is inside the xpds now */
@@ -806,13 +866,43 @@ static void xbus_release_xpds(xbus_t *xbus)
 {
 	int			i;
 
-	XBUS_INFO(xbus, "[%s] Release XPDS\n", xbus->label);
+	XBUS_DBG(DEVICES, xbus, "[%s] Release XPDS\n", xbus->label);
 	for(i = 0; i < MAX_XPDS; i++) {
 		xpd_t *xpd = xpd_of(xbus, i);
 
 		if(xpd)
-			put_xpd(__FUNCTION__, xpd);	/* taken in xbus_xpd_bind() */
+			put_xpd(__func__, xpd);
 	}
+}
+
+static int xbus_aquire_xpds(xbus_t *xbus)
+{
+	unsigned long	flags;
+	int		i;
+	int		ret = 0;
+	xpd_t		*xpd;
+
+	XBUS_DBG(DEVICES, xbus, "[%s] Aquire XPDS\n", xbus->label);
+	spin_lock_irqsave(&xbus->lock, flags);
+	for (i = 0; i < MAX_XPDS; i++) {
+		xpd = xpd_of(xbus, i);
+		if (xpd) {
+			xpd = get_xpd(__func__, xpd);
+			if (!xpd)
+				goto err;
+		}
+	}
+out:
+	spin_unlock_irqrestore(&xbus->lock, flags);
+	return ret;
+err:
+	for (--i ; i >= 0; i--) {
+		xpd = xpd_of(xbus, i);
+		if (xpd)
+			put_xpd(__func__, xpd);
+	}
+	ret = -EBUSY;
+	goto out;
 }
 
 static int xpd_initialize(xpd_t *xpd)
@@ -844,14 +934,24 @@ static int xbus_initialize(xbus_t *xbus)
 	struct timeval	time_start;
 	struct timeval	time_end;
 	unsigned long	timediff;
+	int		res = 0;
 
 	do_gettimeofday(&time_start);
 	XBUS_DBG(DEVICES, xbus, "refcount_xbus=%d\n",
 			refcount_xbus(xbus));
+	if (xbus_aquire_xpds(xbus) < 0)	/* Until end of initialization */
+		return -EBUSY;
 	for(unit = 0; unit < MAX_UNIT; unit++) {
 		xpd = xpd_byaddr(xbus, unit, 0);
 		if(!xpd)
 			continue;
+		if (!XBUS_IS(xbus, RECVD_DESC)) {
+			XBUS_NOTICE(xbus,
+				"Cannot initialize UNIT=%d in state %s\n",
+				unit,
+				xbus_statename(XBUS_STATE(xbus)));
+			goto err;
+		}
 		if(run_initialize_registers(xpd) < 0) {
 			XBUS_ERR(xbus, "Register Initialization of card #%d failed\n", unit);
 			goto err;
@@ -862,15 +962,13 @@ static int xbus_initialize(xbus_t *xbus)
 			xpd = xpd_byaddr(xbus, unit, subunit);
 			if(!xpd)
 				continue;
-			xpd = get_xpd(__FUNCTION__, xpd);
-			if(!xpd) {
+			if (!XBUS_IS(xbus, RECVD_DESC)) {
 				XBUS_ERR(xbus,
-						"Aborting initialization. XPD-%d%d is gone.\n",
-						unit, subunit);
+					"XPD-%d%d Not in 'RECVD_DESC' state\n",
+					unit, subunit);
 				goto err;
 			}
 			ret = xpd_initialize(xpd);
-			put_xpd(__FUNCTION__, xpd);
 			if(ret < 0)
 				goto err;
 		}
@@ -879,10 +977,13 @@ static int xbus_initialize(xbus_t *xbus)
 	timediff = usec_diff(&time_end, &time_start);
 	timediff /= 1000*100;
 	XBUS_INFO(xbus, "Initialized in %ld.%1ld sec\n", timediff/10, timediff%10);
-	return 0;
+out:
+	xbus_release_xpds(xbus);	/* Initialization done/failed */
+	return res;
 err:
 	xbus_setstate(xbus, XBUS_STATE_FAIL);
-	return -EINVAL;
+	res = -EINVAL;
+	goto out;
 }
 
 /*
@@ -905,7 +1006,8 @@ void xbus_populate(void *data)
 	unsigned long		flags;
 	int			ret = 0;
 
-	xbus = worker->xbus;
+	xbus = container_of(worker, xbus_t, worker);
+	xbus = get_xbus(__func__, xbus->num);	/* return in function end */
 	XBUS_DBG(DEVICES, xbus, "Entering %s\n", __FUNCTION__);
 	spin_lock_irqsave(&worker->worker_lock, flags);
 	list_for_each_safe(card, next_card, &worker->card_list) {
@@ -914,7 +1016,7 @@ void xbus_populate(void *data)
 		list_del(card);
 		BUG_ON(card_desc->magic != CARD_DESC_MAGIC);
 		/* Release/Reacquire locks around blocking calls */
-		spin_unlock_irqrestore(&xbus->worker->worker_lock, flags);
+		spin_unlock_irqrestore(&xbus->worker.worker_lock, flags);
 		ret = new_card(xbus,
 			card_desc->xpd_addr.unit,
 			card_desc->type,
@@ -923,7 +1025,7 @@ void xbus_populate(void *data)
 			card_desc->ports_per_chip,
 			card_desc->ports,
 			card_desc->port_dir);
-		spin_lock_irqsave(&xbus->worker->worker_lock, flags);
+		spin_lock_irqsave(&xbus->worker.worker_lock, flags);
 		KZFREE(card_desc);
 		if(ret)
 			break;
@@ -949,9 +1051,10 @@ void xbus_populate(void *data)
 	elect_syncer("xbus_populate(end)");	/* FIXME: try to do it later */
 out:
 	XBUS_DBG(DEVICES, xbus, "Leaving\n");
-	wake_up(&worker->wait_for_xpd_initialization);
+	wake_up_interruptible_all(&worker->wait_for_xpd_initialization);
 	XBUS_DBG(DEVICES, xbus, "populate release\n");
-	up(&xbus->in_worker);
+	up(&worker->running_initialization);
+	put_xbus(__func__, xbus);	/* taken at function entry */
 	return;
 failed:
 	xbus_setstate(xbus, XBUS_STATE_FAIL);
@@ -960,13 +1063,14 @@ failed:
 
 int xbus_process_worker(xbus_t *xbus)
 {
-	struct xbus_workqueue	*worker = xbus->worker;
+	struct xbus_workqueue	*worker;
 
 	if(!xbus) {
 		ERR("%s: xbus gone -- skip initialization\n", __FUNCTION__);
 		return 0;
 	}
-	if(down_trylock(&xbus->in_worker)) {
+	worker = &xbus->worker;
+	if (down_trylock(&worker->running_initialization)) {
 		ERR("%s: xbus is disconnected -- skip initialization\n", __FUNCTION__);
 		return 0;
 	}
@@ -981,22 +1085,23 @@ int xbus_process_worker(xbus_t *xbus)
 	/* Now send it */
 	if(!queue_work(worker->wq, &worker->xpds_init_work)) {
 		XBUS_ERR(xbus, "Failed to queue xpd initialization work\n");
-		up(&xbus->in_worker);
+		up(&worker->running_initialization);
 		return 0;
 	}
 	return 1;
 }
 
-static void worker_reset(struct xbus_workqueue *worker)
+static void worker_reset(xbus_t *xbus)
 {
-	
+	struct xbus_workqueue	*worker;
 	struct list_head	*card;
 	struct list_head	*next_card;
 	unsigned long		flags;
-	xbus_t			*xbus = worker->xbus;
-	char			*name = (xbus) ? xbus->busname : "detached";
+	char			*name;
 
-	BUG_ON(!worker);
+	BUG_ON(!xbus);
+	worker = &xbus->worker;
+	name = (xbus) ? xbus->busname : "detached";
 	DBG(DEVICES, "%s\n", name);
 	if(!worker->xpds_init_done) {
 		NOTICE("%s: worker(%s)->xpds_init_done=%d\n",
@@ -1013,43 +1118,54 @@ static void worker_reset(struct xbus_workqueue *worker)
 	worker->xpds_init_done = 0;
 	worker->num_units = 0;
 	worker->num_units_initialized = 0;
+	wake_up_interruptible_all(&worker->wait_for_xpd_initialization);
 	spin_unlock_irqrestore(&worker->worker_lock, flags);
-	wake_up(&worker->wait_for_xpd_initialization);
 }
 
-static void worker_destroy(struct xbus_workqueue *worker)
+static void worker_destroy(xbus_t *xbus)
 {
-	xbus_t			*xbus;
+	struct xbus_workqueue	*worker;
 
-	if(!worker)
-		return;
-	worker_reset(worker);
-	xbus = worker->xbus;
-	if(xbus) {
-		XBUS_DBG(DEVICES, xbus, "Waiting for worker to finish...\n");
-		down(&xbus->in_worker);
-		XBUS_DBG(DEVICES, xbus, "Waiting for worker to finish -- done\n");
-		if (worker->wq) {
-			XBUS_DBG(DEVICES, xbus, "destroying workqueue...\n");
-			flush_workqueue(worker->wq);
-			destroy_workqueue(worker->wq);
-			worker->wq = NULL;
-			XBUS_DBG(DEVICES, xbus, "destroying workqueue -- done\n");
-		}
+	BUG_ON(!xbus);
+	worker = &xbus->worker;
+	worker_reset(xbus);
+	XBUS_DBG(DEVICES, xbus, "Waiting for worker to finish...\n");
+	down(&worker->running_initialization);
+	XBUS_DBG(DEVICES, xbus, "Waiting for worker to finish -- done\n");
+	if (worker->wq) {
+		XBUS_DBG(DEVICES, xbus, "destroying workqueue...\n");
+		flush_workqueue(worker->wq);
+		destroy_workqueue(worker->wq);
+		worker->wq = NULL;
+		XBUS_DBG(DEVICES, xbus, "destroying workqueue -- done\n");
+	}
 #ifdef CONFIG_PROC_FS
 #ifdef	OLD_PROC
-		if(xbus->proc_xbus_dir && worker->proc_xbus_waitfor_xpds) {
-			XBUS_DBG(PROC, xbus, "Removing proc '%s'\n", PROC_XBUS_WAITFOR_XPDS);
-			remove_proc_entry(PROC_XBUS_WAITFOR_XPDS, xbus->proc_xbus_dir);
-			worker->proc_xbus_waitfor_xpds = NULL;
-		}
-#endif
-#endif
-		XBUS_DBG(DEVICES, xbus, "detach worker\n");
-		xbus->worker = NULL;
-		KZFREE(worker);
-		put_xbus(__FUNCTION__, xbus);	/* got from worker_new() */
+	if (xbus->proc_xbus_dir && worker->proc_xbus_waitfor_xpds) {
+		XBUS_DBG(PROC, xbus, "Removing proc '%s'\n",
+				PROC_XBUS_WAITFOR_XPDS);
+		remove_proc_entry(PROC_XBUS_WAITFOR_XPDS, xbus->proc_xbus_dir);
+		worker->proc_xbus_waitfor_xpds = NULL;
 	}
+#endif
+#endif
+	XBUS_DBG(DEVICES, xbus, "detach worker\n");
+	put_xbus(__func__, xbus);	/* got from worker_run() */
+}
+
+static void worker_init(xbus_t *xbus)
+{
+	struct xbus_workqueue	*worker;
+
+	BUG_ON(!xbus);
+	XBUS_DBG(DEVICES, xbus, "\n");
+	worker = &xbus->worker;
+	/* poll related variables */
+	spin_lock_init(&worker->worker_lock);
+	INIT_LIST_HEAD(&worker->card_list);
+	init_waitqueue_head(&worker->wait_for_xpd_initialization);
+	worker->wq = NULL;
+	init_MUTEX(&xbus->worker.running_initialization);
 }
 
 /*
@@ -1057,25 +1173,17 @@ static void worker_destroy(struct xbus_workqueue *worker)
  * May call blocking operations, but only briefly (as we are called
  * from xbus_new() which is called from khubd.
  */
-static struct xbus_workqueue *worker_new(int xbusno)
+static int worker_run(xbus_t *xbus)
 {
 	struct xbus_workqueue	*worker;
-	xbus_t			*xbus;
 
-	if((xbus = xbus_num(xbusno)) == NULL)
-		return NULL;
-	get_xbus(__FUNCTION__, xbus);		/* return in worker_destroy() */
+	xbus = get_xbus(__func__, xbus->num);	/* return in worker_destroy() */
+	BUG_ON(!xbus);
 	BUG_ON(xbus->busname[0] == '\0');	/* No name? */
-	BUG_ON(xbus->worker != NULL);		/* Hmmm... nested workers? */
+	worker = &xbus->worker;
+	BUG_ON(worker->wq);	/* Hmmm... nested workers? */
 	XBUS_DBG(DEVICES, xbus, "\n");
-	worker = KZALLOC(sizeof(*worker), GFP_KERNEL);
-	if(!worker)
-		goto err;
 	/* poll related variables */
-	spin_lock_init(&worker->worker_lock);
-	INIT_LIST_HEAD(&worker->card_list);
-	init_waitqueue_head(&worker->wait_for_xpd_initialization);
-	worker->xbus = xbus;
 #ifdef CONFIG_PROC_FS
 #ifdef	OLD_PROC
 	if(xbus->proc_xbus_dir) {
@@ -1097,10 +1205,10 @@ static struct xbus_workqueue *worker_new(int xbusno)
 		XBUS_ERR(xbus, "Failed to create worker workqueue.\n");
 		goto err;
 	}
-	return worker;
+	return 1;
 err:
-	worker_destroy(worker);
-	return NULL;
+	worker_destroy(xbus);
+	return 0;
 }
 
 bool xbus_setflags(xbus_t *xbus, int flagbit, bool on)
@@ -1215,14 +1323,11 @@ int xbus_activate(xbus_t *xbus)
 int xbus_connect(xbus_t *xbus)
 {
 	struct xbus_ops		*ops;
-	struct xbus_workqueue	*worker;
 
 	BUG_ON(!xbus);
 	XBUS_DBG(DEVICES, xbus, "\n");
 	ops = transportops_get(xbus);
 	BUG_ON(!ops);
-	worker = xbus->worker;
-	BUG_ON(!worker);
 	/* Sanity checks */
 	BUG_ON(!ops->xframe_send_pcm);
 	BUG_ON(!ops->xframe_send_cmd);
@@ -1240,14 +1345,14 @@ void xbus_deactivate(xbus_t *xbus)
 	if(!xbus_setstate(xbus, XBUS_STATE_DEACTIVATING))
 		return;
 	xbus_request_sync(xbus, SYNC_MODE_NONE);	/* no more ticks */
+	elect_syncer("deactivate");
 	xbus_request_removal(xbus);
 	XBUS_DBG(DEVICES, xbus, "[%s] Waiting for queues\n", xbus->label);
 	xbus_command_queue_clean(xbus);
 	xbus_command_queue_waitempty(xbus);
 	xbus_setstate(xbus, XBUS_STATE_DEACTIVATED);
-	worker_reset(xbus->worker);
-	xbus_release_xpds(xbus);
-	elect_syncer("deactivate");
+	worker_reset(xbus);
+	xbus_release_xpds(xbus);	/* taken in xpd_alloc() [kref_init] */
 }
 
 void xbus_disconnect(xbus_t *xbus)
@@ -1266,10 +1371,11 @@ void xbus_disconnect(xbus_t *xbus)
 	del_timer_sync(&xbus->command_timer);
 	transportops_put(xbus);
 	transport_destroy(xbus);
-	worker_destroy(xbus->worker);
+	worker_destroy(xbus);
 	XBUS_DBG(DEVICES, xbus, "Deactivated refcount_xbus=%d\n",
 		refcount_xbus(xbus));
-	xbus_sysfs_remove(xbus);	/* Device-Model */
+	xbus_sysfs_transport_remove(xbus);	/* Device-Model */
+	put_xbus(__func__, xbus);	/* from xbus_new() [kref_init()] */
 }
 
 static xbus_t *xbus_alloc(void)
@@ -1369,16 +1475,24 @@ xbus_t *xbus_new(struct xbus_ops *ops, ushort max_send_size, struct device *tran
 	spin_lock_init(&xbus->lock);
 	init_waitqueue_head(&xbus->command_queue_empty);
 	init_timer(&xbus->command_timer);
-	init_MUTEX(&xbus->in_worker);
 	atomic_set(&xbus->pcm_rx_counter, 0);
 	xbus->min_tx_sync = INT_MAX;
 	xbus->min_rx_sync = INT_MAX;
 	
+	kref_init(&xbus->kref);
+	worker_init(xbus);
 	atomic_set(&xbus->num_xpds, 0);
 	xbus->sync_mode = SYNC_MODE_NONE;
+	xbus->sync_mode_default = SYNC_MODE_PLL;
 	err = xbus_sysfs_create(xbus);
 	if(err) {
 		XBUS_ERR(xbus, "SYSFS creation failed: %d\n", err);
+		goto nobus;
+	}
+	err = xbus_sysfs_transport_create(xbus);
+	if (err) {
+		XBUS_ERR(xbus, "SYSFS transport link creation failed: %d\n",
+				err);
 		goto nobus;
 	}
 	xbus_reset_counters(xbus);
@@ -1434,8 +1548,7 @@ xbus_t *xbus_new(struct xbus_ops *ops, ushort max_send_size, struct device *tran
 	 * Create worker after /proc/XBUS-?? so the directory exists
 	 * before /proc/XBUS-??/waitfor_xpds tries to get created.
 	 */
-	xbus->worker = worker_new(xbus->num);
-	if(!xbus->worker) {
+	if (!worker_run(xbus)) {
 		ERR("Failed to allocate worker\n");
 		goto nobus;
 	}
@@ -1457,7 +1570,81 @@ void xbus_reset_counters(xbus_t *xbus)
 	}
 }
 
-#if CONFIG_PROC_FS
+static bool xpds_done(xbus_t *xbus)
+{
+	if (XBUS_IS(xbus, FAIL))
+		return 1;	/* Nothing to wait for */
+	if (!XBUS_IS(xbus, RECVD_DESC))
+		return 1;	/* We are not in the initialization phase */
+	if (xbus->worker.xpds_init_done)
+		return 1;	/* All good */
+	/* Keep waiting */
+	return 0;
+}
+
+int waitfor_xpds(xbus_t *xbus, char *buf)
+{
+	struct xbus_workqueue	*worker;
+	unsigned long		flags;
+	int			ret;
+	int			len = 0;
+
+	/*
+	 * FIXME: worker is created before ?????
+	 * So by now it exists and initialized.
+	 */
+	/* until end of waitfor_xpds_show(): */
+	xbus = get_xbus(__func__, xbus->num);
+	if (!xbus)
+		return -ENODEV;
+	worker = &xbus->worker;
+	BUG_ON(!worker);
+	if (!worker->wq) {
+		XBUS_ERR(xbus, "Missing worker thread. Skipping.\n");
+		len = -ENODEV;
+		goto out;
+	}
+	if (worker->num_units == 0) {
+		XBUS_ERR(xbus, "No cards. Skipping.\n");
+		goto out;
+	}
+	XBUS_DBG(DEVICES, xbus,
+		"Waiting for card init of %d XPD's max %d seconds (%p)\n",
+		worker->num_units,
+		INITIALIZATION_TIMEOUT/HZ,
+		&worker->wait_for_xpd_initialization);
+	ret = wait_event_interruptible_timeout(
+		worker->wait_for_xpd_initialization,
+		xpds_done(xbus),
+		INITIALIZATION_TIMEOUT);
+	if (ret == 0) {
+		XBUS_ERR(xbus, "Card Initialization Timeout\n");
+		len = -ETIMEDOUT;
+		goto out;
+	} else if (ret < 0) {
+		XBUS_ERR(xbus, "Card Initialization Interrupted %d\n", ret);
+		len = ret;
+		goto out;
+	} else
+		XBUS_DBG(DEVICES, xbus,
+			"Finished initialization of %d XPD's in %d seconds.\n",
+			worker->num_units_initialized,
+			(INITIALIZATION_TIMEOUT - ret)/HZ);
+	if (XBUS_IS(xbus, FAIL)) {
+		len += sprintf(buf, "FAILED: %s\n", xbus->busname);
+	} else {
+		spin_lock_irqsave(&xbus->lock, flags);
+		len += sprintf(buf, "XPDS_READY: %s: %d/%d\n",
+			xbus->busname,
+			worker->num_units_initialized, worker->num_units);
+		spin_unlock_irqrestore(&xbus->lock, flags);
+	}
+out:
+	put_xbus(__func__, xbus);	/* from start of waitfor_xpds_show() */
+	return len;
+}
+
+#ifdef CONFIG_PROC_FS
 
 static int xbus_fill_proc_queue(char *p, struct xframe_queue *q)
 {
@@ -1485,12 +1672,11 @@ static int xbus_read_proc(char *page, char **start, off_t off, int count, int *e
 	int			len = 0;
 	int			i = (int)((unsigned long)data);
 
-	xbus = xbus_num(i);
+	xbus = get_xbus(__func__, i);	/* until end of xbus_read_proc */
 	if(!xbus)
 		goto out;
-	xbus = get_xbus(__FUNCTION__, xbus);	/* until end of xbus_read_proc */
 	spin_lock_irqsave(&xbus->lock, flags);
-	worker = xbus->worker;
+	worker = &xbus->worker;
 
 	len += sprintf(page + len, "%s: CONNECTOR=%s LABEL=[%s] STATUS=%s\n",
 			xbus->busname,
@@ -1552,87 +1738,22 @@ out:
 
 }
 
-static bool xpds_done(xbus_t *xbus)
-{
-	struct xbus_workqueue	*worker;
-
-	if(XBUS_IS(xbus, FAIL))
-		return 1;	/* Nothing to wait for */
-	if(!XBUS_IS(xbus, RECVD_DESC))
-		return 1;	/* We are not in the initialization phase */
-	worker = xbus->worker;
-	if(worker->xpds_init_done)
-		return 1;	/* All good */
-	/* Keep waiting */
-	return 0;
-}
-
-int waitfor_xpds(xbus_t *xbus, char *buf)
-{
-	struct xbus_workqueue	*worker;
-	unsigned long		flags;
-	int			ret;
-	int			len = 0;
-
-	/*
-	 * FIXME: worker is created before ?????
-	 * So by now it exists and initialized.
-	 */
-	xbus = get_xbus(__FUNCTION__, xbus);	/* until end of waitfor_xpds_show() */
-	if(!xbus)
-		return -ENODEV;
-	worker = xbus->worker;
-	BUG_ON(!worker);
-	XBUS_DBG(DEVICES, xbus,
-		"Waiting for card initialization of %d XPD's max %d seconds\n",
-		worker->num_units,
-		INITIALIZATION_TIMEOUT/HZ);
-	ret = wait_event_interruptible_timeout(
-		worker->wait_for_xpd_initialization,
-		xpds_done(xbus),
-		INITIALIZATION_TIMEOUT);
-	if(ret == 0) {
-		XBUS_ERR(xbus, "Card Initialization Timeout\n");
-		len = -ETIMEDOUT;
-		goto out;
-	} else if(ret < 0) {
-		XBUS_ERR(xbus, "Card Initialization Interrupted %d\n", ret);
-		len = ret;
-		goto out;
-	} else
-		XBUS_DBG(DEVICES, xbus,
-			"Finished initialization of %d XPD's in %d seconds.\n",
-			worker->num_units_initialized,
-			(INITIALIZATION_TIMEOUT - ret)/HZ);
-	if(XBUS_IS(xbus, FAIL)) {
-		len += sprintf(buf, "FAILED: %s\n", xbus->busname);
-	} else {
-		spin_lock_irqsave(&xbus->lock, flags);
-		len += sprintf(buf, "XPDS_READY: %s: %d/%d\n",
-			xbus->busname,
-			worker->num_units_initialized, worker->num_units);
-		spin_unlock_irqrestore(&xbus->lock, flags);
-	}
-out:
-	put_xbus(__FUNCTION__, xbus);	/* from start of waitfor_xpds_show() */
-	return len;
-}
-
 #ifdef	OLD_PROC
 static int xbus_read_waitfor_xpds(char *page, char **start, off_t off, int count, int *eof, void *data)
 {
 	int			len = 0;
-	xbus_t			*xbus = data;
+	int			i = (int)((unsigned long)data);
+	xbus_t			*xbus;
 
-	if(!xbus)
-		goto out;
-	XBUS_NOTICE(xbus, "%s: DEPRECATED: %s[%d] read from /proc interface instead of /sys\n",
-		__FUNCTION__, current->comm, current->tgid);
-	/* first handle special cases */
-	if(!count || off)
-		goto out;
-	len = waitfor_xpds(xbus, page);
-out:
+	xbus = get_xbus(__func__, i);
+	if (xbus != NULL) {
+		XBUS_NOTICE(xbus, "%s: DEPRECATED: %s[%d] read from /proc interface instead of /sys\n",
+			__func__, current->comm, current->tgid);
+		/* first handle special cases */
+		if (count && !off)
+			len = waitfor_xpds(xbus, page);
+		put_xbus(__func__, xbus);
+	}
 	if (len <= off+count)
 		*eof = 1;
 	*start = page + off;
@@ -1729,12 +1850,10 @@ out:
 static int read_proc_xbuses(char *page, char **start, off_t off, int count, int *eof, void *data)
 {
 	int len = 0;
-	unsigned long flags;
 	int i;
 
-	spin_lock_irqsave(&xbuses_lock, flags);
 	for(i = 0; i < MAX_BUSES; i++) {
-		xbus_t *xbus = xbus_num(i);
+		xbus_t *xbus = get_xbus(__func__, i);
 
 		if(xbus) {
 			len += sprintf(page + len, "%s: CONNECTOR=%s LABEL=[%s] STATUS=%s\n",
@@ -1743,12 +1862,12 @@ static int read_proc_xbuses(char *page, char **start, off_t off, int count, int 
 					xbus->label,
 					(XBUS_FLAGS(xbus, CONNECTED)) ? "connected" : "missing"
 				      );
+			put_xbus(__func__, xbus);
 		}
 	}
 #if 0
 	len += sprintf(page + len, "<-- len=%d\n", len);
 #endif
-	spin_unlock_irqrestore(&xbuses_lock, flags);
 	if (len <= off+count)
 		*eof = 1;
 	*start = page + off;

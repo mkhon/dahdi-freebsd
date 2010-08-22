@@ -37,6 +37,9 @@
 #define _GPAKCUST_H
 
 #if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/systm.h>
+
 #include <dahdi/compat/types.h>
 #include <dahdi/compat/list.h>
 #include <dahdi/compat/bsd.h>
@@ -44,6 +47,12 @@
 #include <linux/device.h>
 #include <linux/completion.h>
 #include <linux/workqueue.h>
+#include <linux/delay.h>
+#include <linux/version.h>
+
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 25)
+#include <linux/semaphore.h>
+#endif
 #endif /* !__FreeBSD__ */
 
 #include "gpakenum.h"
@@ -124,8 +133,6 @@ struct vpmadt032 {
 	spinlock_t change_list_lock;
 	struct list_head change_list;
 	spinlock_t list_lock;
-	/* Commands that are ready to be used. */
-	struct list_head free_cmds;
 	/* Commands that are waiting to be processed. */
 	struct list_head pending_cmds;
 	/* Commands that are currently in progress by the VPM module */
@@ -144,6 +151,7 @@ struct dahdi_echocan_state;
 
 char vpmadt032tone_to_zaptone(GpakToneCodes_t tone);
 int vpmadt032_init(struct vpmadt032 *vpm, struct voicebus *vb);
+int vpmadt032_reset(struct vpmadt032 *vpm);
 struct vpmadt032 *vpmadt032_alloc(struct vpmadt032_options *options,
 					const char *board_name);
 void vpmadt032_free(struct vpmadt032 *vpm);
@@ -173,6 +181,24 @@ static inline struct vpmadt032_cmd *vpmadt032_get_ready_cmd(struct vpmadt032 *vp
 	spin_unlock_irqrestore(&vpm->list_lock, flags);
 	return cmd;
 }
+
+static inline void vpmadt032_resend(struct vpmadt032 *vpm)
+{
+	unsigned long flags;
+	struct vpmadt032_cmd *cmd, *temp;
+
+	BUG_ON(!vpm);
+
+	/* By moving the commands back to the pending list, they will be
+	 * transmitted when room is available */
+	spin_lock_irqsave(&vpm->list_lock, flags);
+	list_for_each_entry_safe(cmd, temp, &vpm->active_cmds, node) {
+		cmd->desc &= ~(__VPM150M_TX);
+		list_move_tail(&cmd->node, &vpm->pending_cmds);
+	}
+	spin_unlock_irqrestore(&vpm->list_lock, flags);
+}
+
 
 int vpmadt032_module_init(void);
 

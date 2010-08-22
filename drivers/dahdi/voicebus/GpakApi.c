@@ -102,7 +102,6 @@ static DSP_ADDRESS pEventFifoAddress[MAX_DSP_CORES]; /* event fifo */
 static unsigned char DlByteBufr[DOWNLOAD_BLOCK_SIZE * 2]; /* Dowload byte buf */
 static DSP_WORD DlWordBufr[DOWNLOAD_BLOCK_SIZE];      /* Dowload word buffer */
 
-
 /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
  * CheckDspReset - Check if the DSP was reset.
  *
@@ -116,7 +115,7 @@ static DSP_WORD DlWordBufr[DOWNLOAD_BLOCK_SIZE];      /* Dowload word buffer */
  *   1 = Reset occurred.
  *
  */
-static int CheckDspReset(
+static int __CheckDspReset(
     int DspId               /* DSP Identifier (0 to MaxDSPCores-1) */
     )
 {
@@ -179,6 +178,20 @@ static int CheckDspReset(
     return (0);
 }
 
+static int CheckDspReset(
+    int DspId               /* DSP Identifier (0 to MaxDSPCores-1) */
+    )
+{
+	int ret;
+	int retries = 20;
+	while (--retries) {
+		ret = __CheckDspReset(DspId);
+		if (-1 != ret)
+			return ret;
+		msleep(5);
+	}
+	return ret;
+}
 
 /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
  * WriteDspCmdMessage - Write a Host Command/Request message to DSP.
@@ -709,9 +722,135 @@ gpakConfigChanStatus_t gpakConfigureChannel(
         MsgBuffer[37]  = (DSP_WORD)
                          pChanConfig->EcanParametersB.EcanMaxDoubleTalkThres;   
 
-        MsgLength = 76; // byte number == 38*2 
-        break;
+	MsgBuffer[38]  = (DSP_WORD)
+			 pChanConfig->EcanParametersA.EcanSaturationLevel;
+	MsgBuffer[39]  = (DSP_WORD)
+			 pChanConfig->EcanParametersB.EcanSaturationLevel;
+	MsgBuffer[40]  = (DSP_WORD)
+			 pChanConfig->EcanParametersA.EcanNLPSaturationThreshold;
+	MsgBuffer[41]  = (DSP_WORD)
+			 pChanConfig->EcanParametersB.EcanNLPSaturationThreshold;
+	MsgLength = 84; /* byte number == 42*2 */
+	break;
 
+    /* PCM to Packet channel type. */
+    case tdmToTdmDebug:
+
+	MsgBuffer[2] = (DSP_WORD)
+			((pChanConfig->PcmInPortA << 8) |
+			(pChanConfig->PcmInSlotA & 0xFF));
+	MsgBuffer[3] = (DSP_WORD)
+			((pChanConfig->PcmOutPortA << 8) |
+			(pChanConfig->PcmOutSlotA & 0xFF));
+
+	MsgBuffer[4] = (DSP_WORD)
+			((pChanConfig->PcmInPortB << 8) |
+			(pChanConfig->PcmInSlotB & 0xFF));
+	MsgBuffer[5] = (DSP_WORD)
+			((pChanConfig->PcmOutPortB << 8) |
+			(pChanConfig->PcmOutSlotB & 0xFF));
+
+	MsgBuffer[6] = (DSP_WORD)
+			(
+			((pChanConfig->FaxCngDetB << 11) & 0x0800)  |
+			((pChanConfig->FaxCngDetA << 10) & 0x0400)  |
+			((pChanConfig->MuteToneB << 9) & 0x0200)  |
+			((pChanConfig->MuteToneA << 8) & 0x0100)  |
+			((pChanConfig->FrameRate << 6)  & 0x00C0) |
+			((pChanConfig->ToneTypesB << 5) & 0x0020) |
+			((pChanConfig->ToneTypesA << 4) & 0x0010) |
+			((pChanConfig->SoftwareCompand & 3) << 2) |
+			(pChanConfig->EcanEnableB << 1) |
+			(pChanConfig->EcanEnableA & 1)
+			);
+
+	MsgBuffer[7]   = (DSP_WORD)
+			 pChanConfig->EcanParametersA.EcanTapLength;
+	MsgBuffer[8]   = (DSP_WORD)
+			 pChanConfig->EcanParametersA.EcanNlpType;
+	MsgBuffer[9]  = (DSP_WORD)
+			 pChanConfig->EcanParametersA.EcanAdaptEnable;
+	MsgBuffer[10]  = (DSP_WORD)
+			 pChanConfig->EcanParametersA.EcanG165DetEnable;
+	MsgBuffer[11]  = (DSP_WORD)
+			 pChanConfig->EcanParametersA.EcanDblTalkThresh;
+	MsgBuffer[12]  = (DSP_WORD)
+			 pChanConfig->EcanParametersA.EcanNlpThreshold;
+	MsgBuffer[13]  = (DSP_WORD)
+			 pChanConfig->EcanParametersA.EcanNlpConv;
+	MsgBuffer[14]  = (DSP_WORD)
+			 pChanConfig->EcanParametersA.EcanNlpUnConv;
+	MsgBuffer[15]  = (DSP_WORD)
+			 pChanConfig->EcanParametersA.EcanNlpMaxSuppress;
+
+	MsgBuffer[16]  = (DSP_WORD)
+			 pChanConfig->EcanParametersA.EcanCngThreshold;
+	MsgBuffer[17]  = (DSP_WORD)
+			 pChanConfig->EcanParametersA.EcanAdaptLimit;
+	MsgBuffer[18]  = (DSP_WORD)
+			 pChanConfig->EcanParametersA.EcanCrossCorrLimit;
+	MsgBuffer[19]  = (DSP_WORD)
+			 pChanConfig->EcanParametersA.EcanNumFirSegments;
+	MsgBuffer[20]  = (DSP_WORD)
+			 pChanConfig->EcanParametersA.EcanFirSegmentLen;
+
+	MsgBuffer[21]   = (DSP_WORD)
+			 pChanConfig->EcanParametersB.EcanTapLength;
+	MsgBuffer[22]   = (DSP_WORD)
+			 pChanConfig->EcanParametersB.EcanNlpType;
+	MsgBuffer[23]  = (DSP_WORD)
+			 pChanConfig->EcanParametersB.EcanAdaptEnable;
+	MsgBuffer[24]  = (DSP_WORD)
+			 pChanConfig->EcanParametersB.EcanG165DetEnable;
+	MsgBuffer[25]  = (DSP_WORD)
+			 pChanConfig->EcanParametersB.EcanDblTalkThresh;
+	MsgBuffer[26]  = (DSP_WORD)
+			 pChanConfig->EcanParametersB.EcanNlpThreshold;
+	MsgBuffer[27]  = (DSP_WORD)
+			 pChanConfig->EcanParametersB.EcanNlpConv;
+	MsgBuffer[28]  = (DSP_WORD)
+			 pChanConfig->EcanParametersB.EcanNlpUnConv;
+	MsgBuffer[29]  = (DSP_WORD)
+			 pChanConfig->EcanParametersB.EcanNlpMaxSuppress;
+	MsgBuffer[30]  = (DSP_WORD)
+			 pChanConfig->EcanParametersB.EcanCngThreshold;
+	MsgBuffer[31]  = (DSP_WORD)
+			 pChanConfig->EcanParametersB.EcanAdaptLimit;
+	MsgBuffer[32]  = (DSP_WORD)
+			 pChanConfig->EcanParametersB.EcanCrossCorrLimit;
+	MsgBuffer[33]  = (DSP_WORD)
+			 pChanConfig->EcanParametersB.EcanNumFirSegments;
+	MsgBuffer[34]  = (DSP_WORD)
+			 pChanConfig->EcanParametersB.EcanFirSegmentLen;
+
+	MsgBuffer[35] = (DSP_WORD)
+		       (
+		       ((pChanConfig->EcanParametersB.EcanReconvergenceCheckEnable << 5) & 0x20)  |
+		       ((pChanConfig->EcanParametersA.EcanReconvergenceCheckEnable << 4) & 0x10)  |
+		       ((pChanConfig->EcanParametersB.EcanTandemOperationEnable << 3) & 0x8)  |
+		       ((pChanConfig->EcanParametersA.EcanTandemOperationEnable << 2) & 0x4)  |
+		       ((pChanConfig->EcanParametersB.EcanMixedFourWireMode << 1) & 0x2) |
+			(pChanConfig->EcanParametersA.EcanMixedFourWireMode & 1)
+			);
+	MsgBuffer[36]  = (DSP_WORD)
+			 pChanConfig->EcanParametersA.EcanMaxDoubleTalkThres;
+
+	MsgBuffer[37]  = (DSP_WORD)
+			 pChanConfig->EcanParametersB.EcanMaxDoubleTalkThres;
+
+	MsgBuffer[38]  = (DSP_WORD)
+			 pChanConfig->EcanParametersA.EcanSaturationLevel;
+	MsgBuffer[39]  = (DSP_WORD)
+			 pChanConfig->EcanParametersB.EcanSaturationLevel;
+	MsgBuffer[40]  = (DSP_WORD)
+			 pChanConfig->EcanParametersA.EcanNLPSaturationThreshold;
+	MsgBuffer[41]  = (DSP_WORD)
+			 pChanConfig->EcanParametersB.EcanNLPSaturationThreshold;
+	MsgBuffer[42]  = (DSP_WORD)
+			 pChanConfig->ChannelId_tobe_Debug;
+
+	MsgLength = 86; /* byte number == 43*2 */
+	break;
 
     /* Unknown (invalid) channel type. */
     default:
@@ -1225,17 +1364,15 @@ gpakReadFramingStatsStatus_t gpakReadFramingStats(
     *pFramingError3Count = ReadBuffer[2];
     *pDmaStopErrorCount  = ReadBuffer[3];
     
-    if(pDmaSlipStatsBuffer != 0) 
-    // If users want to get the DMA slips count
-    {
-	    pDmaSlipStatsBuffer[0] = ReadBuffer[4];
-    	pDmaSlipStatsBuffer[1] = ReadBuffer[5];
-    	pDmaSlipStatsBuffer[2] = ReadBuffer[6];
-    	pDmaSlipStatsBuffer[3] = ReadBuffer[7];
-    	pDmaSlipStatsBuffer[4] = ReadBuffer[8];
-    	pDmaSlipStatsBuffer[5] = ReadBuffer[9];
-    
-    }
+	if (pDmaSlipStatsBuffer != NULL) {
+		/* If users want to get the DMA slips count */
+		pDmaSlipStatsBuffer[0] = ReadBuffer[4];
+		pDmaSlipStatsBuffer[1] = ReadBuffer[5];
+		pDmaSlipStatsBuffer[2] = ReadBuffer[6];
+		pDmaSlipStatsBuffer[3] = ReadBuffer[7];
+		pDmaSlipStatsBuffer[4] = ReadBuffer[8];
+		pDmaSlipStatsBuffer[5] = ReadBuffer[9];
+	}
     /* Return with an indication the statistics were read successfully. */
     return (RfsSuccess);
 }

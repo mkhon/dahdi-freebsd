@@ -36,7 +36,6 @@
 #else /* !__FreeBSD__ */
 #include <linux/version.h>
 #include <linux/types.h>
-#include <linux/delay.h>
 #include <linux/pci.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,26)
 #include <linux/semaphore.h>
@@ -77,27 +76,13 @@ static inline struct vpmadt032 *find_iface(const unsigned short dspid)
 
 static struct vpmadt032_cmd *vpmadt032_get_free_cmd(struct vpmadt032 *vpm)
 {
-	unsigned long flags;
 	struct vpmadt032_cmd *cmd;
 	might_sleep();
-	spin_lock_irqsave(&vpm->list_lock, flags);
-	if (list_empty(&vpm->free_cmds)) {
-		spin_unlock_irqrestore(&vpm->list_lock, flags);
-		cmd = kmalloc(sizeof(struct vpmadt032_cmd), GFP_KERNEL);
-		if (unlikely(!cmd))
-			return NULL;
-		memset(cmd, 0, sizeof(*cmd));
-#if defined(__FreeBSD__)
-		init_completion(&cmd->complete);
-#endif
-	} else {
-		cmd = list_entry(vpm->free_cmds.next, struct vpmadt032_cmd, node);
-		list_del_init(&cmd->node);
-		spin_unlock_irqrestore(&vpm->list_lock, flags);
-	}
-#if !defined(__FreeBSD__)
+	cmd = kmalloc(sizeof(struct vpmadt032_cmd), GFP_KERNEL);
+	if (unlikely(!cmd))
+		return NULL;
+	memset(cmd, 0, sizeof(*cmd));
 	init_completion(&cmd->complete);
-#endif
 	return cmd;
 }
 
@@ -150,8 +135,9 @@ static int vpmadt032_getreg_full_return(struct vpmadt032 *vpm, int pagechange,
 	ret = wait_for_completion_timeout(&cmd->complete, HZ/5);
 	if (unlikely(!ret)) {
 		spin_lock_irqsave(&vpm->list_lock, flags);
-		list_add_tail(&cmd->node, &vpm->free_cmds);
+		list_del(&cmd->node);
 		spin_unlock_irqrestore(&vpm->list_lock, flags);
+		kfree(cmd);
 		return -EIO;
 	}
 
@@ -161,10 +147,8 @@ static int vpmadt032_getreg_full_return(struct vpmadt032 *vpm, int pagechange,
 		ret = 0;
 	}
 
-	/* Just throw this command back on the ready list. */
-	spin_lock_irqsave(&vpm->list_lock, flags);
-	list_add_tail(&cmd->node, &vpm->free_cmds);
-	spin_unlock_irqrestore(&vpm->list_lock, flags);
+	list_del(&cmd->node);
+	kfree(cmd);
 	return 0;
 }
 
@@ -242,7 +226,7 @@ struct change_order {
 
 static struct change_order *alloc_change_order(void)
 {
-	return kzalloc(sizeof(struct change_order), GFP_KERNEL);
+	return kzalloc(sizeof(struct change_order), GFP_ATOMIC);
 }
 
 static void free_change_order(struct change_order *order)
@@ -542,7 +526,6 @@ vpmadt032_alloc(struct vpmadt032_options *options, const char *board_name)
 	spin_lock_init(&vpm->list_lock);
 	spin_lock_init(&vpm->change_list_lock);
 	INIT_LIST_HEAD(&vpm->change_list);
-	INIT_LIST_HEAD(&vpm->free_cmds);
 	INIT_LIST_HEAD(&vpm->pending_cmds);
 	INIT_LIST_HEAD(&vpm->active_cmds);
 	_sema_init(&vpm->sem, 1);
@@ -581,6 +564,47 @@ vpmadt032_alloc(struct vpmadt032_options *options, const char *board_name)
 }
 EXPORT_SYMBOL(vpmadt032_alloc);
 
+int vpmadt032_reset(struct vpmadt032 *vpm)
+{
+	int res;
+	gpakPingDspStat_t pingstatus;
+	u16 version;
+
+	might_sleep();
+
+	set_bit(VPM150M_HPIRESET, &vpm->control);
+	msleep(2000);
+	while (test_bit(VPM150M_HPIRESET, &vpm->control))
+		msleep(1);
+
+	/* Set us up to page 0 */
+	vpmadt032_setpage(vpm, 0);
+
+	res = vpmadtreg_loadfirmware(vpm->vb);
+	if (res) {
+		dev_info(&vpm->vb->pdev->dev, "Failed to load the firmware.\n");
+		return res;
+	}
+	vpm->curpage = -1;
+
+	set_bit(VPM150M_SWRESET, &vpm->control);
+	while (test_bit(VPM150M_SWRESET, &vpm->control))
+		msleep(1);
+
+	/* Set us up to page 0 */
+	pingstatus = gpakPingDsp(vpm->dspid, &version);
+	if (!pingstatus) {
+		vpm_info(vpm, "VPM present and operational "
+			"(Firmware version %x)\n", version);
+		vpm->version = version;
+		res = 0;
+	} else {
+		res = -EIO;
+	}
+	return res;
+}
+EXPORT_SYMBOL(vpmadt032_reset);
+
 int
 vpmadt032_init(struct vpmadt032 *vpm, struct voicebus *vb)
 {
@@ -597,6 +621,11 @@ vpmadt032_init(struct vpmadt032 *vpm, struct voicebus *vb)
 
 	might_sleep();
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+	INIT_WORK(&vpm->work, vpmadt032_bh, vpm);
+#else
+	INIT_WORK(&vpm->work, vpmadt032_bh);
+#endif
 	if (vpm->options.debug & DEBUG_VPMADT032_ECHOCAN)
 		dev_info(&vpm->vb->pdev->dev, "VPMADT032 Testing page access: ");
 
@@ -618,9 +647,9 @@ vpmadt032_init(struct vpmadt032 *vpm, struct voicebus *vb)
 		dev_info(&vpm->vb->pdev->dev, "Passed\n");
 
 	set_bit(VPM150M_HPIRESET, &vpm->control);
-	msleep(2000);
 	while (test_bit(VPM150M_HPIRESET, &vpm->control))
 		msleep(1);
+	msleep(250);
 
 	/* Set us up to page 0 */
 	vpmadt032_setpage(vpm, 0);
@@ -634,9 +663,8 @@ vpmadt032_init(struct vpmadt032 *vpm, struct voicebus *vb)
 			vpmadt032_getreg(vpm, 0x1000, &reg);
 			if (reg != i) {
 				printk(KERN_CONT "VPMADT032 Failed address test\n");
-				goto failed_exit;
+				res = -EIO;
 			}
-
 		}
 	}
 
@@ -662,19 +690,13 @@ vpmadt032_init(struct vpmadt032 *vpm, struct voicebus *vb)
 	pingstatus = gpakPingDsp(vpm->dspid, &vpm->version);
 
 	if (!pingstatus) {
-		dev_info(&vpm->vb->pdev->dev,
-			 "Version of DSP is %x\n", vpm->version);
+		dev_info(&vb->pdev->dev, "VPM present and operational "
+			"(Firmware version %x)\n", vpm->version);
 	} else {
 		dev_notice(&vpm->vb->pdev->dev, "VPMADT032 Failed! Unable to ping the DSP (%d)!\n", pingstatus);
-		res = -1;
+		res = -EIO;
 		goto failed_exit;
 	}
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20)
-	INIT_WORK(&vpm->work, vpmadt032_bh, vpm);
-#else
-	INIT_WORK(&vpm->work, vpmadt032_bh);
-#endif
 
 	return 0;
 
@@ -682,6 +704,7 @@ failed_exit:
 	return res;
 }
 EXPORT_SYMBOL(vpmadt032_init);
+
 
 void vpmadt032_get_default_parameters(struct GpakEcanParms *p)
 {
@@ -698,13 +721,15 @@ void vpmadt032_get_default_parameters(struct GpakEcanParms *p)
 	p->EcanNlpUnConv = 12;
 	p->EcanNlpMaxSuppress = DEFAULT_NLPMAXSUPP;
 	p->EcanCngThreshold = 43;
-	p->EcanAdaptLimit = 50;
+	p->EcanAdaptLimit = 25;
 	p->EcanCrossCorrLimit = 15;
 	p->EcanNumFirSegments = 3;
 	p->EcanFirSegmentLen = 48;
-	p->EcanReconvergenceCheckEnable = 2;
+	p->EcanReconvergenceCheckEnable = 1;
 	p->EcanTandemOperationEnable = 0;
 	p->EcanMixedFourWireMode = 0;
+	p->EcanSaturationLevel = 3;
+	p->EcanNLPSaturationThreshold = 6;
 }
 EXPORT_SYMBOL(vpmadt032_get_default_parameters);
 
@@ -715,7 +740,9 @@ void vpmadt032_free(struct vpmadt032 *vpm)
 	struct change_order *order;
 	_LIST_HEAD(local_list);
 
-	BUG_ON(!vpm);
+	if (!vpm)
+		return;
+
 	BUG_ON(!vpm->wq);
 
 	destroy_workqueue(vpm->wq);
@@ -724,7 +751,6 @@ void vpmadt032_free(struct vpmadt032 *vpm)
 	spin_lock_irqsave(&vpm->list_lock, flags);
 	list_splice(&vpm->pending_cmds, &local_list);
 	list_splice(&vpm->active_cmds, &local_list);
-	list_splice(&vpm->free_cmds, &local_list);
 	spin_unlock_irqrestore(&vpm->list_lock, flags);
 
 	while (!list_empty(&local_list)) {
@@ -884,11 +910,11 @@ void gpakLockAccess(unsigned short DspId)
 
 	vpm = find_iface(DspId);
 
-	if (vpm) {
-		if (down_interruptible(&vpm->sem)) {
-			return;
-		}
-	}
+	if (!vpm)
+		return;
+
+	down(&vpm->sem);
+	return;
 }
 
 
