@@ -32,6 +32,11 @@
 #include <machine/resource.h>
 #include <net/ethernet.h>
 #include <vm/uma.h>
+
+#ifdef wmb
+#undef wmb
+#define wmb()
+#endif
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -1194,7 +1199,6 @@ wctc4xxp_submit(struct wctc4xxp_descriptor_ring *dr, struct tcb *c)
 	    dahdi_dma_map_addr, __DEVOLATILE(void *, &d->buffer1), 0);
 	if (res)
 		return -res;
-	bus_dmamap_sync(dr->dma_tag, dr->dma_map, BUS_DMASYNC_PREWRITE);
 	bus_dmamap_sync(dr->tcb_dma_tag, dr->tcb_dma_map[dr->tail], BUS_DMASYNC_PREWRITE);
 #else
 	d->buffer1 = pci_map_single(dr->pdev, c->data,
@@ -1202,6 +1206,9 @@ wctc4xxp_submit(struct wctc4xxp_descriptor_ring *dr, struct tcb *c)
 #endif
 
 	SET_OWNED(d); /* That's it until the hardware is done with it. */
+#if defined(__FreeBSD__)
+	bus_dmamap_sync(dr->dma_tag, dr->dma_map, BUS_DMASYNC_PREWRITE);
+#endif
 	dr->pending[dr->tail] = c;
 	dr->tail = (dr->tail + 1) & DRING_MASK;
 	++dr->count;

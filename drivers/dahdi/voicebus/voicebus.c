@@ -41,6 +41,11 @@
 #include <dev/pci/pcivar.h>
 
 #include <machine/resource.h>
+
+#ifdef wmb
+#undef wmb
+#define wmb()
+#endif
 #else /* !__FreeBSD__ */
 #include <linux/version.h>
 #include <linux/slab.h>
