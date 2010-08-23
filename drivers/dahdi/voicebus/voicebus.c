@@ -1115,9 +1115,8 @@ vb_get_completed_txb(struct voicebus *vb)
 	if (OWNED(d) || !d->buffer1 || (d->buffer1 == vb->idle_vbb_dma_addr))
 		return NULL;
 
-	voicebus_unmap(vb, vbb, DMA_TO_DEVICE);
-
 	vbb = dl->pending[head];
+	voicebus_unmap(vb, vbb, DMA_TO_DEVICE);
 	if (NORMAL == vb->mode) {
 		d->buffer1 = vb->idle_vbb_dma_addr;
 		dl->pending[head] = vb->idle_vbb;
