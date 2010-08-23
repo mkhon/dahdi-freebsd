@@ -1316,12 +1316,12 @@ static void vb_stop_txrx_processors(struct voicebus *vb)
  */
 void voicebus_stop(struct voicebus *vb)
 {
-	static DECLARE_MUTEX(stop);
+	static DEFINE_SPINLOCK(stop);
 
-	down(&stop);
+	spin_lock(&stop);
 
 	if (test_bit(VOICEBUS_STOP, &vb->flags) || vb_is_stopped(vb)) {
-		up(&stop);
+		spin_unlock(&stop);
 		return;
 	}
 
@@ -1335,7 +1335,7 @@ void voicebus_stop(struct voicebus *vb)
 	del_timer_sync(&vb->timer);
 #endif
 	vb_disable_interrupts(vb);
-	up(&stop);
+	spin_unlock(&stop);
 }
 EXPORT_SYMBOL(voicebus_stop);
 

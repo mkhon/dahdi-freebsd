@@ -217,8 +217,10 @@ static inline bool is_hx8(const struct wctdm *wc)
 	return (&wcha80000 == wc->desc) || (&wchb80000 == wc->desc);
 }
 
+#if !defined(__FreeBSD__)
 struct wctdm *ifaces[WC_MAX_IFACES];
 DECLARE_MUTEX(ifacelock);
+#endif
 
 static void wctdm_release(struct wctdm *wc);
 
@@ -4916,7 +4918,6 @@ __wctdm_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	wc = kzalloc(sizeof(*wc), GFP_KERNEL);
 	if (!wc)
 		return -ENOMEM;
-#endif
 
 	down(&ifacelock);
 	/* \todo this is a candidate for removal... */
@@ -4927,6 +4928,7 @@ __wctdm_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		}
 	}
 	up(&ifacelock);
+#endif
 
 #ifdef CONFIG_VOICEBUS_ECREFERENCE
 	for (i = 0; i < ARRAY_SIZE(wc->ec_reference); ++i) {
