@@ -217,10 +217,8 @@ static inline bool is_hx8(const struct wctdm *wc)
 	return (&wcha80000 == wc->desc) || (&wchb80000 == wc->desc);
 }
 
-#if !defined(__FreeBSD__)
 struct wctdm *ifaces[WC_MAX_IFACES];
-DECLARE_MUTEX(ifacelock);
-#endif
+struct semaphore ifacelock;
 
 static void wctdm_release(struct wctdm *wc);
 
@@ -1042,12 +1040,12 @@ static inline int wctdm_setreg_intr(struct wctdm *wc, int card, int addr, int va
 {
 	return wctdm_setreg_full(wc, card, addr, val, 1);
 }
-inline int wctdm_setreg(struct wctdm *wc, int card, int addr, int val)
+int wctdm_setreg(struct wctdm *wc, int card, int addr, int val)
 {
 	return wctdm_setreg_full(wc, card, addr, val, 0);
 }
 
-inline int wctdm_getreg(struct wctdm *wc, int card, int addr)
+int wctdm_getreg(struct wctdm *wc, int card, int addr)
 {
 	unsigned long flags;
 	int hit;
@@ -4918,6 +4916,7 @@ __wctdm_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	wc = kzalloc(sizeof(*wc), GFP_KERNEL);
 	if (!wc)
 		return -ENOMEM;
+#endif
 
 	down(&ifacelock);
 	/* \todo this is a candidate for removal... */
@@ -4928,7 +4927,6 @@ __wctdm_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		}
 	}
 	up(&ifacelock);
-#endif
 
 #ifdef CONFIG_VOICEBUS_ECREFERENCE
 	for (i = 0; i < ARRAY_SIZE(wc->ec_reference); ++i) {
