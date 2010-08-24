@@ -99,13 +99,6 @@ static const struct dahdi_echocan_ops vpm150m_ec_ops = {
 	.echocan_free = echocan_free,
 };
 
-#if defined(__FreeBSD__)
-DEFINE_SPINLOCK(ifacelock);
-#else
-static struct t1 *ifaces[WC_MAX_IFACES];
-spinlock_t ifacelock = SPIN_LOCK_UNLOCKED;
-#endif /* !__FreeBSD__ */
-
 struct t1_desc {
 	const char *name;
 };
@@ -131,6 +124,7 @@ static struct command *get_free_cmd(struct t1 *wc)
 
 static void free_cmd(struct t1 *wc, struct command *cmd)
 {
+	destroy_completion(&cmd->complete);
 	uma_zfree(cmd_cache, cmd);
 }
 #else /* !__FreeBSD__ */
@@ -154,7 +148,6 @@ static struct command *get_free_cmd(struct t1 *wc)
 
 static void free_cmd(struct t1 *wc, struct command *cmd)
 {
-	destroy_completion(&cmd->complete);
 	kmem_cache_free(cmd_cache, cmd);
 }
 #endif /* !__FreeBSD__ */
@@ -2485,7 +2478,7 @@ SYSCTL_NODE(_dahdi, OID_AUTO, wcte12xp, CTLFLAG_RW, 0, "DAHDI wcte12xp");
 static int
 te12xp_device_probe(device_t dev)
 {
-        struct pci_device_id *id;
+	struct pci_device_id *id;
 	struct t1_desc *wd;
 
 	id = dahdi_pci_device_id_lookup(dev, te12xp_pci_tbl);
