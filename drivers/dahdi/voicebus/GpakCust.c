@@ -669,7 +669,7 @@ vpmadt032_init(struct vpmadt032 *vpm, struct voicebus *vb)
 	}
 
 	if (vpm->options.debug & DEBUG_VPMADT032_ECHOCAN)
-		printk(KERN_CONT "Passed\n");
+		dev_info(&vpm->vb->pdev->dev, "Passed\n");
 
 	set_bit(VPM150M_HPIRESET, &vpm->control);
 	while (test_bit(VPM150M_HPIRESET, &vpm->control))
