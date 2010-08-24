@@ -1879,7 +1879,7 @@ DAHDI_IRQ_HANDLER(vb_isr)
 
 #if defined(CONFIG_VOICEBUS_INTERRUPT) && defined(__FreeBSD__)
 	if (atomic_read(&vb->deferred_disabled_count))
-		return;
+		return IRQ_NONE;
 #endif
 
 	int_status = __vb_getctl(vb, SR_CSR5);
