@@ -581,7 +581,9 @@ vb_is_stopped(struct voicebus *vb)
 
 static inline void vb_disable_deferred(struct voicebus *vb)
 {
-#if !defined(__FreeBSD__)
+#if defined(__FreeBSD__)
+	atomic_inc(&vb->deferred_disabled_count);
+#else
 	if (atomic_inc_return(&vb->deferred_disabled_count) == 1)
 		disable_irq(vb->pdev->irq);
 #endif
@@ -589,7 +591,9 @@ static inline void vb_disable_deferred(struct voicebus *vb)
 
 static inline void vb_enable_deferred(struct voicebus *vb)
 {
-#if !defined(__FreeBSD__)
+#if defined(__FreeBSD__)
+	atomic_dec(&vb->deferred_disabled_count);
+#else
 	if (atomic_dec_return(&vb->deferred_disabled_count) == 0)
 		enable_irq(vb->pdev->irq);
 #endif
@@ -1872,6 +1876,11 @@ DAHDI_IRQ_HANDLER(vb_isr)
 {
 	struct voicebus *vb = dev_id;
 	u32 int_status;
+
+#if defined(CONFIG_VOICEBUS_INTERRUPT) && defined(__FreeBSD__)
+	if (atomic_read(&vb->deferred_disabled_count))
+		return;
+#endif
 
 	int_status = __vb_getctl(vb, SR_CSR5);
 	/* Mask out the reserved bits. */
