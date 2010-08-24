@@ -68,7 +68,6 @@ void
 tasklet_hi_schedule(struct tasklet_struct *t)
 {
 	taskqueue_enqueue(taskqueue_fast, &t->task);
-//	wakeup_one(taskqueue_fast);
 }
 
 void
@@ -123,8 +122,10 @@ init_timer(struct timer_list *t)
 	mtx_init(&t->mtx, "dahdi timer lock", NULL, MTX_SPIN);
 	callout_init(&t->callout, CALLOUT_MPSAFE);
 	t->expires = 0;
-	// function and data are not initialized intentionally:
-	// they are not initialized by Linux implementation too
+	/*
+	 * function and data are not initialized intentionally:
+	 * they are not initialized by Linux implementation too
+	 */
 }
 
 void
@@ -175,6 +176,7 @@ init_completion(struct completion *c)
 {
 	cv_init(&c->cv, "DAHDI completion cv");
 	mtx_init(&c->lock, "DAHDI completion lock", "condvar", MTX_DEF);
+	c->done = 0;
 }
 
 void
@@ -188,17 +190,19 @@ void
 wait_for_completion(struct completion *c)
 {
 	mtx_lock(&c->lock);
-	cv_wait(&c->cv, &c->lock);
+	if (!c->done)
+		cv_wait(&c->cv, &c->lock);
 	mtx_unlock(&c->lock);
 }
 
 int
 wait_for_completion_timeout(struct completion *c, unsigned long timeout)
 {
-	int res;
+	int res = 0;
 
 	mtx_lock(&c->lock);
-	res = cv_timedwait(&c->cv, &c->lock, timeout);
+	if (!c->done)
+		res = cv_timedwait(&c->cv, &c->lock, timeout);
 	mtx_unlock(&c->lock);
 	return res == 0;
 }
@@ -206,7 +210,10 @@ wait_for_completion_timeout(struct completion *c, unsigned long timeout)
 void
 complete(struct completion *c)
 {
+	mtx_lock(&c->lock);
+	c->done = 1;
 	cv_signal(&c->cv);
+	mtx_unlock(&c->lock);
 }
 
 /*
@@ -264,7 +271,6 @@ schedule_work(struct work_struct *work)
 {
 	work->tq = taskqueue_fast;
 	taskqueue_enqueue(taskqueue_fast, &work->task);
-//	wakeup_one(taskqueue_fast);
 }
 
 void
@@ -316,7 +322,6 @@ queue_work(struct workqueue_struct *wq, struct work_struct *work)
 {
 	work->tq = wq->tq;
 	taskqueue_enqueue(wq->tq, &work->task);
-//	wakeup_one(wq->tq);
 }
 
 /*

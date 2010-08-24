@@ -245,9 +245,9 @@ int del_timer_sync(struct timer_list *t);
 struct completion {
 	struct cv cv;
 	struct mtx lock;
+	int done;
 };
 
-#define INIT_COMPLETION(c)
 void init_completion(struct completion *c);
 void destroy_completion(struct completion *c);
 void wait_for_completion(struct completion *c);

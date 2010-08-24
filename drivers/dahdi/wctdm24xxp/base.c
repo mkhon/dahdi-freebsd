@@ -785,7 +785,7 @@ static inline void cmd_decipher_vpmadt032(struct wctdm *wc, const u8 *readchunk)
 	cmd->data = (0xff & readchunk[CMD_BYTE(25, 1, 0)]) << 8;
 	cmd->data |= readchunk[CMD_BYTE(25, 2, 0)];
 	if (cmd->desc & __VPM150M_WR) {
-		kfree(cmd);
+		vpmadt032_free_cmd(cmd);
 	} else {
 		cmd->desc |= __VPM150M_FIN;
 		complete(&cmd->complete);

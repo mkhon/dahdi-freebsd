@@ -86,6 +86,12 @@ static struct vpmadt032_cmd *vpmadt032_get_free_cmd(struct vpmadt032 *vpm)
 	return cmd;
 }
 
+void vpmadt032_free_cmd(struct vpmadt032_cmd *cmd)
+{
+	destroy_completion(&cmd->complete);
+	kfree(cmd);
+}
+
 /* Wait for any outstanding commands to the VPMADT032 to complete */
 static inline int vpmadt032_io_wait(struct vpmadt032 *vpm)
 {
@@ -137,7 +143,7 @@ static int vpmadt032_getreg_full_return(struct vpmadt032 *vpm, int pagechange,
 		spin_lock_irqsave(&vpm->list_lock, flags);
 		list_del(&cmd->node);
 		spin_unlock_irqrestore(&vpm->list_lock, flags);
-		kfree(cmd);
+		vpmadt032_free_cmd(cmd);
 		return -EIO;
 	}
 
@@ -148,7 +154,7 @@ static int vpmadt032_getreg_full_return(struct vpmadt032 *vpm, int pagechange,
 	}
 
 	list_del(&cmd->node);
-	kfree(cmd);
+	vpmadt032_free_cmd(cmd);
 	return 0;
 }
 
@@ -756,8 +762,7 @@ void vpmadt032_free(struct vpmadt032 *vpm)
 	while (!list_empty(&local_list)) {
 		cmd = list_entry(local_list.next, struct vpmadt032_cmd, node);
 		list_del(&cmd->node);
-		destroy_completion(&cmd->complete);
-		kfree(cmd);
+		vpmadt032_free_cmd(cmd);
 	}
 
 	spin_lock(&vpm->change_list_lock);

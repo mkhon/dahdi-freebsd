@@ -182,6 +182,8 @@ static inline struct vpmadt032_cmd *vpmadt032_get_ready_cmd(struct vpmadt032 *vp
 	return cmd;
 }
 
+void vpmadt032_free_cmd(struct vpmadt032_cmd *cmd);
+
 static inline void vpmadt032_resend(struct vpmadt032 *vpm)
 {
 	unsigned long flags;
