@@ -35,8 +35,8 @@
 
 #ifdef wmb
 #undef wmb
-#define wmb()
 #endif
+#define wmb()
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
