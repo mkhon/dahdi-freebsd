@@ -44,8 +44,8 @@
 
 #ifdef wmb
 #undef wmb
-#define wmb()
 #endif
+#define wmb()
 #else /* !__FreeBSD__ */
 #include <linux/version.h>
 #include <linux/slab.h>
@@ -581,14 +581,18 @@ vb_is_stopped(struct voicebus *vb)
 
 static inline void vb_disable_deferred(struct voicebus *vb)
 {
+#if !defined(__FreeBSD__)
 	if (atomic_inc_return(&vb->deferred_disabled_count) == 1)
 		disable_irq(vb->pdev->irq);
+#endif
 }
 
 static inline void vb_enable_deferred(struct voicebus *vb)
 {
+#if !defined(__FreeBSD__)
 	if (atomic_dec_return(&vb->deferred_disabled_count) == 0)
 		enable_irq(vb->pdev->irq);
+#endif
 }
 
 #else
@@ -1662,11 +1666,7 @@ static void vb_tasklet_normal(unsigned long data)
 	struct voicebus_descriptor_list *const dl = &vb->txd;
 	struct voicebus_descriptor *d;
 	int behind = 0;
-#if defined(CONFIG_VOICEBUS_ITHREAD)
-	const int DEFAULT_COUNT = INT_MAX;
-#else
 	const int DEFAULT_COUNT = 5;
-#endif
 	int count = DEFAULT_COUNT;
 	u32 des0 = 0;
 
@@ -1859,17 +1859,6 @@ static void handle_hardunderrun(struct work_struct *work)
 	}
 }
 
-#if defined(CONFIG_VOICEBUS_ITHREAD)
-static void
-vb_intr(void *data)
-{
-	struct voicebus *vb = (struct voicebus *)data;
-
-	if (!atomic_read(&vb->tasklet.disable_count))
-		vb->tasklet.func((long) vb);
-}
-#endif /* VOICEBUS_DEFERRED_ITHREAD */
-
 /*!
  * \brief Interrupt handler for VoiceBus interface.
  *
@@ -1883,7 +1872,6 @@ DAHDI_IRQ_HANDLER(vb_isr)
 {
 	struct voicebus *vb = dev_id;
 	u32 int_status;
-	int res = FILTER_HANDLED;
 
 	int_status = __vb_getctl(vb, SR_CSR5);
 	/* Mask out the reserved bits. */
@@ -1911,11 +1899,7 @@ DAHDI_IRQ_HANDLER(vb_isr)
 		/* ******************************************************** */
 		/* NORMAL INTERRUPT CASE				    */
 		/* ******************************************************** */
-#if defined(CONFIG_VOICEBUS_ITHREAD)
-		res |= FILTER_SCHEDULE_THREAD;
-#else
 		vb_schedule_deferred(vb);
-#endif
 		__vb_setctl(vb, SR_CSR5, TX_COMPLETE_INTERRUPT|RX_COMPLETE_INTERRUPT);
 	} else {
 		if (int_status & FATAL_BUS_ERROR_INTERRUPT)
@@ -1938,11 +1922,7 @@ DAHDI_IRQ_HANDLER(vb_isr)
 		__vb_setctl(vb, SR_CSR5, int_status);
 	}
 
-#if defined(__FreeBSD__)
-	return res;
-#else
 	return IRQ_HANDLED;
-#endif
 }
 
 #if defined(CONFIG_VOICEBUS_TIMER)
@@ -2115,13 +2095,8 @@ __voicebus_init(struct voicebus *vb, const char *board_name,
 	}
 
 	retval = bus_setup_intr(
-	    vb->pdev->dev, vb->irq_res, INTR_TYPE_CLK | INTR_MPSAFE, vb_isr,
-#if defined(CONFIG_VOICEBUS_ITHREAD)
-	    vb_intr,
-#else
-	    NULL,
-#endif
-	    vb, &vb->irq_handle);
+	    vb->pdev->dev, vb->irq_res, INTR_TYPE_CLK | INTR_MPSAFE,
+	    vb_isr, NULL, vb, &vb->irq_handle);
 	if (retval) {
 		dev_err(&vb->pdev->dev, "Can't setup interrupt handler (error %d)\n", retval);
 		goto cleanup;
@@ -2144,13 +2119,6 @@ cleanup:
 
 	tasklet_kill(&vb->tasklet);
 
-	/* Cleanup memory and software resources. */
-	if (vb->txd.desc)
-		vb_free_descriptors(vb, &vb->txd);
-
-	if (vb->rxd.desc)
-		vb_free_descriptors(vb, &vb->rxd);
-
 #if defined(__FreeBSD__)
 #if !defined(CONFIG_VOICEBUS_TIMER)
 	if (vb->irq_handle != NULL) {
@@ -2163,6 +2131,13 @@ cleanup:
 		vb->irq_res = NULL;
 	}
 #endif
+
+	/* Cleanup memory and software resources. */
+	if (vb->txd.desc)
+		vb_free_descriptors(vb, &vb->txd);
+
+	if (vb->rxd.desc)
+		vb_free_descriptors(vb, &vb->rxd);
 
 	dahdi_dma_free(&vb->idle_vbb_dma_tag, &vb->idle_vbb_dma_map,
 	    (void **) &vb->idle_vbb, &vb->idle_vbb_dma_addr);

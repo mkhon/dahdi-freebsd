@@ -64,9 +64,7 @@
 
 /* Define this to only run the processing in an interrupt handler
  * (and not tasklet). */
-#undef CONFIG_VOICEBUS_INTERRUPT
-
-#define CONFIG_VOICEBUS_ITHREAD
+#define CONFIG_VOICEBUS_INTERRUPT
 
 /* Define this to use a FIFO for the software echocan reference.
  * (experimental) */
