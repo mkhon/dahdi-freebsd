@@ -32,11 +32,6 @@
 #include <machine/resource.h>
 #include <net/ethernet.h>
 #include <vm/uma.h>
-
-#ifdef wmb
-#undef wmb
-#endif
-#define wmb()
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -63,6 +58,11 @@
 #include "dahdi/kernel.h"
 
 #if defined(__FreeBSD__)
+#ifdef wmb
+#undef wmb
+#endif
+#define wmb()
+
 #define DMA_FROM_DEVICE	0
 #define DMA_TO_DEVICE	1
 
