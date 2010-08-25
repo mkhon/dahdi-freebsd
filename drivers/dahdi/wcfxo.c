@@ -1237,13 +1237,6 @@ wcfxo_device_attach(device_t dev)
 		return (ENXIO);
 	}
 
-	/* enable bus mastering */
-	pci_enable_busmaster(dev);
-
-	res = wcfxo_setup_intr(wc);
-	if (res)
-		goto err;
-
 	/* allocate enough memory for two zt chunks.  Each sample uses
 	   32 bits.  Allocate an extra set just for control too */
 	res = dahdi_dma_allocate(wc->dev->dev, DAHDI_MAX_CHUNKSIZE * 2 * 2 * 4, &wc->write_dma_tag, &wc->write_dma_map,
@@ -1260,6 +1253,13 @@ wcfxo_device_attach(device_t dev)
 		res = -ENXIO;
 		goto err;
 	}
+
+	/* enable bus mastering */
+	pci_enable_busmaster(dev);
+
+	res = wcfxo_setup_intr(wc);
+	if (res)
+		goto err;
 
 	wcfxo_hardware_init(wc);
 
