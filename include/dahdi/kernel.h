@@ -467,6 +467,7 @@ struct dahdi_chan {
 #if defined(__FreeBSD__)
 	struct cdev *dev;	/*!< Device structure */
 	struct cdev *file;	/*!< File structure */
+	int file_flags;
 #else
 	struct file *file;	/*!< File structure */
 #endif

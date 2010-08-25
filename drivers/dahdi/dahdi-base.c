@@ -214,32 +214,6 @@ dahdi_get_fp(struct cdev *dev, struct dahdi_fp **pfp)
 	return 0;
 }
 
-static int
-dahdi_get_flags(struct cdev *dev)
-{
-	int error;
-	struct dahdi_fp *fp;
-
-	error = devfs_get_cdevpriv((void **) &fp);
-	if (error || fp == NULL)
-		return 0;
-
-	return fp->fflags;
-}
-
-static void
-dahdi_set_flags(struct file *file, int fflags)
-{
-	int error;
-	struct dahdi_fp *fp;
-
-	error = dahdi_get_fp(file->dev, &fp);
-	if (error)
-		return;
-
-	fp->fflags = fflags;
-}
-
 void *
 dahdi_get_private_data(struct file *file)
 {
@@ -264,6 +238,12 @@ dahdi_set_private_data(struct file *file, void *private_data)
 		return;
 
 	fp->private_data = private_data;
+}
+
+static int
+dahdi_chan_is_nonblocking(struct dahdi_chan *chan)
+{
+	return chan->file && (chan->file_flags & O_NONBLOCK);
 }
 
 static void
@@ -305,7 +285,7 @@ dahdi_schluffen(wait_queue_head_t *q)
 	switch (rc) {
 	case EINTR:
 	case ERESTART:
-		return rc;
+		return -rc;
 	}
 	return 0;
 }
@@ -386,15 +366,6 @@ thread_dtor_free_pseudo(void *arg, struct thread *td)
 /* macro-oni for determining a unit (channel) number */
 #define	UNIT(file) MINOR(file->f_dentry->d_inode->i_rdev)
 
-static int
-dahdi_get_flags(struct file *file)
-{
-	if (!file)
-		return 0;
-
-	return file->f_flags;
-}
-
 void *
 dahdi_get_private_data(struct file *file)
 {
@@ -405,6 +376,12 @@ void
 dahdi_set_private_data(struct file *file, void *private_data)
 {
 	file->private_data = private_data;
+}
+
+static int
+dahdi_chan_is_nonblocking(struct dahdi_chan *chan)
+{
+	return chan->file && (chan->file->f_flags & O_NONBLOCK);
 }
 
 static void
@@ -3139,7 +3116,12 @@ static int dahdi_specchan_open(struct file *file, int unit)
 					res = chan->span->ops->open(chan);
 			}
 			if (!res) {
+#if defined(__FreeBSD__)
 				chan->file = file->dev;
+				chan->file_flags = file->f_flags;
+#else
+				chan->file = file;
+#endif
 				spin_unlock_irqrestore(&chan->lock, flags);
 			} else {
 				spin_unlock_irqrestore(&chan->lock, flags);
@@ -5824,19 +5806,16 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 	switch(cmd) {
 #if defined(__FreeBSD__)
 	case F_SETFL: {
-		int fflags = dahdi_get_flags(file->dev);
-
 		get_user(j, data);
 
 		/*
 		 * XXX: On the moment we're interested only in O_NONBLOCK
 		 * Need any other flags?
 		 */
-		if ((j & O_NONBLOCK) != 0) {
-			dahdi_set_flags(file, fflags | O_NONBLOCK);
-		} else {
-			dahdi_set_flags(file, fflags & ~O_NONBLOCK);
-		}
+		if ((j & O_NONBLOCK) != 0)
+			chan->file_flags |= O_NONBLOCK;
+		else
+			chan->file_flags &= ~O_NONBLOCK;
 		break;
 	}
 #endif /* __FreeBSD__ */
@@ -6104,6 +6083,7 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 			return -EINVAL;
 		/* if no span, just do nothing */
 		if (!chan->span) return(0);
+		printf("DAHDI_HOOK: %d\n", j);
 		spin_lock_irqsave(&chan->lock, flags);
 		/* if dialing, stop it */
 		chan->curtone = NULL;
@@ -7182,7 +7162,7 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 	case DAHDI_TXSTATE_WINK:
 		/* Wink complete, go on hook and stabalize */
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_ONHOOK, DAHDI_TXSTATE_ONHOOK, 0);
-		if (dahdi_get_flags(chan->file) & O_NONBLOCK)
+		if (dahdi_chan_is_nonblocking(chan))
 			__qevent(chan, DAHDI_EVENT_HOOKCOMPLETE);
 		wake_up_interruptible(&chan->txstateq);
 		break;
@@ -7194,7 +7174,7 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 
 	case DAHDI_TXSTATE_FLASH:
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_OFFHOOK, 0);
-		if (dahdi_get_flags(chan->file) & O_NONBLOCK)
+		if (dahdi_chan_is_nonblocking(chan))
 			__qevent(chan, DAHDI_EVENT_HOOKCOMPLETE);
 		wake_up_interruptible(&chan->txstateq);
 		break;
@@ -7209,14 +7189,14 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 
 	case DAHDI_TXSTATE_AFTERSTART:
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_OFFHOOK, 0);
-		if (dahdi_get_flags(chan->file) & O_NONBLOCK)
+		if (dahdi_chan_is_nonblocking(chan))
 			__qevent(chan, DAHDI_EVENT_HOOKCOMPLETE);
 		wake_up_interruptible(&chan->txstateq);
 		break;
 
 	case DAHDI_TXSTATE_KEWL:
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_ONHOOK, DAHDI_TXSTATE_AFTERKEWL, DAHDI_AFTERKEWLTIME);
-		if (dahdi_get_flags(chan->file) & O_NONBLOCK)
+		if (dahdi_chan_is_nonblocking(chan))
 			__qevent(chan, DAHDI_EVENT_HOOKCOMPLETE);
 		wake_up_interruptible(&chan->txstateq);
 		break;
@@ -9050,12 +9030,11 @@ dahdi_device_open(struct cdev *dev, int oflags, int devtype, struct thread *td)
 	int res;
 	struct file file;
 
-	init_file(&file, dev, 0);
+	init_file(&file, dev, oflags);
 	res = dahdi_open(NULL, &file);
 	if (res < 0)
 		return -res;
 
-	dahdi_set_flags(&file, oflags);
 	return res;
 }
 
@@ -9065,7 +9044,7 @@ dahdi_device_close(struct cdev *dev, int fflag, int devtype, struct thread *td)
 	int res;
 	struct file file;
 
-	init_file(&file, dev, 0);
+	init_file(&file, dev, fflag);
 	res = dahdi_release(NULL, &file);
 	if (res < 0)
 		return -res;
