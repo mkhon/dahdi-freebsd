@@ -1,5 +1,9 @@
-/*
- * Copyright (c) 2010 Max Khon <fjoe@FreeBSD.org>
+/*-
+ * Copyright (c) 2010 The FreeBSD Foundation
+ * All rights reserved.
+ *
+ * This software was developed by Max Khon under sponsorship from
+ * the FreeBSD Foundation and Ethon Technologies GmbH.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
