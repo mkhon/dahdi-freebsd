@@ -6083,7 +6083,6 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 			return -EINVAL;
 		/* if no span, just do nothing */
 		if (!chan->span) return(0);
-		printf("DAHDI_HOOK: %d\n", j);
 		spin_lock_irqsave(&chan->lock, flags);
 		/* if dialing, stop it */
 		chan->curtone = NULL;
