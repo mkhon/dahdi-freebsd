@@ -195,6 +195,7 @@ ip_fast_csum(const void *iph, unsigned int ihl)
 #define INTERRUPT 0
 #define WORKQUEUE 1
 #define TASKLET   2
+#define ITHREAD   3
 
 #ifndef DEFERRED_PROCESSING
 #	define DEFERRED_PROCESSING WORKQUEUE
@@ -411,16 +412,6 @@ initialize_cmd(struct tcb *cmd)
 #if defined(__FreeBSD__)
 static uma_zone_t cmd_cache;
 
-static int
-cmd_cache_ctor(void *mem, int size, void *arg, int flags)
-{
-	struct tcb *cmd = (struct tcb *) mem;
-
-	memset(cmd, 0, sizeof(*cmd));
-	initialize_cmd(cmd);
-	return (0);
-}
-
 static void
 cmd_cache_dtor(void *mem, int size, void *arg)
 {
@@ -454,9 +445,7 @@ __alloc_cmd(size_t size, gfp_t alloc_flags, unsigned long cmd_flags)
 	cmd = kmem_cache_alloc(cmd_cache, alloc_flags);
 #endif
 	if (likely(cmd)) {
-#if !defined(__FreeBSD__)
 		memset(cmd, 0, sizeof(*cmd));
-#endif
 		cmd->data = kzalloc(size, alloc_flags);
 		if (unlikely(!cmd->data)) {
 #if defined(__FreeBSD__)
@@ -468,9 +457,7 @@ __alloc_cmd(size_t size, gfp_t alloc_flags, unsigned long cmd_flags)
 		}
 		cmd->data_len = size;
 		cmd->flags = cmd_flags;
-#if !defined(__FreeBSD__)
 		initialize_cmd(cmd);
-#endif
 	}
 	return cmd;
 }
@@ -579,9 +566,7 @@ struct wcdte {
 	struct channel_pvt *encoders;
 	struct channel_pvt *decoders;
 
-#if DEFERRED_PROCESSING == WORKQUEUE
 	struct work_struct deferred_work;
-#endif
 
 #ifndef WITHOUT_NETDEV
 	/*
@@ -1197,8 +1182,10 @@ wctc4xxp_submit(struct wctc4xxp_descriptor_ring *dr, struct tcb *c)
 #if defined(__FreeBSD__)
 	res = bus_dmamap_load(dr->tcb_dma_tag, dr->tcb_dma_map[dr->tail], c->data, c->data_len,
 	    dahdi_dma_map_addr, __DEVOLATILE(void *, &d->buffer1), 0);
-	if (res)
+	if (res) {
+		spin_unlock_irqrestore(&dr->lock, flags);
 		return -res;
+	}
 	bus_dmamap_sync(dr->tcb_dma_tag, dr->tcb_dma_map[dr->tail], BUS_DMASYNC_PREWRITE);
 #else
 	d->buffer1 = pci_map_single(dr->pdev, c->data,
@@ -1221,24 +1208,23 @@ wctc4xxp_retrieve(struct wctc4xxp_descriptor_ring *dr)
 {
 	volatile struct wctc4xxp_descriptor *d;
 	struct tcb *c;
-	unsigned int head = dr->head;
 	unsigned long flags;
 	spin_lock_irqsave(&dr->lock, flags);
-	d = wctc4xxp_descriptor(dr, head);
+	d = wctc4xxp_descriptor(dr, dr->head);
 #if defined(__FreeBSD__)
 	bus_dmamap_sync(dr->dma_tag, dr->dma_map, BUS_DMASYNC_POSTREAD);
 #endif
 	if (d->buffer1 && !OWNED(d)) {
 #if defined(__FreeBSD__)
-		bus_dmamap_sync(dr->tcb_dma_tag, dr->tcb_dma_map[head], BUS_DMASYNC_POSTREAD);
-		bus_dmamap_unload(dr->tcb_dma_tag, dr->tcb_dma_map[head]);
+		bus_dmamap_sync(dr->tcb_dma_tag, dr->tcb_dma_map[dr->head], BUS_DMASYNC_POSTREAD);
+		bus_dmamap_unload(dr->tcb_dma_tag, dr->tcb_dma_map[dr->head]);
 #else
 		pci_unmap_single(dr->pdev, d->buffer1,
 			SFRAME_SIZE, dr->direction);
 #endif
-		c = dr->pending[head];
+		c = dr->pending[dr->head];
 		WARN_ON(!c);
-		dr->head = (++head) & DRING_MASK;
+		dr->head = (dr->head + 1) & DRING_MASK;
 		d->buffer1 = 0;
 #if defined(__FreeBSD__)
 		bus_dmamap_sync(dr->dma_tag, dr->dma_map, BUS_DMASYNC_PREWRITE);
@@ -2835,9 +2821,9 @@ static inline void service_tx_ring(struct wcdte *wc)
 			 * lists. */
 			WARN_ON(!list_empty(&cmd->node));
 			if (DO_NOT_AUTO_FREE & cmd->flags) {
-				spin_unlock_irqrestore(&cmd->lock, flags);
 				WARN_ON(!(cmd->flags & TX_COMPLETE));
 				complete(&cmd->complete);
+				spin_unlock_irqrestore(&cmd->lock, flags);
 			} else {
 				spin_unlock_irqrestore(&cmd->lock, flags);
 				free_cmd(cmd);
@@ -2893,7 +2879,6 @@ static inline void service_dte(struct wcdte *wc)
 	service_rx_ring(wc);
 }
 
-#if DEFERRED_PROCESSING == WORKQUEUE
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 static void deferred_work_func(void *param)
 {
@@ -2905,6 +2890,14 @@ static void deferred_work_func(struct work_struct *work)
 #endif
 	service_dte(wc);
 }
+
+#if DEFERRED_PROCESSING == ITHREAD
+static void
+wctc4xxp_ithread(void *arg)
+{
+	struct wcdte *wc = (struct wcdte *) arg;
+	service_dte(wc);
+}
 #endif
 
 DAHDI_IRQ_HANDLER(wctc4xxp_interrupt)
@@ -2912,6 +2905,7 @@ DAHDI_IRQ_HANDLER(wctc4xxp_interrupt)
 	struct wcdte *wc = dev_id;
 	u32 ints;
 	u32 reg;
+	int res = IRQ_HANDLED;
 #define TX_COMPLETE_INTERRUPT 0x00000001
 #define RX_COMPLETE_INTERRUPT 0x00000040
 #define NORMAL_INTERRUPTS (TX_COMPLETE_INTERRUPT | RX_COMPLETE_INTERRUPT)
@@ -2936,6 +2930,8 @@ DAHDI_IRQ_HANDLER(wctc4xxp_interrupt)
 
 #if DEFERRED_PROCESSING == WORKQUEUE
 		schedule_work(&wc->deferred_work);
+#elif DEFERRED_PROCESSING == ITHREAD
+		res |= FILTER_SCHEDULE_THREAD;
 #elif DEFERRED_PROCESSING == INTERRUPT
 #error "You will need to change the locks if you want to run the processing " \
 		"in the interrupt handler."
@@ -2971,7 +2967,7 @@ DAHDI_IRQ_HANDLER(wctc4xxp_interrupt)
 		/* Clear all the pending interrupts. */
 		__wctc4xxp_setctl(wc, 0x0028, ints);
 	}
-	return IRQ_HANDLED;
+	return res;
 }
 
 static int
@@ -3961,7 +3957,13 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	res = bus_setup_intr(
 		wc->pdev->dev, wc->irq_res, INTR_TYPE_CLK | INTR_MPSAFE,
-		wctc4xxp_interrupt, NULL, wc, &wc->irq_handle);
+		wctc4xxp_interrupt,
+#if DEFERRED_PROCESSING == ITHREAD
+		wctc4xxp_ithread,
+#else
+		NULL,
+#endif
+		wc, &wc->irq_handle);
 	if (res) {
 		device_printf(wc->pdev->dev, "Can't setup interrupt handler (error %d)\n", res);
 		return (-ENXIO);
@@ -4262,7 +4264,7 @@ static int __init wctc4xxp_init(void)
 {
 #if defined(__FreeBSD__)
 	cmd_cache = uma_zcreate("wctc4xxp", sizeof(struct tcb),
-	    cmd_cache_ctor, cmd_cache_dtor, NULL, NULL, 0, 0);
+	    NULL, cmd_cache_dtor, NULL, NULL, 0, 0);
 	if (cmd_cache == NULL) {
 		printf("%s: can not allocate UMA zone\n", THIS_MODULE->name);
 		return (-ENXIO);
