@@ -196,6 +196,7 @@ wait_for_completion(struct completion *c)
 	mtx_lock(&c->lock);
 	if (!c->done)
 		cv_wait(&c->cv, &c->lock);
+	c->done--;
 	mtx_unlock(&c->lock);
 }
 
@@ -207,6 +208,8 @@ wait_for_completion_timeout(struct completion *c, unsigned long timeout)
 	mtx_lock(&c->lock);
 	if (!c->done)
 		res = cv_timedwait(&c->cv, &c->lock, timeout);
+	if (res == 0)
+		c->done--;
 	mtx_unlock(&c->lock);
 	return res == 0;
 }
@@ -215,7 +218,7 @@ void
 complete(struct completion *c)
 {
 	mtx_lock(&c->lock);
-	c->done = 1;
+	c->done++;
 	cv_signal(&c->cv);
 	mtx_unlock(&c->lock);
 }
