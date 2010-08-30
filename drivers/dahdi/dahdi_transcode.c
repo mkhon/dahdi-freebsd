@@ -30,6 +30,7 @@
 #include <sys/ioccom.h>
 #include <sys/module.h>
 #include <sys/poll.h>
+#include <sys/filio.h>
 #else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -422,6 +423,11 @@ static long dahdi_tc_unlocked_ioctl(struct file *file, unsigned int cmd, unsigne
 		   "supported. Please call DAHDI_TC ioctls directly.\n",
 		   THIS_MODULE->name);
 		return -EINVAL;
+#if defined(__FreeBSD__)
+	case FIONBIO:
+	case FIOASYNC:
+		return 0;
+#endif
 	default:
 		return -EINVAL;
 	};
