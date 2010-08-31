@@ -51,6 +51,9 @@ SUBDIR+=\
 	wctc4xxp\
 	dahdi-fw-tc400m.bin
 
+# Additional drivers
+SUBDIR+=	${ADDITIONAL_DRIVERS}
+
 .if ${MACHINE_ARCH} == "i386" || ${MACHINE_ARCH} == "amd64"
 _dahdi_vpmadt032_loader=	dahdi_vpmadt032_loader
 .endif
