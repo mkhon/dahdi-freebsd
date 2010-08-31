@@ -11,7 +11,7 @@ INCS=		user.h wctdm_user.h compat/types.h
 DAHDIVERSION!=	${.CURDIR}/../../build_tools/make_version ${.CURDIR}/../.. dahdi/freebsd
 version.h::
 	@DAHDIVERSION="${DAHDIVERSION}" ${.CURDIR}/../../build_tools/make_version_h >${.TARGET}.tmp
-	@if ! cmp -s ${.TARGET}.tmp ${.TARGET}; then mv ${.TARGET}.tmp ${.TARGET}; fi
+	@if ! cmp -s ${.TARGET}.tmp ${.TARGET}; then echo "Updating ${.TARGET}"; mv ${.TARGET}.tmp ${.TARGET}; fi
 	@rm -f ${.TARGET}.tmp
 
 afterinstall:
