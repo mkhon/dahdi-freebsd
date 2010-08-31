@@ -438,6 +438,7 @@ extern struct module _this_module;
 int request_module(const char *fmt, ...);
 
 #define EXPORT_SYMBOL(s)
+#define EXPORT_SYMBOL_GPL(s)
 
 #define _SYSCTL_FLAG(mode)	((mode) & 0200 ? CTLFLAG_RW : CTLFLAG_RD)
 #define module_param(name, type, mode)	module_param_##type(MODULE_PARAM_PREFIX "." #name, name, mode)
