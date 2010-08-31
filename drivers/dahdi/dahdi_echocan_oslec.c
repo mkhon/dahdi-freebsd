@@ -22,6 +22,10 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
  */
 
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/module.h>
+#else
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
@@ -29,6 +33,7 @@
 #include <linux/init.h>
 #include <linux/ctype.h>
 #include <linux/moduleparam.h>
+#endif /* !__FreeBSD__ */
 
 /* Fix this if OSLEC is elsewhere */
 #include "../staging/echo/oslec.h"
@@ -136,9 +141,32 @@ static void __exit mod_exit(void)
 	dahdi_unregister_echocan_factory(&my_factory);
 }
 
+#if defined(__FreeBSD__)
+static int
+echocan_oslec_modevent(module_t mod __unused, int type, void *data __unused)
+{
+	int res;
+
+	switch (type) {
+	case MOD_LOAD:
+		res = mod_init();
+		return (-res);
+	case MOD_UNLOAD:
+		mod_exit();
+		return (0);
+	default:
+		return (EOPNOTSUPP);
+	}
+}
+
+DAHDI_DEV_MODULE(dahdi_echocan_oslec, echocan_oslec_modevent, NULL);
+MODULE_VERSION(dahdi_echocan_oslec, 1);
+MODULE_DEPEND(dahdi_echocan_oslec, dahdi, 1, 1, 1);
+#else
 MODULE_DESCRIPTION("DAHDI OSLEC wrapper");
 MODULE_AUTHOR("Tzafrir Cohen <tzafrir.cohen@xorcom.com>");
 MODULE_LICENSE("GPL");
 
 module_init(mod_init);
 module_exit(mod_exit);
+#endif /* !__FreeBSD__ */

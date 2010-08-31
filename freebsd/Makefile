@@ -19,6 +19,7 @@ SUBDIR+=\
 	dahdi_echocan_jpah\
 	dahdi_echocan_kb1\
 	dahdi_echocan_mg2\
+	dahdi_echocan_oslec\
 	dahdi_echocan_sec\
 	dahdi_echocan_sec2
 
