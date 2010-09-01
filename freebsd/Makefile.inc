@@ -9,7 +9,7 @@ CFLAGS+=	-I${INCLUDEDIR} -D__KERNEL__
 
 CP?=		cp
 .if defined(NO_FETCH)
-FETCH?=		echo Skipping fetch
+FETCH?=		@echo Skipping fetch
 .else
 FETCH?=		fetch
 .endif
