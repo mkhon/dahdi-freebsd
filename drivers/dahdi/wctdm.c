@@ -3145,6 +3145,7 @@ static void __exit wctdm_cleanup(void)
 {
 	pci_unregister_driver(&wctdm_driver);
 }
+#endif /* !__FreeBSD__ */
 
 module_param(debug, int, 0600);
 module_param(fxovoltage, int, 0600);
@@ -3170,6 +3171,7 @@ module_param(fxorxgain, int, 0600);
 module_param(fxstxgain, int, 0600);
 module_param(fxsrxgain, int, 0600);
 
+#if !defined(__FreeBSD__)
 MODULE_DESCRIPTION("Wildcard TDM400P Driver");
 MODULE_AUTHOR("Mark Spencer <markster@digium.com>");
 MODULE_ALIAS("wcfxs");
@@ -3177,4 +3179,4 @@ MODULE_LICENSE("GPL v2");
 
 module_init(wctdm_init);
 module_exit(wctdm_cleanup);
-#endif /* !__FreeBSD__ */
+#endif
