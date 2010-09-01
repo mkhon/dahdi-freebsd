@@ -341,7 +341,11 @@ static int lowpower = 0;
 static int boostringer = 0;
 static int fastringer = 0;
 static int _opermode = 0;
+#if defined(__FreeBSD__)
+static char opermode[16] = "FCC";
+#else
 static char *opermode = "FCC";
+#endif
 static int fxshonormode = 0;
 static int alawoverride = 0;
 static int fastpickup = 0;
