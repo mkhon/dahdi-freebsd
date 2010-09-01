@@ -4249,6 +4249,11 @@ static driver_t wctc4xxp_pci_driver = {
 	sizeof(struct wcdte)
 };
 
+static devclass_t wctc4xxp_devclass;
+
+DAHDI_DRIVER_MODULE(wctc4xxp, pci, wctc4xxp_pci_driver, wctc4xxp_devclass);
+MODULE_DEPEND(wctc4xxp, dahdi, 1, 1, 1);
+MODULE_DEPEND(wctc4xxp, dahdi_transcode, 1, 1, 1);
 #else /* !__FreeBSD__ */
 MODULE_DEVICE_TABLE(pci, wctc4xxp_pci_tbl);
 
@@ -4313,30 +4318,6 @@ static void __exit wctc4xxp_cleanup(void)
 module_param(debug, int, S_IRUGO | S_IWUSR);
 module_param(mode, charp, S_IRUGO | S_IWUSR);
 
-#if defined(__FreeBSD__)
-static devclass_t wctc4xxp_devclass;
-
-static int
-wctc4xxp_modevent(module_t mod __unused, int type, void *data __unused)
-{
-	int res;
-
-	switch (type) {
-	case MOD_LOAD:
-		res = wctc4xxp_init();
-		return (-res);
-	case MOD_UNLOAD:
-		wctc4xxp_cleanup();
-		return (0);
-	default:
-		return (EOPNOTSUPP);
-	}
-}
-
-DAHDI_DRIVER_MODULE(wctc4xxp, pci, wctc4xxp_pci_driver, wctc4xxp_devclass, wctc4xxp_modevent, 0);
-MODULE_DEPEND(wctc4xxp, dahdi, 1, 1, 1);
-MODULE_DEPEND(wctc4xxp, dahdi_transcode, 1, 1, 1);
-#else /* !__FreeBSD__ */
 MODULE_PARM_DESC(mode, "'g729', 'g723.1', or 'any'.  Default 'any'.");
 MODULE_DESCRIPTION("Wildcard TC400P+TC400M Driver");
 MODULE_AUTHOR("Digium Incorporated <support@digium.com>");
@@ -4344,4 +4325,3 @@ MODULE_LICENSE("GPL");
 
 module_init(wctc4xxp_init);
 module_exit(wctc4xxp_cleanup);
-#endif /* !__FreeBSD__ */

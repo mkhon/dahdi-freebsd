@@ -954,26 +954,13 @@ static void __exit ztdethmf_exit(void)
 }
 
 #if defined(__FreeBSD__)
-static int
-dahdi_dynamic_ethmf_modevent(module_t mod __unused, int type, void *data __unused)
-{
-	switch (type) {
-	case MOD_LOAD:
-		return ztdethmf_init();
-	case MOD_UNLOAD:
-		ztdethmf_exit();
-		return 0;
-	default:
-		return EOPNOTSUPP;
-	}
-}
-
-DAHDI_DEV_MODULE(dahdi_dynamic_ethmf, dahdi_dynamic_ethmf_modevent, NULL);
+DAHDI_DEV_MODULE(dahdi_dynamic_ethmf);
 MODULE_VERSION(dahdi_dynamic_ethmf, 1);
 MODULE_DEPEND(dahdi_dynamic_ethmf, dahdi, 1, 1, 1);
 MODULE_DEPEND(dahdi_dynamic_ethmf, dahdi_dynamic, 1, 1, 1);
 MODULE_DEPEND(dahdi_dynamic_ethmf, ng_dahdi_netdev, 1, 1, 1);
-#else /* !__FreeBSD__ */
+#endif /* __FreeBSD__ */
+
 MODULE_DESCRIPTION("DAHDI Dynamic TDMoEmf Support");
 MODULE_AUTHOR("Joseph Benden <joe@thrallingpenguin.com>");
 #ifdef MODULE_LICENSE
@@ -982,4 +969,3 @@ MODULE_LICENSE("GPL");
 
 module_init(ztdethmf_init);
 module_exit(ztdethmf_exit);
-#endif /* !__FreeBSD__ */

@@ -142,31 +142,14 @@ static void __exit mod_exit(void)
 }
 
 #if defined(__FreeBSD__)
-static int
-echocan_oslec_modevent(module_t mod __unused, int type, void *data __unused)
-{
-	int res;
-
-	switch (type) {
-	case MOD_LOAD:
-		res = mod_init();
-		return (-res);
-	case MOD_UNLOAD:
-		mod_exit();
-		return (0);
-	default:
-		return (EOPNOTSUPP);
-	}
-}
-
-DAHDI_DEV_MODULE(dahdi_echocan_oslec, echocan_oslec_modevent, NULL);
+DAHDI_DEV_MODULE(dahdi_echocan_oslec);
 MODULE_VERSION(dahdi_echocan_oslec, 1);
 MODULE_DEPEND(dahdi_echocan_oslec, dahdi, 1, 1, 1);
-#else
+#endif /* __FreeBSD__ */
+
 MODULE_DESCRIPTION("DAHDI OSLEC wrapper");
 MODULE_AUTHOR("Tzafrir Cohen <tzafrir.cohen@xorcom.com>");
 MODULE_LICENSE("GPL");
 
 module_init(mod_init);
 module_exit(mod_exit);
-#endif /* !__FreeBSD__ */

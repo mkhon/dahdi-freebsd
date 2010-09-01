@@ -2330,31 +2330,14 @@ static void __exit voicebus_module_cleanup(void)
 }
 
 #if defined(__FreeBSD__)
-static int
-dahdi_voicebus_modevent(module_t mod __unused, int type, void *data __unused)
-{
-	int res;
-
-	switch (type) {
-	case MOD_LOAD:
-		res = voicebus_module_init();
-		return -res;
-	case MOD_UNLOAD:
-		voicebus_module_cleanup();
-		return 0;
-	default:
-		return EOPNOTSUPP;
-	}
-}
-
-DAHDI_DEV_MODULE(dahdi_voicebus, dahdi_voicebus_modevent, NULL);
+DAHDI_DEV_MODULE(dahdi_voicebus);
 MODULE_VERSION(dahdi_voicebus, 1);
 MODULE_DEPEND(dahdi_voicebus, dahdi, 1, 1, 1);
-#else /* !__FreeBSD__ */
+#endif /* __FreeBSD__ */
+
 MODULE_DESCRIPTION("Voicebus Interface w/VPMADT032 support");
 MODULE_AUTHOR("Digium Incorporated <support@digium.com>");
 MODULE_LICENSE("GPL");
 
 module_init(voicebus_module_init);
 module_exit(voicebus_module_cleanup);
-#endif /* !__FreeBSD__ */

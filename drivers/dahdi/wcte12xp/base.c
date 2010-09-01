@@ -2533,20 +2533,6 @@ te12xp_cleanup(void)
 	uma_zdestroy(cmd_cache);
 }
 
-static int
-te12xp_modevent(module_t mod __unused, int type, void *data __unused)
-{
-	switch (type) {
-	case MOD_LOAD:
-		return te12xp_init();
-	case MOD_UNLOAD:
-		te12xp_cleanup();
-		return (0);
-	default:
-		return (EOPNOTSUPP);
-	}
-}
-
 static device_method_t te12xp_methods[] = {
 	DEVMETHOD(device_probe,     te12xp_device_probe),
 	DEVMETHOD(device_attach,    te12xp_device_attach),
@@ -2562,7 +2548,7 @@ static driver_t te12xp_pci_driver = {
 
 static devclass_t te12xp_devclass;
 
-DAHDI_DRIVER_MODULE(te12xp, pci, te12xp_pci_driver, te12xp_devclass, te12xp_modevent, 0);
+DAHDI_DRIVER_MODULE(te12xp, pci, te12xp_pci_driver, te12xp_devclass);
 MODULE_DEPEND(te12xp, pci, 1, 1, 1);
 MODULE_DEPEND(te12xp, dahdi, 1, 1, 1);
 MODULE_DEPEND(te12xp, dahdi_voicebus, 1, 1, 1);
@@ -2640,11 +2626,9 @@ module_param(vpmnlpthresh, int, S_IRUGO);
 module_param(vpmnlpmaxsupp, int, S_IRUGO);
 #endif
 
-#if !defined(__FreeBSD__)
 MODULE_DESCRIPTION("Wildcard VoiceBus Digital Card Driver");
 MODULE_AUTHOR("Digium Incorporated <support@digium.com>");
 MODULE_LICENSE("GPL v2");
 
 module_init(te12xp_init);
 module_exit(te12xp_cleanup);
-#endif /* !__FreeBSD__ */

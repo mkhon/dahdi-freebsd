@@ -5474,23 +5474,6 @@ wctdm_device_detach(device_t dev)
 	return (0);
 }
 
-static int
-wctdm_modevent(module_t mod __unused, int type, void *data __unused)
-{
-	int res;
-
-	switch (type) {
-	case MOD_LOAD:
-		res = wctdm_init();
-		return (-res);
-	case MOD_UNLOAD:
-		wctdm_cleanup();
-		return (0);
-	default:
-		return (EOPNOTSUPP);
-	}
-}
-
 static device_method_t wctdm_methods[] = {
 	DEVMETHOD(device_probe,     wctdm_device_probe),
 	DEVMETHOD(device_attach,    wctdm_device_attach),
@@ -5506,12 +5489,13 @@ static driver_t wctdm_pci_driver = {
 
 static devclass_t wctdm_devclass;
 
-DAHDI_DRIVER_MODULE(wctdm24xxp, pci, wctdm_pci_driver, wctdm_devclass, wctdm_modevent, 0);
+DAHDI_DRIVER_MODULE(wctdm24xxp, pci, wctdm_pci_driver, wctdm_devclass);
 MODULE_DEPEND(wctdm24xxp, pci, 1, 1, 1);
 MODULE_DEPEND(wctdm24xxp, dahdi, 1, 1, 1);
 MODULE_DEPEND(wctdm24xxp, dahdi_voicebus, 1, 1, 1);
 MODULE_DEPEND(wctdm24xxp, firmware, 1, 1, 1);
-#else
+#endif /* __FreeBSD__ */
+
 MODULE_DESCRIPTION("VoiceBus Driver for Wildcard Analog and Hybrid Cards");
 MODULE_AUTHOR("Digium Incorporated <support@digium.com>");
 MODULE_ALIAS("wctdm8xxp");
@@ -5523,4 +5507,3 @@ MODULE_LICENSE("GPL v2");
 
 module_init(wctdm_init);
 module_exit(wctdm_cleanup);
-#endif /* !__FreeBSD__ */

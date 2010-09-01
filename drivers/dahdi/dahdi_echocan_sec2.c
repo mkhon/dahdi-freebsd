@@ -354,36 +354,17 @@ static void __exit mod_exit(void)
 SYSCTL_NODE(_dahdi_echocan, OID_AUTO, sec2, CTLFLAG_RW, 0, "DAHDI 'SEC2' Echo Canceler");
 #define MODULE_PARAM_PREFIX "dahdi.echocan.sec2"
 #define MODULE_PARAM_PARENT _dahdi_echocan_sec2
-#endif
+
+DAHDI_DEV_MODULE(dahdi_echocan_sec2);
+MODULE_VERSION(dahdi_echocan_sec2, 1);
+MODULE_DEPEND(dahdi_echocan_sec2, dahdi, 1, 1, 1);
+#endif /* __FreeBSD__ */
 
 module_param(debug, int, S_IRUGO | S_IWUSR);
 
-#if defined(__FreeBSD__)
-static int
-echocan_sec2_modevent(module_t mod __unused, int type, void *data __unused)
-{
-	int res;
-
-	switch (type) {
-	case MOD_LOAD:
-		res = mod_init();
-		return (-res);
-	case MOD_UNLOAD:
-		mod_exit();
-		return (0);
-	default:
-		return (EOPNOTSUPP);
-	}
-}
-
-DAHDI_DEV_MODULE(dahdi_echocan_sec2, echocan_sec2_modevent, NULL);
-MODULE_VERSION(dahdi_echocan_sec2, 1);
-MODULE_DEPEND(dahdi_echocan_sec2, dahdi, 1, 1, 1);
-#else /* !__FreeBSD__ */
 MODULE_DESCRIPTION("DAHDI 'SEC2' Echo Canceler");
 MODULE_AUTHOR("Steve Underwood <steveu@coppice.org>");
 MODULE_LICENSE("GPL");
 
 module_init(mod_init);
 module_exit(mod_exit);
-#endif /* !__FreeBSD__ */

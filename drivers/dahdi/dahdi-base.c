@@ -9169,9 +9169,6 @@ dahdi_unregister_chardev(struct dahdi_chardev *dev)
 }
 
 #else /* !__FreeBSD__ */
-MODULE_AUTHOR("Mark Spencer <markster@digium.com>");
-MODULE_DESCRIPTION("DAHDI Telephony Interface");
-MODULE_LICENSE("GPL v2");
 /* DAHDI now provides timing. If anybody wants dahdi_dummy it's probably
  * for that. So make dahdi provide it for now. This alias may be removed
  * in the future, and users are encouraged not to rely on it. */
@@ -9353,25 +9350,8 @@ static void __exit dahdi_cleanup(void)
 }
 
 #if defined(__FreeBSD__)
-static int
-dahdi_modevent(module_t mod, int cmd, void *arg)
-{
-	switch (cmd) {
-	case MOD_LOAD:
-		return dahdi_init();
-
-	case MOD_UNLOAD:
-		dahdi_cleanup();
-		return 0;
-
-	default:
-		/* we only understand load/unload*/
-		return EOPNOTSUPP;
-	}
-}
-
 /* Now declare the module to the system */
-DAHDI_DEV_MODULE(dahdi, dahdi_modevent, NULL);
+DAHDI_DEV_MODULE(dahdi);
 MODULE_VERSION(dahdi, 1);
 MODULE_DEPEND(dahdi, firmware, 1, 1, 1);
 #ifdef CONFIG_DAHDI_CORE_TIMER
@@ -9391,7 +9371,11 @@ dahdi_dummy_modevent(module_t mod, int cmd, void *arg)
 DEV_MODULE(dahdi_dummy, dahdi_dummy_modevent, NULL);
 MODULE_VERSION(dahdi_dummy, 1);
 #endif
-#else /* !__FreeBSD__ */
+#endif /* __FreeBSD__ */
+
+MODULE_AUTHOR("Mark Spencer <markster@digium.com>");
+MODULE_DESCRIPTION("DAHDI Telephony Interface");
+MODULE_LICENSE("GPL v2");
+
 module_init(dahdi_init);
 module_exit(dahdi_cleanup);
-#endif /* !__FreeBSD__ */

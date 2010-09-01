@@ -376,6 +376,24 @@ printk_ratelimit(void)
  * Kernel module API
  */
 int
+try_module_get(struct module *m)
+{
+	atomic_inc(&m->refcount);
+	return (0);
+}
+
+void module_put(struct module *m)
+{
+	atomic_dec(&m->refcount);
+}
+
+void _module_ptr_sysinit(void *arg)
+{
+	struct module_ptr_args *args = (struct module_ptr_args *) arg;
+	*args->pfield = args->value;
+}
+
+int
 request_module(const char *fmt, ...)
 {
 	va_list ap;

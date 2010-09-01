@@ -1005,33 +1005,17 @@ static void ztdynamic_cleanup(void)
 SYSCTL_NODE(_dahdi, OID_AUTO, dynamic, CTLFLAG_RW, 0, "DAHDI Dynamic Span Support");
 #define MODULE_PARAM_PREFIX "dahdi.dynamic"
 #define MODULE_PARAM_PARENT _dahdi_dynamic
+
+DAHDI_DEV_MODULE(dahdi_dynamic);
+MODULE_VERSION(dahdi_dynamic, 1);
+MODULE_DEPEND(dahdi_dynamic, dahdi, 1, 1, 1);
 #endif /* __FreeBSD__ */
 
 module_param(debug, int, 0600);
 
-#if defined(__FreeBSD__)
-static int
-dahdi_dynamic_modevent(module_t mod __unused, int type, void *data __unused)
-{
-	switch (type) {
-	case MOD_LOAD:
-		return ztdynamic_init();
-	case MOD_UNLOAD:
-		ztdynamic_cleanup();
-		return 0;
-	default:
-		return EOPNOTSUPP;
-	}
-}
-
-DAHDI_DEV_MODULE(dahdi_dynamic, dahdi_dynamic_modevent, NULL);
-MODULE_VERSION(dahdi_dynamic, 1);
-MODULE_DEPEND(dahdi_dynamic, dahdi, 1, 1, 1);
-#else /* !__FreeBSD__ */
 MODULE_DESCRIPTION("DAHDI Dynamic Span Support");
 MODULE_AUTHOR("Mark Spencer <markster@digium.com>");
 MODULE_LICENSE("GPL v2");
 
 module_init(ztdynamic_init);
 module_exit(ztdynamic_cleanup);
-#endif /* !__FreeBSD__ */

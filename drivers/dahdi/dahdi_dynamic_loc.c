@@ -268,27 +268,13 @@ static void __exit ztdlocal_exit(void)
 }
 
 #if defined(__FreeBSD__)
-static int
-dahdi_dynamic_loc_modevent(module_t mod __unused, int type, void *data __unused)
-{
-	switch (type) {
-	case MOD_LOAD:
-		return ztdlocal_init();
-	case MOD_UNLOAD:
-		ztdlocal_exit();
-		return 0;
-	default:
-		return EOPNOTSUPP;
-	}
-}
-
-DAHDI_DEV_MODULE(dahdi_dynamic_loc, dahdi_dynamic_loc_modevent, NULL);
+DAHDI_DEV_MODULE(dahdi_dynamic_loc);
 MODULE_VERSION(dahdi_dynamic_loc, 1);
 MODULE_DEPEND(dahdi_dynamic_loc, dahdi, 1, 1, 1);
 MODULE_DEPEND(dahdi_dynamic_loc, dahdi_dynamic, 1, 1, 1);
-#else /* !__FreeBSD__ */
+#endif /* __FreeBSD__ */
+
 module_init(ztdlocal_init);
 module_exit(ztdlocal_exit);
 
 MODULE_LICENSE("GPL v2");
-#endif /* !__FreeBSD__ */

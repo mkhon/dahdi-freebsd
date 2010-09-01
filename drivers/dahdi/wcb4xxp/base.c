@@ -3170,7 +3170,7 @@ static driver_t b4xxp_pci_driver = {
 
 static devclass_t b4xxp_devclass;
 
-DAHDI_DRIVER_MODULE(wcb4xxp, pci, b4xxp_pci_driver, b4xxp_devclass, 0, 0);
+DAHDI_DRIVER_MODULE(wcb4xxp, pci, b4xxp_pci_driver, b4xxp_devclass);
 MODULE_DEPEND(wcb4xxp, pci, 1, 1, 1);
 MODULE_DEPEND(wcb4xxp, dahdi, 1, 1, 1);
 
@@ -3324,7 +3324,6 @@ module_param(timer_1_ms, int, S_IRUGO | S_IWUSR);
 module_param(timer_3_ms, int, S_IRUGO | S_IWUSR);
 module_param(companding, charp, S_IRUGO);
 
-#if !defined(__FreeBSD__)
 MODULE_PARM_DESC(debug, "bitmap: 1=general 2=dtmf 4=regops 8=fops 16=ec 32=st state 64=hdlc 128=alarm");
 MODULE_PARM_DESC(spanfilter, "debug filter for spans. bitmap: 1=port 1, 2=port 2, 4=port 3, 8=port 4");
 #ifdef LOOKBACK_SUPPORTED
@@ -3344,6 +3343,7 @@ MODULE_AUTHOR("Digium Incorporated <support@digium.com>");
 MODULE_DESCRIPTION("B410P & Similars multi-port BRI module driver.");
 MODULE_LICENSE("GPL");
 
+#if !defined(__FreeBSD__)
 MODULE_DEVICE_TABLE(pci, b4xx_ids);
 
 module_init(b4xx_init);

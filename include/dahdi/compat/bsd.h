@@ -413,27 +413,77 @@ MALLOC_DECLARE(M_DAHDI);
 #define __devexit
 #define __devinitdata
 
-#define try_module_get(m)	(1)
-#define module_put(m)		((void) (m))
-
 struct module {
 	const char *name;
+	const char *description;
+	const char *author;
+	const char *license;
+	atomic_t refcount;
+	int (*init)(void);
+	void (*exit)(void);
 };
+
+int try_module_get(struct module *);
+void module_put(struct module *);
 
 extern struct module _this_module;
 
 #define THIS_MODULE (&_this_module)
 
-#define DAHDI_MODULE(name)				\
+#define _DAHDI_MODULE_EVH(name)	__CONCAT(name, _modevent)
+#define _DAHDI_MODULE(name)						\
+	static int							\
+	_DAHDI_MODULE_EVH(name)(module_t mod, int type, void *data)	\
+	{								\
+		int res = 0;						\
+									\
+		switch (type) {						\
+		case MOD_LOAD:						\
+			if (THIS_MODULE->init)				\
+				res = THIS_MODULE->init();		\
+			return (-res);					\
+		case MOD_UNLOAD:					\
+			if (atomic_read(&(THIS_MODULE->refcount)))	\
+				return (EBUSY);				\
+			if (THIS_MODULE->exit)				\
+				THIS_MODULE->exit();			\
+			return (0);					\
+		default:						\
+			return (EOPNOTSUPP);				\
+		}							\
+	}								\
 	struct module _this_module = { #name }
 
-#define DAHDI_DEV_MODULE(name, evh, arg)		\
-	DEV_MODULE(name, evh, arg);			\
-	DAHDI_MODULE(name)
+#define DAHDI_DEV_MODULE(name)						\
+	_DAHDI_MODULE(name);						\
+	DEV_MODULE(name, _DAHDI_MODULE_EVH(name), 0)
 
-#define DAHDI_DRIVER_MODULE(name, busname, driver, devclass, evh, arg)	\
-	DRIVER_MODULE(name, busname, driver, devclass, evh, arg);	\
-	DAHDI_MODULE(name)
+#define DAHDI_DRIVER_MODULE(name, busname, driver, devclass)		\
+	_DAHDI_MODULE(name);						\
+	DRIVER_MODULE(name, busname, driver, devclass, _DAHDI_MODULE_EVH(name), 0);
+
+struct module_ptr_args {
+	const void **pfield;
+	void *value;
+};
+
+void _module_ptr_sysinit(void *arg);
+
+#define _module_ptr_args	__CONCAT(_module_ptr_args_, __LINE__)
+#define _module_ptr_init(field, val)					\
+	static struct module_ptr_args _module_ptr_args = {		\
+		(const void **) &(THIS_MODULE->field), val		\
+	};								\
+	SYSINIT(__CONCAT(_module_ptr_args, _init),			\
+		SI_SUB_KLD, SI_ORDER_FIRST,				\
+		_module_ptr_sysinit, &_module_ptr_args)
+
+#define module_init(f)		_module_ptr_init(init, f)
+#define module_exit(f)		_module_ptr_init(exit, f)
+#define MODULE_DESCRIPTION(s)	_module_ptr_init(description, s)
+#define MODULE_AUTHOR(s)	_module_ptr_init(author, s)
+#define MODULE_LICENSE(s)	_module_ptr_init(license, s)
+#define MODULE_ALIAS(n)
 
 int request_module(const char *fmt, ...);
 

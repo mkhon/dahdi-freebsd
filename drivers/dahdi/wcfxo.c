@@ -1333,7 +1333,7 @@ static driver_t wcfxo_pci_driver = {
 
 static devclass_t wcfxo_devclass;
 
-DAHDI_DRIVER_MODULE(wcfxo, pci, wcfxo_pci_driver, wcfxo_devclass, 0, 0);
+DAHDI_DRIVER_MODULE(wcfxo, pci, wcfxo_pci_driver, wcfxo_devclass);
 MODULE_DEPEND(wcfxo, pci, 1, 1, 1);
 MODULE_DEPEND(wcfxo, dahdi, 1, 1, 1);
 #else /* !__FreeBSD__ */
@@ -1364,6 +1364,9 @@ static void __exit wcfxo_cleanup(void)
 {
 	pci_unregister_driver(&wcfxo_driver);
 }
+
+module_init(wcfxo_init);
+module_exit(wcfxo_cleanup);
 #endif /* !__FreeBSD__ */
 
 module_param(debug, int, 0644);
@@ -1372,11 +1375,6 @@ module_param(boost, int, 0444);
 module_param(monitor, int, 0444);
 module_param(opermode, int, 0444);
 
-#if !defined(__FreeBSD__)
 MODULE_DESCRIPTION("Wildcard X100P Driver");
 MODULE_AUTHOR("Mark Spencer <markster@digium.com>");
 MODULE_LICENSE("GPL v2");
-
-module_init(wcfxo_init);
-module_exit(wcfxo_cleanup);
-#endif /* !__FreeBSD__ */

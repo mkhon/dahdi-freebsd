@@ -500,30 +500,16 @@ static void __exit ztdeth_exit(void)
 }
 
 #if defined(__FreeBSD__)
-static int
-dahdi_dynamic_eth_modevent(module_t mod __unused, int type, void *data __unused)
-{
-	switch (type) {
-	case MOD_LOAD:
-		return ztdeth_init();
-	case MOD_UNLOAD:
-		ztdeth_exit();
-		return 0;
-	default:
-		return EOPNOTSUPP;
-	}
-}
-
-DAHDI_DEV_MODULE(dahdi_dynamic_eth, dahdi_dynamic_eth_modevent, NULL);
+DAHDI_DEV_MODULE(dahdi_dynamic_eth);
 MODULE_VERSION(dahdi_dynamic_eth, 1);
 MODULE_DEPEND(dahdi_dynamic_eth, dahdi, 1, 1, 1);
 MODULE_DEPEND(dahdi_dynamic_eth, dahdi_dynamic, 1, 1, 1);
 MODULE_DEPEND(dahdi_dynamic_eth, ng_dahdi_netdev, 1, 1, 1);
-#else /* !__FreeBSD__ */
+#endif /* __FreeBSD__ */
+
 MODULE_DESCRIPTION("DAHDI Dynamic TDMoE Support");
 MODULE_AUTHOR("Mark Spencer <markster@digium.com>");
 MODULE_LICENSE("GPL v2");
 
 module_init(ztdeth_init);
 module_exit(ztdeth_exit);
-#endif /* !__FreeBSD__ */

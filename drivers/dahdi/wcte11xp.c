@@ -1860,7 +1860,7 @@ static driver_t t1xxp_pci_driver = {
 
 static devclass_t t1xxp_devclass;
 
-DAHDI_DRIVER_MODULE(t1xxp, pci, t1xxp_pci_driver, t1xxp_devclass, 0, 0);
+DAHDI_DRIVER_MODULE(t1xxp, pci, t1xxp_pci_driver, t1xxp_devclass);
 MODULE_DEPEND(t1xxp, pci, 1, 1, 1);
 MODULE_DEPEND(t1xxp, dahdi, 1, 1, 1);
 #else /* !__FreeBSD__ */
@@ -1898,11 +1898,11 @@ module_param(clockextra, int, 0600);
 module_param(debug, int, 0600);
 module_param(j1mode, int, 0600);
 
-#if !defined(__FreeBSD__)
 MODULE_DESCRIPTION("Wildcard TE110P Driver");
 MODULE_AUTHOR("Mark Spencer <markster@digium.com>");
 MODULE_LICENSE("GPL v2");
 
+#if !defined(__FreeBSD__)
 module_init(t1xxp_init);
 module_exit(t1xxp_cleanup);
 #endif /* !__FreeBSD__ */

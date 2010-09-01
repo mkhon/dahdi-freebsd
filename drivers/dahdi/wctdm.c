@@ -3112,7 +3112,7 @@ static driver_t wctdm_pci_driver = {
 
 static devclass_t wctdm_devclass;
 
-DAHDI_DRIVER_MODULE(wctdm, pci, wctdm_pci_driver, wctdm_devclass, 0, 0);
+DAHDI_DRIVER_MODULE(wctdm, pci, wctdm_pci_driver, wctdm_devclass);
 MODULE_DEPEND(wctdm, pci, 1, 1, 1);
 MODULE_DEPEND(wctdm, dahdi, 1, 1, 1);
 #else /* !__FreeBSD__ */
@@ -3145,6 +3145,9 @@ static void __exit wctdm_cleanup(void)
 {
 	pci_unregister_driver(&wctdm_driver);
 }
+
+module_init(wctdm_init);
+module_exit(wctdm_cleanup);
 #endif /* !__FreeBSD__ */
 
 module_param(debug, int, 0600);
@@ -3171,12 +3174,7 @@ module_param(fxorxgain, int, 0600);
 module_param(fxstxgain, int, 0600);
 module_param(fxsrxgain, int, 0600);
 
-#if !defined(__FreeBSD__)
 MODULE_DESCRIPTION("Wildcard TDM400P Driver");
 MODULE_AUTHOR("Mark Spencer <markster@digium.com>");
 MODULE_ALIAS("wcfxs");
 MODULE_LICENSE("GPL v2");
-
-module_init(wctdm_init);
-module_exit(wctdm_cleanup);
-#endif

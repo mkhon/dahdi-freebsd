@@ -516,32 +516,14 @@ static void dahdi_transcode_cleanup(void)
 SYSCTL_NODE(_dahdi, OID_AUTO, transcode, CTLFLAG_RW, 0, "DAHDI Transcoder Support");
 #define MODULE_PARAM_PREFIX "dahdi.transcode"
 #define MODULE_PARAM_PARENT _dahdi_transcode
+
+DAHDI_DEV_MODULE(dahdi_transcode);
+MODULE_VERSION(dahdi_transcode, 1);
+MODULE_DEPEND(dahdi_transcode, dahdi, 1, 1, 1);
 #endif /* __FreeBSD__ */
 
 module_param(debug, int, S_IRUGO | S_IWUSR);
 
-#if defined(__FreeBSD__)
-static int
-transcode_modevent(module_t mod __unused, int type, void *data __unused)
-{
-	int res;
-
-	switch (type) {
-	case MOD_LOAD:
-		res = dahdi_transcode_init();
-		return (-res);
-	case MOD_UNLOAD:
-		dahdi_transcode_cleanup();
-		return (0);
-	default:
-		return (EOPNOTSUPP);
-	}
-}
-
-DAHDI_DEV_MODULE(dahdi_transcode, transcode_modevent, NULL);
-MODULE_VERSION(dahdi_transcode, 1);
-MODULE_DEPEND(dahdi_transcode, dahdi, 1, 1, 1);
-#else /* !__FreeBSD__ */
 MODULE_DESCRIPTION("DAHDI Transcoder Support");
 MODULE_AUTHOR("Mark Spencer <markster@digium.com>");
 #ifdef MODULE_LICENSE
@@ -550,4 +532,3 @@ MODULE_LICENSE("GPL");
 
 module_init(dahdi_transcode_init);
 module_exit(dahdi_transcode_cleanup);
-#endif /* !__FreeBSD__ */

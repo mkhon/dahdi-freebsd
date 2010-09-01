@@ -189,24 +189,7 @@ SYSCTL_NODE(_dahdi, OID_AUTO, vpmadt032_loader, CTLFLAG_RW, 0, "DAHDI VPMADT032 
 #define MODULE_PARAM_PREFIX "dahdi.vpmadt032_loader"
 #define MODULE_PARAM_PARENT _dahdi_vpmadt032_loader
 
-static int
-dahdi_vpmadt032_loader_modevent(module_t mod __unused, int type, void *data __unused)
-{
-	int res;
-
-	switch (type) {
-	case MOD_LOAD:
-		res = vpmadt032_loader_init();
-		return (-res);
-	case MOD_UNLOAD:
-		vpmadt032_loader_exit();
-		return (0);
-	default:
-		return (EOPNOTSUPP);
-	}
-}
-
-DAHDI_DEV_MODULE(dahdi_vpmadt032_loader, dahdi_vpmadt032_loader_modevent, NULL);
+DAHDI_DEV_MODULE(dahdi_vpmadt032_loader);
 MODULE_VERSION(dahdi_vpmadt032_loader, 1);
 MODULE_DEPEND(dahdi_vpmadt032_loader, dahdi, 1, 1, 1);
 MODULE_DEPEND(dahdi_vpmadt032_loader, dahdi_voicebus, 1, 1, 1);
@@ -214,11 +197,9 @@ MODULE_DEPEND(dahdi_vpmadt032_loader, dahdi_voicebus, 1, 1, 1);
 
 module_param(debug, int, S_IRUGO | S_IWUSR);
 
-#if !defined(__FreeBSD__)
 MODULE_DESCRIPTION("DAHDI VPMADT032 (Hardware Echo Canceller) Firmware Loader");
 MODULE_AUTHOR("Digium Incorporated <support@digium.com>");
 MODULE_LICENSE("Digium Commercial");
 
 module_init(vpmadt032_loader_init);
 module_exit(vpmadt032_loader_exit);
-#endif
