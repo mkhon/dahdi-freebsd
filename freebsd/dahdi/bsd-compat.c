@@ -406,10 +406,12 @@ _dahdi_module_modevent(module_t mod, int type, void *data)
 			res = m->init();
 		return (-res);
 	case MOD_UNLOAD:
-		if (dahdi_module_usecount(m) > 0)
-			return (EBUSY);
 		if (m->exit)
 			m->exit();
+		return (0);
+	case MOD_QUIESCE:
+		if (dahdi_module_usecount(m) > 0)
+			return (EBUSY);
 		return (0);
 	default:
 		return (EOPNOTSUPP);
