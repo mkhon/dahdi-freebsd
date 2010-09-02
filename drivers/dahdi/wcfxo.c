@@ -1299,6 +1299,9 @@ wcfxo_device_detach(device_t dev)
 {
 	struct wcfxo *wc = device_get_softc(dev);
 
+	if (dahdi_module_usecount(THIS_MODULE) > 0)
+		return (EBUSY);
+
 	/* Stop any DMA */
 	wcfxo_stop_dma(wc);
 	wcfxo_reset_tdm(wc);

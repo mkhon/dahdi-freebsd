@@ -3077,6 +3077,9 @@ wctdm_device_detach(device_t dev)
 {
 	struct wctdm *wc = device_get_softc(dev);
 
+	if (dahdi_module_usecount(THIS_MODULE) > 0)
+		return (EBUSY);
+
 	/* Stop any DMA */
 	wctdm_stop_dma(wc);
 	wctdm_reset_tdm(wc);
