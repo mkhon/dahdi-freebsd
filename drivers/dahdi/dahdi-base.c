@@ -42,6 +42,7 @@
 #include <sys/kernel.h>
 #include <sys/fcntl.h>
 #include <sys/ioccom.h>
+#include <sys/filio.h>
 #include <sys/libkern.h>
 #include <sys/malloc.h>
 #include <sys/module.h>
@@ -5805,19 +5806,15 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 
 	switch(cmd) {
 #if defined(__FreeBSD__)
-	case F_SETFL: {
+	case FIONBIO:
 		get_user(j, data);
-
-		/*
-		 * XXX: On the moment we're interested only in O_NONBLOCK
-		 * Need any other flags?
-		 */
-		if ((j & O_NONBLOCK) != 0)
+		if (j)
 			chan->file_flags |= O_NONBLOCK;
 		else
 			chan->file_flags &= ~O_NONBLOCK;
 		break;
-	}
+	case FIOASYNC:
+		break;
 #endif /* __FreeBSD__ */
 	case DAHDI_SETSIGFREEZE:
 		get_user(j, (int __user *)data);
