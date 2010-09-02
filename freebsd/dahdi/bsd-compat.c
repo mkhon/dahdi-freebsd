@@ -379,15 +379,45 @@ int
 try_module_get(struct module *m)
 {
 	atomic_inc(&m->refcount);
-	return (0);
+	return (1);
 }
 
-void module_put(struct module *m)
+void
+module_put(struct module *m)
 {
 	atomic_dec(&m->refcount);
 }
 
-void _module_ptr_sysinit(void *arg)
+int
+dahdi_module_usecount(struct module *m)
+{
+	return atomic_read(&m->refcount);
+}
+
+int
+_dahdi_module_modevent(module_t mod, int type, void *data)
+{
+	int res = 0;
+	struct module *m = (struct module *) data;
+
+	switch (type) {
+	case MOD_LOAD:
+		if (m->init)
+			res = m->init();
+		return (-res);
+	case MOD_UNLOAD:
+		if (dahdi_module_usecount(m) > 0)
+			return (EBUSY);
+		if (m->exit)
+			m->exit();
+		return (0);
+	default:
+		return (EOPNOTSUPP);
+	}
+}
+
+void
+_dahdi_module_ptr_sysinit(void *arg)
 {
 	struct module_ptr_args *args = (struct module_ptr_args *) arg;
 	*args->pfield = args->value;

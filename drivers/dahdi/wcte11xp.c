@@ -1824,6 +1824,9 @@ t1xxp_device_detach(device_t dev)
 {
 	struct t1 *wc = device_get_softc(dev);
 
+	if (dahdi_module_usecount(THIS_MODULE) > 0)
+		return (EBUSY);
+
 	/* Stop any DMA */
 	__t1xxp_stop_dma(wc);
 

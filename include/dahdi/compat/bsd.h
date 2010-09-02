@@ -425,49 +425,30 @@ struct module {
 
 int try_module_get(struct module *);
 void module_put(struct module *);
+int dahdi_module_usecount(struct module *);
 
 extern struct module _this_module;
 
 #define THIS_MODULE (&_this_module)
-
-#define _DAHDI_MODULE_EVH(name)	__CONCAT(name, _modevent)
-#define _DAHDI_MODULE(name)						\
-	static int							\
-	_DAHDI_MODULE_EVH(name)(module_t mod, int type, void *data)	\
-	{								\
-		int res = 0;						\
-									\
-		switch (type) {						\
-		case MOD_LOAD:						\
-			if (THIS_MODULE->init)				\
-				res = THIS_MODULE->init();		\
-			return (-res);					\
-		case MOD_UNLOAD:					\
-			if (atomic_read(&(THIS_MODULE->refcount)))	\
-				return (EBUSY);				\
-			if (THIS_MODULE->exit)				\
-				THIS_MODULE->exit();			\
-			return (0);					\
-		default:						\
-			return (EOPNOTSUPP);				\
-		}							\
-	}								\
-	struct module _this_module = { #name }
-
-#define DAHDI_DEV_MODULE(name)						\
-	_DAHDI_MODULE(name);						\
-	DEV_MODULE(name, _DAHDI_MODULE_EVH(name), 0)
-
-#define DAHDI_DRIVER_MODULE(name, busname, driver, devclass)		\
-	_DAHDI_MODULE(name);						\
-	DRIVER_MODULE(name, busname, driver, devclass, _DAHDI_MODULE_EVH(name), 0);
 
 struct module_ptr_args {
 	const void **pfield;
 	void *value;
 };
 
-void _module_ptr_sysinit(void *arg);
+int _dahdi_module_modevent(struct module *mod, int type, void *data);
+void _dahdi_module_ptr_sysinit(void *arg);
+
+#define _DAHDI_MODULE(name)						\
+	struct module _this_module = { #name }
+
+#define DAHDI_DEV_MODULE(name)						\
+	_DAHDI_MODULE(name);						\
+	DEV_MODULE(name, _dahdi_module_modevent, THIS_MODULE)
+
+#define DAHDI_DRIVER_MODULE(name, busname, driver, devclass)		\
+	_DAHDI_MODULE(name);						\
+	DRIVER_MODULE(name, busname, driver, devclass, _dahdi_module_modevent, THIS_MODULE);
 
 #define _module_ptr_args	__CONCAT(_module_ptr_args_, __LINE__)
 #define _module_ptr_init(field, val)					\
@@ -476,7 +457,7 @@ void _module_ptr_sysinit(void *arg);
 	};								\
 	SYSINIT(__CONCAT(_module_ptr_args, _init),			\
 		SI_SUB_KLD, SI_ORDER_FIRST,				\
-		_module_ptr_sysinit, &_module_ptr_args)
+		_dahdi_module_ptr_sysinit, &_module_ptr_args)
 
 #define module_init(f)		_module_ptr_init(init, f)
 #define module_exit(f)		_module_ptr_init(exit, f)
