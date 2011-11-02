@@ -371,7 +371,7 @@ ng_dahdi_netdev_rcvmsg(struct ng_node *node, struct ng_item *item, struct ng_hoo
 		case NGM_LINK_IS_UP:
 		case NGM_LINK_IS_DOWN:
 			netdevice_notify(netdev,
-			    msg->header.cmd == NGM_LINK_IS_UP ?  NETDEV_UP : NETDEV_DOWN);
+			    msg->header.cmd == NGM_LINK_IS_UP ? NETDEV_UP : NETDEV_DOWN);
 			break;
 		default:
 			error = EINVAL;
@@ -413,7 +413,7 @@ ng_dahdi_netdev_shutdown(struct ng_node *node)
 }
 
 /*
- * Check for attaching a new hook.
+ * Check for attaching a new hook
  */
 static int
 ng_dahdi_netdev_newhook(struct ng_node *node, struct ng_hook *hook, const char *name)
@@ -440,7 +440,7 @@ ng_dahdi_netdev_newhook(struct ng_node *node, struct ng_hook *hook, const char *
 }
 
 /*
- * Hook disconnection.
+ * Hook disconnection
  */
 static int
 ng_dahdi_netdev_disconnect(struct ng_hook *hook)
