@@ -223,12 +223,7 @@ dev_get_by_name(const char *devname)
 	}
 
 	/* create new network device */
-	netdev = malloc(sizeof(*netdev), M_DAHDI_NETDEV, M_NOWAIT | M_ZERO);
-	if (netdev == NULL) {
-		printf("dahdi_netdev(%s): Error: can not create netdevice\n",
-		    node_name);
-		goto error;
-	}
+	netdev = malloc(sizeof(*netdev), M_DAHDI_NETDEV, M_WAITOK | M_ZERO);
 	strlcpy(netdev->name, devname, sizeof(netdev->name));
 
 	/* create new DAHDI netgraph node */
@@ -259,12 +254,7 @@ dev_get_by_name(const char *devname)
 	}
 
 	/* get ethernet address */
-	NG_MKMESSAGE(msg, NGM_ETHER_COOKIE, NGM_ETHER_GET_ENADDR, 0, M_NOWAIT);
-	if (msg == NULL) {
-		printf("dahdi_netdev(%s): Error: can not allocate NGM_ETHER_GET_ENADDR message\n",
-		    NG_NODE_NAME(node));
-		return (0);
-	}
+	NG_MKMESSAGE(msg, NGM_ETHER_COOKIE, NGM_ETHER_GET_ENADDR, 0, M_WAITOK);
 	NG_SEND_MSG_ID(error, node, msg, NG_NODE_ID(ether_node), NG_NODE_ID(node));
 	if (error) {
 		printf("dahdi_netdev(%s): Error: NGM_ETHER_GET_ENADDR: error %d\n",
@@ -275,13 +265,7 @@ dev_get_by_name(const char *devname)
 	ether_node = NULL;
 
 	/* connect to ether "orphans" hook */
-	NG_MKMESSAGE(msg, NGM_GENERIC_COOKIE, NGM_CONNECT,
-	    sizeof(*nc), M_NOWAIT);
-	if (msg == NULL) {
-		printf("dahdi_netdev(%s): Error: can not allocate NGM_CONNECT message\n",
-		    NG_NODE_NAME(node));
-		goto error;
-	}
+	NG_MKMESSAGE(msg, NGM_GENERIC_COOKIE, NGM_CONNECT, sizeof(*nc), M_WAITOK);
 	nc = (struct ngm_connect *) msg->data;
 	snprintf(nc->path, sizeof(nc->path), "%s:", devname);
 	strlcpy(nc->ourhook, DAHDI_NETDEV_HOOK_UPPER, sizeof(nc->ourhook));
