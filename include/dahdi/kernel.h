@@ -468,6 +468,7 @@ struct dahdi_chan {
 	struct cdev *dev;	/*!< Device structure */
 	struct cdev *file;	/*!< File structure */
 	int file_flags;
+	struct dahdi_iface *iface;
 #else
 	struct file *file;	/*!< File structure */
 #endif
@@ -1360,5 +1361,9 @@ void *dahdi_get_private_data(struct file *file);
 void dahdi_set_private_data(struct file *file, void *private_data);
 
 void dahdi_poll_wait(struct file *file, struct pollinfo *sel, struct poll_table_struct *wait_table);
+
+int dahdi_net_chan_init(struct dahdi_chan *chan);
+void dahdi_net_chan_destroy(struct dahdi_chan *chan);
+void dahdi_net_chan_xmit(struct dahdi_chan *chan);
 
 #endif /* _DAHDI_KERNEL_H */

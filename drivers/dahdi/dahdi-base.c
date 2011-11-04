@@ -137,6 +137,8 @@ static char *dahdi_txlevelnames[] = {
 } ;
 
 #if defined(__FreeBSD__)
+#include "ng_dahdi_iface.h"
+
 MALLOC_DEFINE(M_DAHDI, "dahdi", "DAHDI interface data structures");
 
 /*
@@ -2009,6 +2011,62 @@ static inline void print_debug_writebuf(struct dahdi_chan* ss, struct sk_buff *s
 }
 #endif
 
+int dahdi_net_chan_init(struct dahdi_chan *ms)
+{
+	int res;
+
+	ms->txbufpolicy = DAHDI_POLICY_IMMEDIATE;
+	ms->rxbufpolicy = DAHDI_POLICY_IMMEDIATE;
+
+	res = dahdi_reallocbufs(ms, DAHDI_DEFAULT_MTU_MRU, DAHDI_DEFAULT_NUM_BUFS);
+	if (res)
+		return res;
+
+	fasthdlc_init(&ms->rxhdlc, (ms->flags & DAHDI_FLAG_HDLC56) ? FASTHDLC_MODE_56 : FASTHDLC_MODE_64);
+	fasthdlc_init(&ms->txhdlc, (ms->flags & DAHDI_FLAG_HDLC56) ? FASTHDLC_MODE_56 : FASTHDLC_MODE_64);
+	ms->infcs = PPP_INITFCS;
+	return 0;
+}
+
+void dahdi_net_chan_destroy(struct dahdi_chan *ms)
+{
+	dahdi_reallocbufs(ms, 0, 0);
+}
+
+void dahdi_net_chan_xmit(struct dahdi_chan *ss)
+{
+	int x, oldbuf;
+	unsigned int fcs;
+	unsigned char *data = ss->writebuf[ss->inwritebuf];
+
+	ss->writeidx[ss->inwritebuf] = 0;
+	/* Calculate the FCS */
+	fcs = PPP_INITFCS;
+	for (x=0;x<ss->writen[ss->inwritebuf];x++)
+		fcs = PPP_FCS(fcs, data[x]);
+	/* Invert it */
+	fcs ^= 0xffff;
+	/* Send it out LSB first */
+	data[ss->writen[ss->inwritebuf]++] = (fcs & 0xff);
+	data[ss->writen[ss->inwritebuf]++] = (fcs >> 8) & 0xff;
+	/* Advance to next window */
+	oldbuf = ss->inwritebuf;
+	ss->inwritebuf = (ss->inwritebuf + 1) % ss->numbufs;
+
+	if (ss->inwritebuf == ss->outwritebuf) {
+		/* Whoops, no more space.  */
+		ss->inwritebuf = -1;
+#if !defined(__FreeBSD__)
+		netif_stop_queue(ztchan_to_dev(ss));
+#endif
+	}
+	if (ss->outwritebuf < 0) {
+		/* Let the interrupt handler know there's
+		   some space for us */
+		ss->outwritebuf = oldbuf;
+	}
+}
+
 #ifdef CONFIG_DAHDI_NET
 #ifdef NEW_HDLC_INTERFACE
 static int dahdi_net_open(struct net_device *dev)
@@ -2037,16 +2095,10 @@ static int dahdi_net_open(hdlc_device *hdlc)
 		module_printk(KERN_NOTICE, "%s is not a net device!\n", ms->name);
 		return -EINVAL;
 	}
-	ms->txbufpolicy = DAHDI_POLICY_IMMEDIATE;
-	ms->rxbufpolicy = DAHDI_POLICY_IMMEDIATE;
 
-	res = dahdi_reallocbufs(ms, DAHDI_DEFAULT_MTU_MRU, DAHDI_DEFAULT_NUM_BUFS);
+	res = dahdi_net_chan_init(ms);
 	if (res)
 		return res;
-
-	fasthdlc_init(&ms->rxhdlc, (ms->flags & DAHDI_FLAG_HDLC56) ? FASTHDLC_MODE_56 : FASTHDLC_MODE_64);
-	fasthdlc_init(&ms->txhdlc, (ms->flags & DAHDI_FLAG_HDLC56) ? FASTHDLC_MODE_56 : FASTHDLC_MODE_64);
-	ms->infcs = PPP_INITFCS;
 
 	netif_start_queue(ztchan_to_dev(ms));
 
@@ -2105,7 +2157,7 @@ static void dahdi_net_close(hdlc_device *hdlc)
 	}
 	/* Not much to do here.  Just deallocate the buffers */
         netif_stop_queue(ztchan_to_dev(ms));
-	dahdi_reallocbufs(ms, 0, 0);
+	dahdi_net_chan_destroy(ms);
 	hdlc_close(dev);
 #ifdef NEW_HDLC_INTERFACE
 	return 0;
@@ -2165,8 +2217,6 @@ static int dahdi_xmit(hdlc_device *hdlc, struct sk_buff *skb)
 	struct net_device_stats *stats = &ss->hdlcnetdev->netdev.stats;
 #endif
 	int retval = 1;
-	int x,oldbuf;
-	unsigned int fcs;
 	unsigned char *data;
 	unsigned long flags;
 	/* See if we have any buffers */
@@ -2181,31 +2231,7 @@ static int dahdi_xmit(hdlc_device *hdlc, struct sk_buff *skb)
 		data = ss->writebuf[ss->inwritebuf];
 		memcpy(data, skb->data, skb->len);
 		ss->writen[ss->inwritebuf] = skb->len;
-		ss->writeidx[ss->inwritebuf] = 0;
-		/* Calculate the FCS */
-		fcs = PPP_INITFCS;
-		for (x=0;x<skb->len;x++)
-			fcs = PPP_FCS(fcs, data[x]);
-		/* Invert it */
-		fcs ^= 0xffff;
-		/* Send it out LSB first */
-		data[ss->writen[ss->inwritebuf]++] = (fcs & 0xff);
-		data[ss->writen[ss->inwritebuf]++] = (fcs >> 8) & 0xff;
-		/* Advance to next window */
-		oldbuf = ss->inwritebuf;
-		ss->inwritebuf = (ss->inwritebuf + 1) % ss->numbufs;
-
-		if (ss->inwritebuf == ss->outwritebuf) {
-			/* Whoops, no more space.  */
-		    ss->inwritebuf = -1;
-
-		    netif_stop_queue(ztchan_to_dev(ss));
-		}
-		if (ss->outwritebuf < 0) {
-			/* Let the interrupt handler know there's
-			   some space for us */
-			ss->outwritebuf = oldbuf;
-		}
+		dahdi_net_chan_xmit(ss);
 		dev->trans_start = jiffies;
 		stats->tx_packets++;
 		stats->tx_bytes += ss->writen[oldbuf];
@@ -2346,6 +2372,10 @@ static void dahdi_chan_unreg(struct dahdi_chan *chan)
 		free_netdev(chan->hdlcnetdev->netdev);
 		kfree(chan->hdlcnetdev);
 		chan->hdlcnetdev = NULL;
+	}
+#elif defined(__FreeBSD__)
+	if (chan->flags & DAHDI_FLAG_NETDEV) {
+		dahdi_iface_destroy(chan);
 	}
 #endif
 	write_lock_irqsave(&chan_lock, flags);
@@ -4649,6 +4679,10 @@ static int dahdi_ctl_ioctl(struct file *file, unsigned int cmd, unsigned long da
 			chans[ch.chan]->hdlcnetdev = NULL;
 			chans[ch.chan]->flags &= ~DAHDI_FLAG_NETDEV;
 		}
+#elif defined(__FreeBSD__)
+		if (chans[ch.chan]->flags & DAHDI_FLAG_NETDEV) {
+			dahdi_iface_destroy(chans[ch.chan]);
+		}
 #else
 		if (ch.sigtype == DAHDI_SIG_HDLCNET) {
 			spin_unlock_irqrestore(&chans[ch.chan]->lock, flags);
@@ -4773,6 +4807,16 @@ static int dahdi_ctl_ioctl(struct file *file, unsigned int cmd, unsigned long da
 				module_printk(KERN_NOTICE, "Unable to allocate netdev: out of memory\n");
 				res = -1;
 			}
+		}
+#elif defined(__FreeBSD__)
+		if (!res &&
+		    newmaster == chans[ch.chan] &&
+		    chans[ch.chan]->sig == DAHDI_SIG_HDLCNET) {
+			spin_unlock_irqrestore(&chans[ch.chan]->lock, flags);
+			/* Briefly restore interrupts while we register the device */
+			if ((res = dahdi_iface_create(chans[ch.chan])) == 0)
+				chans[ch.chan]->flags |= DAHDI_FLAG_NETDEV;
+			spin_lock_irqsave(&chans[ch.chan]->lock, flags);
 		}
 #endif
 		if ((chans[ch.chan]->sig == DAHDI_SIG_HDLCNET) &&
@@ -7003,6 +7047,9 @@ out in the later versions, and is put back now. */
 #ifdef CONFIG_DAHDI_NET
 				if (ms->flags & DAHDI_FLAG_NETDEV)
 					netif_wake_queue(ztchan_to_dev(ms));
+#elif defined(__FreeBSD__)
+				if (ms->flags & DAHDI_FLAG_NETDEV)
+					dahdi_iface_wakeup_tx(ms);
 #endif
 #ifdef CONFIG_DAHDI_PPP
 				if (ms->flags & DAHDI_FLAG_PPP) {
@@ -8088,6 +8135,10 @@ static inline void __putbuf_chunk(struct dahdi_chan *ss, unsigned char *rxb, int
 					ms->readn[ms->inreadbuf] = 0;
 					ms->readidx[ms->inreadbuf] = 0;
 				} else
+#elif defined(__FreeBSD__)
+				if (ms->flags & DAHDI_FLAG_NETDEV) {
+					dahdi_iface_rx(ms);
+				} else
 #endif
 				{
 					/* This logic might confuse and astound.  Basically we need to find
@@ -8172,6 +8223,10 @@ that the waitqueue is empty. */
 						stats->rx_crc_errors++;
 					if (abort == DAHDI_EVENT_ABORT)
 						stats->rx_frame_errors++;
+				} else
+#elif defined(__FreeBSD__)
+				if (ms->flags & DAHDI_FLAG_NETDEV) {
+					dahdi_iface_abort(ms, abort);
 				} else
 #endif
 #ifdef CONFIG_DAHDI_PPP
@@ -9351,6 +9406,7 @@ static void __exit dahdi_cleanup(void)
 DAHDI_DEV_MODULE(dahdi);
 MODULE_VERSION(dahdi, 1);
 MODULE_DEPEND(dahdi, firmware, 1, 1, 1);
+
 #ifdef CONFIG_DAHDI_CORE_TIMER
 static int
 dahdi_dummy_modevent(module_t mod, int cmd, void *arg)
