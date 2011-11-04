@@ -36,6 +36,8 @@
 #include <sys/mbuf.h>
 #include <sys/mutex.h>
 #include <sys/kernel.h>
+#include <sys/linker.h>
+#include <sys/syscallsubr.h>
 
 #include <machine/stdarg.h>
 
@@ -44,6 +46,8 @@
 #include <netgraph/ng_ether.h>
 
 #include "ng_dahdi_netdev.h"
+
+#define DAHDI_NETDEV_HOOK_UPPER "upper"
 
 #if __FreeBSD_version < 800000
 struct ng_node *ng_name2noderef(struct ng_node *node, const char *name);
@@ -167,6 +171,34 @@ NETGRAPH_INIT(dahdi_netdev, &ng_dahdi_netdev_typestruct);
 MODULE_VERSION(ng_dahdi_netdev, 1);
 
 /**
+ * Ensure that specified netgraph type is available
+ */
+static int
+ng_ensure_type(const char *type)
+{
+	int error;
+	int fileid;
+	char filename[NG_TYPESIZ + 3];
+
+	if (ng_findtype(type) != NULL)
+		return (0);
+
+	/* Not found, try to load it as a loadable module. */
+	snprintf(filename, sizeof(filename), "ng_%s", type);
+	error = kern_kldload(curthread, filename, &fileid);
+	if (error != 0)
+		return (-1);
+
+	/* See if type has been loaded successfully. */
+	if (ng_findtype(type) == NULL) {
+		(void)kern_kldunload(curthread, fileid, LINKER_UNLOAD_NORMAL);
+		return (-1);
+	}
+
+	return (0);
+}
+
+/**
  * Get network device by name
  */
 struct net_device *
@@ -193,7 +225,7 @@ dev_get_by_name(const char *devname)
 	/* create new network device */
 	netdev = malloc(sizeof(*netdev), M_DAHDI_NETDEV, M_NOWAIT | M_ZERO);
 	if (netdev == NULL) {
-		printf("dahdi_netdev(%s): can not create netdevice\n",
+		printf("dahdi_netdev(%s): Error: can not create netdevice\n",
 		    node_name);
 		goto error;
 	}
@@ -201,22 +233,27 @@ dev_get_by_name(const char *devname)
 
 	/* create new DAHDI netgraph node */
 	if (ng_make_node_common(&ng_dahdi_netdev_typestruct, &node) != 0) {
-		printf("dahdi_netdev(%s): can not create netgraph node\n",
+		printf("dahdi_netdev(%s): Error: can not create netgraph node\n",
 		    node_name);
 		goto error;
 	}
 	netdev->node = node;
 	NG_NODE_SET_PRIVATE(node, netdev);
 	if (ng_name_node(node, node_name) != 0) {
-		printf("dahdi_netdev(%s): can not set netgraph node name\n",
+		printf("dahdi_netdev(%s): Error: can not set netgraph node name\n",
 		    node_name);
 		goto error;
 	}
 
 	/* get reference to ethernet device ng node */
+        if (ng_ensure_type(NG_ETHER_NODE_TYPE) < 0) {
+		printf("dahdi_netdev(%s): Error: can not load %s netgraph type\n",
+		    NG_NODE_NAME(node), NG_ETHER_NODE_TYPE);
+		goto error;
+	}
 	ether_node = ng_name2noderef(NULL, devname);
 	if (ether_node == NULL) {
-		printf("dahdi_netdev(%s): no netgraph node for %s\n",
+		printf("dahdi_netdev(%s): Error: no netgraph node for %s\n",
 		    NG_NODE_NAME(node), netdev->name);
 		goto error;
 	}
@@ -224,13 +261,13 @@ dev_get_by_name(const char *devname)
 	/* get ethernet address */
 	NG_MKMESSAGE(msg, NGM_ETHER_COOKIE, NGM_ETHER_GET_ENADDR, 0, M_NOWAIT);
 	if (msg == NULL) {
-		printf("dahdi_netdev(%s): can not allocate NGM_ETHER_GET_ENADDR message\n",
+		printf("dahdi_netdev(%s): Error: can not allocate NGM_ETHER_GET_ENADDR message\n",
 		    NG_NODE_NAME(node));
 		return (0);
 	}
 	NG_SEND_MSG_ID(error, node, msg, NG_NODE_ID(ether_node), NG_NODE_ID(node));
 	if (error) {
-		printf("dahdi_netdev(%s): NGM_ETHER_GET_ENADDR: error %d\n",
+		printf("dahdi_netdev(%s): Error: NGM_ETHER_GET_ENADDR: error %d\n",
 		    NG_NODE_NAME(node), error);
 		return (0);
 	}
@@ -241,18 +278,18 @@ dev_get_by_name(const char *devname)
 	NG_MKMESSAGE(msg, NGM_GENERIC_COOKIE, NGM_CONNECT,
 	    sizeof(*nc), M_NOWAIT);
 	if (msg == NULL) {
-		printf("dahdi_netdev(%s): can not allocate NGM_CONNECT message\n",
+		printf("dahdi_netdev(%s): Error: can not allocate NGM_CONNECT message\n",
 		    NG_NODE_NAME(node));
 		goto error;
 	}
 	nc = (struct ngm_connect *) msg->data;
 	snprintf(nc->path, sizeof(nc->path), "%s:", devname);
-	strlcpy(nc->ourhook, "upper", sizeof(nc->ourhook));
+	strlcpy(nc->ourhook, DAHDI_NETDEV_HOOK_UPPER, sizeof(nc->ourhook));
 	strlcpy(nc->peerhook, NG_ETHER_HOOK_ORPHAN, sizeof(nc->peerhook));
 	NG_SEND_MSG_ID(error, node, msg, NG_NODE_ID(node), NG_NODE_ID(node));
 	if (error) {
-		printf("dahdi_netdev(%s): NGM_CONNECT(%s:%s <-> %s): error %d\n",
-		    NG_NODE_NAME(node), devname, NG_ETHER_HOOK_ORPHAN, "upper", error);
+		printf("dahdi_netdev(%s): Error: NGM_CONNECT(%s:%s <-> %s): error %d\n",
+		    NG_NODE_NAME(node), devname, NG_ETHER_HOOK_ORPHAN, DAHDI_NETDEV_HOOK_UPPER, error);
 		goto error;
 	}
 
@@ -313,12 +350,12 @@ ng_dahdi_netdev_detach(void)
 	shutting_down = 1;
 
 	if (!SLIST_EMPTY(&notifier_blocks)) {
-		printf("%s: notifier block list is not empty\n", __FUNCTION__);
+		printf("%s: Error: notifier block list is not empty\n", __FUNCTION__);
 		return (EBUSY);
 	}
 
 	if (!SLIST_EMPTY(&packet_types)) {
-		printf("%s: packet type list is not empty\n", __FUNCTION__);
+		printf("%s: Error: packet type list is not empty\n", __FUNCTION__);
 		return (EBUSY);
 	}
 
@@ -421,16 +458,16 @@ ng_dahdi_netdev_newhook(struct ng_node *node, struct ng_hook *hook, const char *
 	struct net_device *netdev = NG_NODE_PRIVATE(node);
 	struct ng_hook **hookptr;
 
-	if (strcmp(name, "upper") == 0) {
+	if (strcmp(name, DAHDI_NETDEV_HOOK_UPPER) == 0) {
 		hookptr = &netdev->upper;
 	} else {
-		printf("dahdi_netdev(%s): unsupported hook %s\n",
+		printf("dahdi_netdev(%s): Error: unsupported hook %s\n",
 		    NG_NODE_NAME(node), name);
 		return (EINVAL);
 	}
 
 	if (*hookptr != NULL) {
-		printf("dahdi_netdev(%s): %s hook is already connected\n",
+		printf("dahdi_netdev(%s): Error: %s hook is already connected\n",
 		    NG_NODE_NAME(node), name);
 		return (EISCONN);
 	}
