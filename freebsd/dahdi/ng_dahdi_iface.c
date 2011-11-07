@@ -414,8 +414,10 @@ dahdi_iface_rx_task(void *context, int pending)
 void
 dahdi_iface_abort(struct dahdi_chan *chan, int event)
 {
-	module_printk(KERN_DEBUG, "%s: event %d\n", __func__, event);
 	/* nothing to do */
+#if 0
+	module_printk(KERN_DEBUG, "%s: event %d\n", __func__, event);
+#endif
 }
 
 /**
