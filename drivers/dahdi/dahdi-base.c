@@ -2011,14 +2011,14 @@ static inline void print_debug_writebuf(struct dahdi_chan* ss, struct sk_buff *s
 }
 #endif
 
-int dahdi_net_chan_init(struct dahdi_chan *ms)
+int dahdi_net_chan_init(struct dahdi_chan *ms, int numbufs)
 {
 	int res;
 
 	ms->txbufpolicy = DAHDI_POLICY_IMMEDIATE;
 	ms->rxbufpolicy = DAHDI_POLICY_IMMEDIATE;
 
-	res = dahdi_reallocbufs(ms, DAHDI_DEFAULT_MTU_MRU, DAHDI_DEFAULT_NUM_BUFS);
+	res = dahdi_reallocbufs(ms, DAHDI_DEFAULT_MTU_MRU, numbufs);
 	if (res)
 		return res;
 

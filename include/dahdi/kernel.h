@@ -1362,7 +1362,7 @@ void dahdi_set_private_data(struct file *file, void *private_data);
 
 void dahdi_poll_wait(struct file *file, struct pollinfo *sel, struct poll_table_struct *wait_table);
 
-int dahdi_net_chan_init(struct dahdi_chan *chan);
+int dahdi_net_chan_init(struct dahdi_chan *chan, int numbufs);
 void dahdi_net_chan_destroy(struct dahdi_chan *chan);
 void dahdi_net_chan_xmit(struct dahdi_chan *chan);
 

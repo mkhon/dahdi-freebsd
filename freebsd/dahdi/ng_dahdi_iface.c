@@ -297,7 +297,7 @@ dahdi_iface_create(struct dahdi_chan *chan)
 	    NG_NODE_NAME(node));
 
 	/* setup channel */
-	if (dahdi_net_chan_init(chan)) {
+	if (dahdi_net_chan_init(chan, DAHDI_DEFAULT_NUM_BUFS * 8)) {
 		printf("dahdi_iface(%s): Error: Failed to initialize channel\n",
 		    NG_NODE_NAME(node));
 		goto error;
@@ -355,9 +355,19 @@ void
 dahdi_iface_rx(struct dahdi_chan *chan)
 {
 	struct dahdi_iface *iface;
+	int oldreadbuf;
 
 	if ((iface = chan->iface) == NULL)
 		return;
+
+	/* switch buffers */
+	if ((oldreadbuf = chan->inreadbuf) >= 0) {
+		chan->inreadbuf = (chan->inreadbuf + 1) % chan->numbufs;
+		if (chan->inreadbuf == chan->outreadbuf)
+			chan->inreadbuf = -1;		/* no more buffers to receive to */
+		if (chan->outreadbuf < 0)
+			chan->outreadbuf = oldreadbuf;	/* new buffer to read from */
+	}
 
 	taskqueue_enqueue_fast(iface->rx_taskqueue, &iface->rx_task);
 }
@@ -373,38 +383,49 @@ dahdi_iface_rx_task(void *context, int pending)
 	struct dahdi_chan *chan = context;
 	struct dahdi_iface *iface;
 	unsigned long flags;
+	int oldreadbuf;
 
 	if ((iface = chan->iface) == NULL)
 		return;
 
-	/*
-	 * Our network receiver logic is MUCH different.
-	 * We actually only use a single buffer
-	 */
 	spin_lock_irqsave(&chan->lock, flags);
-	if (iface->upper != NULL && chan->readn[chan->inreadbuf] > 1) {
-		struct mbuf *m;
+	while ((oldreadbuf = chan->outreadbuf) >= 0) {
+		struct mbuf *m = NULL;
 
-		/* Drop the FCS */
-		chan->readn[chan->inreadbuf] -= 2;
+		/* read frame */
+		if (iface->upper != NULL && chan->readn[chan->outreadbuf] > 1) {
 
-		MGETHDR(m, M_NOWAIT, MT_DATA);
+			/* Drop the FCS */
+			chan->readn[chan->outreadbuf] -= 2;
+
+			MGETHDR(m, M_NOWAIT, MT_DATA);
+			if (m != NULL) {
+				if (chan->readn[chan->outreadbuf] >= MINCLSIZE) {
+					MCLGET(m, M_NOWAIT);
+				}
+
+				/* copy data */
+				m_append(m, chan->readn[chan->outreadbuf], chan->readbuf[chan->outreadbuf]);
+			}
+		}
+
+		/* switch buffers */
+		chan->readn[chan->outreadbuf] = 0;
+		chan->readidx[chan->outreadbuf] = 0;
+		chan->outreadbuf = (chan->outreadbuf + 1) % chan->numbufs;
+		if (chan->outreadbuf == chan->inreadbuf)
+			chan->outreadbuf = -1;		/* no more buffers to read from */
+		if (chan->inreadbuf < 0)
+			chan->inreadbuf = oldreadbuf;	/* new buffer to read to */
+
 		if (m != NULL) {
 			int error;
 
-			if (chan->readn[chan->inreadbuf] >= MINCLSIZE) {
-				MCLGET(m, M_NOWAIT);
-			}
-
-			/* copy data */
-			m_append(m, chan->readn[chan->inreadbuf], chan->readbuf[chan->inreadbuf]);
+			spin_unlock_irqrestore(&chan->lock, flags);
 			NG_SEND_DATA_ONLY(error, iface->upper, m);
+			spin_lock_irqsave(&chan->lock, flags);
 		}
 	}
-
-	/* We don't cycle through buffers, just reuse the same one */
-	chan->readn[chan->inreadbuf] = 0;
-	chan->readidx[chan->inreadbuf] = 0;
 	spin_unlock_irqrestore(&chan->lock, flags);
 }
 
@@ -565,7 +586,7 @@ ng_dahdi_iface_rcvdata(struct ng_hook *hook, struct ng_item *item)
 	}
 	if (ss->inwritebuf < 0) {
 		/* no space */
-		retval = ENXIO;
+		retval = ENOBUFS;
 		goto out;
 	}
 
