@@ -32,7 +32,7 @@
 #include <sys/mbuf.h>
 #include <sys/linker.h>
 #include <sys/syscallsubr.h>
-#include <net/ppp_defs.h>
+#include <sys/taskqueue.h>
 
 #include <netgraph/ng_message.h>
 #include <netgraph/netgraph.h>
@@ -70,12 +70,46 @@ static struct ng_type ng_dahdi_iface_typestruct = {
 };
 NETGRAPH_INIT(dahdi_iface, &ng_dahdi_iface_typestruct);
 
+static void dahdi_iface_rx_task(void *context, int pending);
+
+/**
+ * iface struct
+ */
 struct dahdi_iface {
-	struct ng_node *node;
-	struct ng_hook *upper;
-	struct dahdi_chan *chan;
-	char path[64];
+	struct dahdi_chan *chan;	/**< dahdi master channel associated with the iface */
+	struct taskqueue *rx_taskqueue;	/**< rx task queue */
+	struct task rx_task;		/**< rx task */
+	struct ng_node *node;		/**< our netgraph node */
+	struct ng_hook *upper;		/**< our upper hook */
+	char path[64];			/**< iface node path */
 };
+
+/**
+ * Create iface struct
+ */
+static struct dahdi_iface *
+dahdi_iface_alloc(struct dahdi_chan *chan)
+{
+	struct dahdi_iface *iface;
+
+	iface = malloc(sizeof(*iface), M_DAHDI, M_WAITOK | M_ZERO);
+	iface->chan = chan;
+	iface->rx_taskqueue = taskqueue_create_fast("dahdi_iface_taskq", M_WAITOK,
+	    taskqueue_thread_enqueue, &iface->rx_taskqueue);
+	taskqueue_start_threads(&iface->rx_taskqueue, 1, PI_NET, "%s taskq", chan->name);
+	TASK_INIT(&iface->rx_task, 0, dahdi_iface_rx_task, chan);
+	return iface;
+}
+
+/**
+ * Free iface struct
+ */
+static void
+dahdi_iface_free(struct dahdi_iface *iface)
+{
+	taskqueue_free(iface->rx_taskqueue);
+	free(iface, M_DAHDI);
+}
 
 /**
  * Ensure that specified netgraph type is available
@@ -164,7 +198,7 @@ int
 dahdi_iface_create(struct dahdi_chan *chan)
 {
 	struct dahdi_iface *iface = NULL;
-	struct ng_node *node = NULL;
+	struct ng_node *node;
 	struct ng_mesg *msg;
 	char node_name[64];
 	int error;
@@ -180,27 +214,31 @@ dahdi_iface_create(struct dahdi_chan *chan)
 	}
 
 	/* create new network device */
-	iface = malloc(sizeof(*iface), M_DAHDI, M_WAITOK | M_ZERO);
-	iface->chan = chan;
+	iface = dahdi_iface_alloc(chan);
+	if (iface == NULL) {
+		printf("dahdi_iface(%s): Error: Failed to create iface struct\n",
+		    node_name);
+		return (0);
+	}
 	chan->iface = iface;
 
 	/* create new DAHDI netgraph node */
 	if (ng_make_node_common(&ng_dahdi_iface_typestruct, &node) != 0) {
-		printf("dahdi_iface(%s): Error: can not create netgraph node\n",
+		printf("dahdi_iface(%s): Error: Failed to create netgraph node\n",
 		    node_name);
 		goto error;
 	}
 	iface->node = node;
 	NG_NODE_SET_PRIVATE(node, iface);
 	if (ng_name_node(node, node_name) != 0) {
-		printf("dahdi_iface(%s): Error: can not set netgraph node name\n",
+		printf("dahdi_iface(%s): Error: Failed to set netgraph node name\n",
 		    node_name);
 		goto error;
 	}
 
 	/* create HDLC encapsulation layer peer node */
 	if (ng_ensure_type(NG_CISCO_NODE_TYPE) < 0) {
-		printf("dahdi_iface(%s): Error: can not load %s netgraph type\n",
+		printf("dahdi_iface(%s): Error: Failed to load %s netgraph type\n",
 		    NG_NODE_NAME(node), NG_CISCO_NODE_TYPE);
 		goto error;
 	}
@@ -219,7 +257,7 @@ dahdi_iface_create(struct dahdi_chan *chan)
 
 	/* create network iface peer node */
 	if (ng_ensure_type(NG_IFACE_NODE_TYPE) < 0) {
-		printf("dahdi_iface(%s): Error: can not load %s netgraph type\n",
+		printf("dahdi_iface(%s): Error: Failed to load %s netgraph type\n",
 		    NG_NODE_NAME(node), NG_IFACE_NODE_TYPE);
 		goto error;
 	}
@@ -269,11 +307,13 @@ dahdi_iface_create(struct dahdi_chan *chan)
 
 error:
 	if (iface != NULL) {
-		dahdi_iface_shutdown_node_path(iface->node, iface->path);
-
-		if (iface->node != NULL)
+		if (iface->node != NULL) {
+			dahdi_iface_shutdown_node_path(iface->node, iface->path);
 			NG_NODE_UNREF(iface->node);
-		free(iface, M_DAHDI);
+			iface->node = NULL;
+		}
+
+		dahdi_iface_free(iface);
 		chan->iface = NULL;
 	}
 	return (-1);
@@ -305,9 +345,11 @@ dahdi_iface_destroy(struct dahdi_chan *chan)
 }
 
 /**
- * Receive data frame from the synchronous line
+ * Enqueues a task to receive the data frame from the synchronous line
  *
- * Receives data frame from the synchronous line and sends it up to the upstream.
+ * It is not possible to send the received data frame from dahdi_receive()
+ * context because it can be run in the filter thread context and mbuf
+ * allocation is not possible because of that.
  */
 void
 dahdi_iface_rx(struct dahdi_chan *chan)
@@ -317,10 +359,29 @@ dahdi_iface_rx(struct dahdi_chan *chan)
 	if ((iface = chan->iface) == NULL)
 		return;
 
+	taskqueue_enqueue_fast(iface->rx_taskqueue, &iface->rx_task);
+}
+
+/**
+ * Receive data frame from the synchronous line
+ *
+ * Receives data frame from the synchronous line and sends it up to the upstream.
+ */
+static void
+dahdi_iface_rx_task(void *context, int pending)
+{
+	struct dahdi_chan *chan = context;
+	struct dahdi_iface *iface;
+	unsigned long flags;
+
+	if ((iface = chan->iface) == NULL)
+		return;
+
 	/*
 	 * Our network receiver logic is MUCH different.
 	 * We actually only use a single buffer
 	 */
+	spin_lock_irqsave(&chan->lock, flags);
 	if (iface->upper != NULL && chan->readn[chan->inreadbuf] > 1) {
 		struct mbuf *m;
 
@@ -337,13 +398,14 @@ dahdi_iface_rx(struct dahdi_chan *chan)
 
 			/* copy data */
 			m_append(m, chan->readn[chan->inreadbuf], chan->readbuf[chan->inreadbuf]);
-			NG_SEND_DATA_FLAGS(error, iface->upper, m, NG_QUEUE);
+			NG_SEND_DATA_ONLY(error, iface->upper, m);
 		}
 	}
 
 	/* We don't cycle through buffers, just reuse the same one */
 	chan->readn[chan->inreadbuf] = 0;
 	chan->readidx[chan->inreadbuf] = 0;
+	spin_unlock_irqrestore(&chan->lock, flags);
 }
 
 /**
@@ -415,7 +477,7 @@ ng_dahdi_iface_shutdown(struct ng_node *node)
 		NG_NODE_UNREF(node);
 
 		/* destroy the iface */
-		free(iface, M_DAHDI);
+		dahdi_iface_free(iface);
 		return (0);
 	}
 
