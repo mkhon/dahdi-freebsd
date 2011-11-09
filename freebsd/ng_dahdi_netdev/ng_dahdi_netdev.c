@@ -159,7 +159,7 @@ static ng_rcvdata_t ng_dahdi_netdev_rcvdata;
 
 static struct ng_type ng_dahdi_netdev_typestruct = {
 	.version =	NG_ABI_VERSION,
-	.name =		"ng_dahdi_netdev",
+	.name =		"dahdi_netdev",
 	.mod_event =	ng_dahdi_netdev_mod_event,
 	.rcvmsg =	ng_dahdi_netdev_rcvmsg,
 	.shutdown =	ng_dahdi_netdev_shutdown,

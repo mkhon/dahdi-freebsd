@@ -61,7 +61,7 @@ static ng_rcvdata_t ng_dahdi_iface_rcvdata;
 
 static struct ng_type ng_dahdi_iface_typestruct = {
 	.version =	NG_ABI_VERSION,
-	.name =		"ng_dahdi_iface",
+	.name =		"dahdi_iface",
 	.rcvmsg =	ng_dahdi_iface_rcvmsg,
 	.shutdown =	ng_dahdi_iface_shutdown,
 	.newhook =	ng_dahdi_iface_newhook,
