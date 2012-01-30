@@ -4132,7 +4132,7 @@ out:
 #endif
 	if (unlikely(test_bit(T4_CHANGE_LATENCY, &wc->checkflag) || test_bit(T4_CHECK_VPM, &wc->checkflag))) {
 #if defined(__FreeBSD__)
-		res |= FILTER_SCHEDULE_THREAD;
+		res = FILTER_SCHEDULE_THREAD;
 #else
 		tasklet_schedule(&wc->t4_tlet);
 #endif

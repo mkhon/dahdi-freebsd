@@ -2598,7 +2598,7 @@ DAHDI_IRQ_HANDLER(b4xxp_interrupt)
 /* kick off bottom-half handler */
 #if 0
 #if defined(__FreeBSD__)
-	return (FILTER_HANDLED | FILTER_SCHEDULE_THREAD);
+	return (FILTER_SCHEDULE_THREAD);
 #else
 	tasklet_hi_schedule(&b4->b4xxp_tlet);
 #endif

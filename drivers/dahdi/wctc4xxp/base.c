@@ -2931,7 +2931,7 @@ DAHDI_IRQ_HANDLER(wctc4xxp_interrupt)
 #if DEFERRED_PROCESSING == WORKQUEUE
 		schedule_work(&wc->deferred_work);
 #elif DEFERRED_PROCESSING == ITHREAD
-		res |= FILTER_SCHEDULE_THREAD;
+		res = FILTER_SCHEDULE_THREAD;
 #elif DEFERRED_PROCESSING == INTERRUPT
 #error "You will need to change the locks if you want to run the processing " \
 		"in the interrupt handler."
