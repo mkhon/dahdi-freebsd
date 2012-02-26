@@ -27,30 +27,22 @@
  * this program for more details.
  */
 
-#if defined(__FreeBSD__)
-#include <sys/param.h>
-#include <sys/bus.h>
-#include <sys/module.h>
-
-#include <vm/uma.h>
-
-#include <dev/pci/pcivar.h>
-
-#define fatal_signal_pending(x)	0
-#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/pci.h>
-#include <linux/proc_fs.h>
 #include <linux/moduleparam.h>
 #include <linux/interrupt.h>
 #include <linux/workqueue.h>
 #include <linux/delay.h>
 #include <linux/sched.h>
-#endif /* !__FreeBSD__ */
+#if defined(__FreeBSD__)
+#include <vm/uma.h>
+#else
+#include <linux/proc_fs.h>
+#endif
 
 #include <stdbool.h>
 #include <dahdi/kernel.h>
@@ -2510,7 +2502,7 @@ te12xp_device_attach(device_t dev)
 static int
 te12xp_device_detach(device_t dev)
 {
-	if (dahdi_module_usecount(THIS_MODULE) > 0)
+	if (_linux_module_usecount(THIS_MODULE) > 0)
 		return (EBUSY);
 
 	te12xp_remove_one(dev);
@@ -2551,7 +2543,7 @@ static driver_t te12xp_pci_driver = {
 
 static devclass_t te12xp_devclass;
 
-DAHDI_DRIVER_MODULE(te12xp, pci, te12xp_pci_driver, te12xp_devclass);
+LINUX_DRIVER_MODULE(te12xp, pci, te12xp_pci_driver, te12xp_devclass);
 MODULE_DEPEND(te12xp, pci, 1, 1, 1);
 MODULE_DEPEND(te12xp, dahdi, 1, 1, 1);
 MODULE_DEPEND(te12xp, dahdi_voicebus, 1, 1, 1);

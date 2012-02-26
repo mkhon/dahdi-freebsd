@@ -23,28 +23,20 @@
  * this program for more details.
  */
 
-#if defined(__FreeBSD__)
-#include <sys/types.h>
-#include <sys/bus.h>
-#include <sys/module.h>
-#include <sys/param.h>
-#include <sys/rman.h>
-
-#include <machine/bus.h>
-#include <dev/pci/pcireg.h>
-#include <dev/pci/pcivar.h>
-
-#define set_current_state(x)
-#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/usb.h>
 #include <linux/errno.h>
 #include <linux/pci.h>
 #include <linux/spinlock.h>
 #include <linux/moduleparam.h>
+#if defined(__FreeBSD__)
+#include <linux/sched.h>	/* linux/usb.h */
+
+#define set_current_state(x)
+#else /* !__FreeBSD__ */
+#include <linux/usb.h>
 #endif /* !__FreeBSD__ */
 
 #include <dahdi/kernel.h>
@@ -193,17 +185,14 @@ struct t1 {
 	int irq_rid;
 	void *irq_handle;
 
-	uint32_t readdma;
 	bus_dma_tag_t   read_dma_tag;
 	bus_dmamap_t    read_dma_map;
 
-	uint32_t writedma;
 	bus_dma_tag_t   write_dma_tag;
 	bus_dmamap_t    write_dma_map;
-#else /* !__FreeBSD__ */
+#endif /* !__FreeBSD__ */
 	dma_addr_t 	readdma;
 	dma_addr_t	writedma;
-#endif /* !__FreeBSD__ */
 	volatile unsigned char *writechunk;					/* Double-word aligned write memory */
 	volatile unsigned char *readchunk;					/* Double-word aligned read memory */
 	unsigned char ec_chunk1[32][DAHDI_CHUNKSIZE];
@@ -1824,7 +1813,7 @@ t1xxp_device_detach(device_t dev)
 {
 	struct t1 *wc = device_get_softc(dev);
 
-	if (dahdi_module_usecount(THIS_MODULE) > 0)
+	if (_linux_module_usecount(THIS_MODULE) > 0)
 		return (EBUSY);
 
 	/* Stop any DMA */
@@ -1863,7 +1852,7 @@ static driver_t t1xxp_pci_driver = {
 
 static devclass_t t1xxp_devclass;
 
-DAHDI_DRIVER_MODULE(t1xxp, pci, t1xxp_pci_driver, t1xxp_devclass);
+LINUX_DRIVER_MODULE(t1xxp, pci, t1xxp_pci_driver, t1xxp_devclass);
 MODULE_DEPEND(t1xxp, pci, 1, 1, 1);
 MODULE_DEPEND(t1xxp, dahdi, 1, 1, 1);
 #else /* !__FreeBSD__ */

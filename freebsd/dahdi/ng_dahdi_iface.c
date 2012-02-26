@@ -33,6 +33,7 @@
 #include <sys/linker.h>
 #include <sys/syscallsubr.h>
 #include <sys/taskqueue.h>
+#include <sys/kernel.h>
 
 #include <netgraph/ng_message.h>
 #include <netgraph/netgraph.h>
@@ -42,6 +43,7 @@
 #include <netgraph/ng_iface.h>
 
 #include <dahdi/kernel.h>
+#include <linux/slab.h>
 
 #include "ng_dahdi_iface.h"
 

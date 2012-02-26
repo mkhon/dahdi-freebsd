@@ -39,8 +39,6 @@
 #include <sys/linker.h>
 #include <sys/syscallsubr.h>
 
-#include <machine/stdarg.h>
-
 #include <netgraph/ng_message.h>
 #include <netgraph/netgraph.h>
 #include <netgraph/ng_ether.h>
@@ -65,6 +63,12 @@ static SLIST_HEAD(, packet_type) packet_types =
 	SLIST_HEAD_INITIALIZER(packet_types);
 
 int shutting_down = 0;
+
+struct dahdi_netdev {
+	struct ng_node *node;           // corresponding netgraph node
+	struct ng_hook *upper;          // hook connected to ether node
+	char dev_addr_buf[ETHER_ADDR_LEN];
+};
 
 static void
 rlprintf(int pps, const char *fmt, ...)
@@ -117,9 +121,10 @@ static void
 netdevice_notify(struct net_device *netdev, unsigned long event)
 {
 	struct notifier_block *block;
+	struct dahdi_netdev *ddev = netdev_priv(netdev);
 
 	printf("dahdi_netdev(%s): interface %s\n",
-	    NG_NODE_NAME(netdev->node),
+	    NG_NODE_NAME(ddev->node),
 	    event == NETDEV_UP ? "up" : "down");
 	SLIST_FOREACH(block, &notifier_blocks, next) {
 		block->notifier_call(block, event, netdev);
@@ -206,6 +211,7 @@ dev_get_by_name(const char *devname)
 {
 	struct ng_node *ether_node = NULL, *node = NULL;
 	struct net_device *netdev = NULL;
+	struct dahdi_netdev *ddev;
 	struct ng_mesg *msg;
 	char node_name[IFNAMSIZ + 8];
 	int error;
@@ -223,7 +229,8 @@ dev_get_by_name(const char *devname)
 	}
 
 	/* create new network device */
-	netdev = malloc(sizeof(*netdev), M_DAHDI_NETDEV, M_WAITOK | M_ZERO);
+	netdev = malloc(sizeof(*netdev) + sizeof(*ddev), M_DAHDI_NETDEV, M_WAITOK | M_ZERO);
+	ddev = netdev_priv(netdev);
 	strlcpy(netdev->name, devname, sizeof(netdev->name));
 
 	/* create new DAHDI netgraph node */
@@ -232,7 +239,7 @@ dev_get_by_name(const char *devname)
 		    node_name);
 		goto error;
 	}
-	netdev->node = node;
+	ddev->node = node;
 	NG_NODE_SET_PRIVATE(node, netdev);
 	if (ng_name_node(node, node_name) != 0) {
 		printf("dahdi_netdev(%s): Error: can not set netgraph node name\n",
@@ -297,11 +304,14 @@ error:
 void
 dev_put(struct net_device *netdev)
 {
+	struct dahdi_netdev *ddev;
+
 	if (netdev == NULL)
 		return;
 
-	NG_NODE_REALLY_DIE(netdev->node);	/* Force real removal of node */
-	ng_rmnode_self(netdev->node);		/* remove all netgraph parts */
+	ddev = netdev_priv(netdev);
+	NG_NODE_REALLY_DIE(ddev->node);		/* Force real removal of node */
+	ng_rmnode_self(ddev->node);		/* remove all netgraph parts */
 }
 
 /**
@@ -313,10 +323,11 @@ void
 dev_xmit(struct net_device *netdev, struct mbuf *m)
 {
 	int error;
+	struct dahdi_netdev *ddev = netdev_priv(netdev);
 
-	if (netdev->upper == NULL)
+	if (ddev->upper == NULL)
 		return;
-	NG_SEND_DATA_ONLY(error, netdev->upper, m);
+	NG_SEND_DATA_ONLY(error, ddev->upper, m);
 }
 
 static int
@@ -369,6 +380,7 @@ static int
 ng_dahdi_netdev_rcvmsg(struct ng_node *node, struct ng_item *item, struct ng_hook *lasthook)
 {
 	struct net_device *netdev = NG_NODE_PRIVATE(node);
+	struct dahdi_netdev *ddev = netdev_priv(netdev);
 	struct ng_mesg *msg, *resp = NULL;
 	int error = 0;
 
@@ -377,7 +389,8 @@ ng_dahdi_netdev_rcvmsg(struct ng_node *node, struct ng_item *item, struct ng_hoo
 	case NGM_ETHER_COOKIE:
 		switch (msg->header.cmd) {
 		case NGM_ETHER_GET_ENADDR:
-			bcopy(msg->data, netdev->dev_addr, sizeof(netdev->dev_addr));
+			bcopy(msg->data, ddev->dev_addr_buf, sizeof(ddev->dev_addr_buf));
+			netdev->dev_addr = ddev->dev_addr_buf;
 			printf("dahdi_netdev(%s): ether %*D\n",
 			    NG_NODE_NAME(node),
 			    (int) sizeof(netdev->dev_addr), netdev->dev_addr, ":");
@@ -440,10 +453,11 @@ static int
 ng_dahdi_netdev_newhook(struct ng_node *node, struct ng_hook *hook, const char *name)
 {
 	struct net_device *netdev = NG_NODE_PRIVATE(node);
+	struct dahdi_netdev *ddev = netdev_priv(netdev);
 	struct ng_hook **hookptr;
 
 	if (strcmp(name, DAHDI_NETDEV_HOOK_UPPER) == 0) {
-		hookptr = &netdev->upper;
+		hookptr = &ddev->upper;
 	} else {
 		printf("dahdi_netdev(%s): Error: unsupported hook %s\n",
 		    NG_NODE_NAME(node), name);
@@ -468,9 +482,10 @@ ng_dahdi_netdev_disconnect(struct ng_hook *hook)
 {
 	struct ng_node *node = NG_HOOK_NODE(hook);
 	struct net_device *netdev = NG_NODE_PRIVATE(node);
+	struct dahdi_netdev *ddev = netdev_priv(netdev);
 
-	if (hook == netdev->upper) {
-		netdev->upper = NULL;
+	if (hook == ddev->upper) {
+		ddev->upper = NULL;
 	} else {
 		panic("dahdi_netdev(%s): %s: weird hook", NG_NODE_NAME(node), __func__);
 	}

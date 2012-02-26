@@ -35,12 +35,8 @@
 #ifndef _DAHDI_USER_H
 #define _DAHDI_USER_H
 
-#if defined(__FreeBSD__)
-#include <dahdi/compat/types.h>
-#else
 #include <linux/types.h>
 #include <linux/ioctl.h>
-#endif /* !__FreeBSD__ */
 
 #if !defined(__FreeBSD__) && !defined(ELAST)
 #define ELAST 500

@@ -22,17 +22,6 @@
  * this program for more details.
  */
 
-#if defined(__FreeBSD__)
-#include <sys/types.h>
-#include <sys/param.h>
-#include <sys/conf.h>
-#include <sys/ioccom.h>
-#include <sys/lock.h>
-#include <sys/module.h>
-#include <sys/mutex.h>
-#include <sys/sysctl.h>
-#include <sys/systm.h>
-#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -43,7 +32,6 @@
 #include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/moduleparam.h>
-#endif /* !__FreeBSD__ */
 
 #include <dahdi/kernel.h>
 
@@ -1006,7 +994,7 @@ SYSCTL_NODE(_dahdi, OID_AUTO, dynamic, CTLFLAG_RW, 0, "DAHDI Dynamic Span Suppor
 #define MODULE_PARAM_PREFIX "dahdi.dynamic"
 #define MODULE_PARAM_PARENT _dahdi_dynamic
 
-DAHDI_DEV_MODULE(dahdi_dynamic);
+LINUX_DEV_MODULE(dahdi_dynamic);
 MODULE_VERSION(dahdi_dynamic, 1);
 MODULE_DEPEND(dahdi_dynamic, dahdi, 1, 1, 1);
 #endif /* __FreeBSD__ */

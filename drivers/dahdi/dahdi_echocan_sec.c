@@ -36,14 +36,6 @@
    Improve double talk detector (iterative!)
 */
 
-#if defined(__FreeBSD__)
-#include <sys/param.h>
-#include <sys/types.h>
-#include <sys/conf.h>
-#include <sys/ctype.h>
-#include <sys/libkern.h>
-#include <sys/module.h>
-#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
@@ -51,7 +43,6 @@
 #include <linux/init.h>
 #include <linux/ctype.h>
 #include <linux/moduleparam.h>
-#endif /* !__FreeBSD__ */
 
 #include <dahdi/kernel.h>
 
@@ -360,7 +351,7 @@ SYSCTL_NODE(_dahdi_echocan, OID_AUTO, sec, CTLFLAG_RW, 0, "DAHDI 'SEC' Echo Canc
 #define MODULE_PARAM_PREFIX "dahdi.echocan.sec"
 #define MODULE_PARAM_PARENT _dahdi_echocan_sec
 
-DAHDI_DEV_MODULE(dahdi_echocan_sec);
+LINUX_DEV_MODULE(dahdi_echocan_sec);
 MODULE_VERSION(dahdi_echocan_sec, 1);
 MODULE_DEPEND(dahdi_echocan_sec, dahdi, 1, 1, 1);
 #endif /* __FreeBSD__ */

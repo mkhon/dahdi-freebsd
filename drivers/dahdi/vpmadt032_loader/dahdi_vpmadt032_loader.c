@@ -17,17 +17,6 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-#if defined(__FreeBSD__)
-#include <sys/param.h>
-#include <sys/types.h>
-#include <sys/conf.h>
-#include <sys/module.h>
-#include <sys/bus.h>
-
-#include <dev/pci/pcivar.h>
-
-#include <machine/stdarg.h>
-#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -35,7 +24,6 @@
 #include <linux/ctype.h>
 #include <linux/moduleparam.h>
 #include <linux/pci.h>
-#endif /* !__FreeBSD__ */
 
 #include <dahdi/kernel.h>
 
@@ -189,7 +177,7 @@ SYSCTL_NODE(_dahdi, OID_AUTO, vpmadt032_loader, CTLFLAG_RW, 0, "DAHDI VPMADT032 
 #define MODULE_PARAM_PREFIX "dahdi.vpmadt032_loader"
 #define MODULE_PARAM_PARENT _dahdi_vpmadt032_loader
 
-DAHDI_DEV_MODULE(dahdi_vpmadt032_loader);
+LINUX_DEV_MODULE(dahdi_vpmadt032_loader);
 MODULE_VERSION(dahdi_vpmadt032_loader, 1);
 MODULE_DEPEND(dahdi_vpmadt032_loader, dahdi, 1, 1, 1);
 MODULE_DEPEND(dahdi_vpmadt032_loader, dahdi_voicebus, 1, 1, 1);

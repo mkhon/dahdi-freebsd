@@ -28,18 +28,6 @@
  * this program for more details.
  */
 
-#if defined(__FreeBSD__)
-#include <sys/types.h>
-#include <sys/bus.h>
-#include <sys/module.h>
-#include <sys/param.h>
-#include <sys/rman.h>
-#include <sys/systm.h>
-
-#include <machine/bus.h>
-#include <dev/pci/pcireg.h>
-#include <dev/pci/pcivar.h>
-#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -48,18 +36,18 @@
 #include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/spinlock.h>
-#include <asm/io.h>
 #include <linux/version.h>
 #include <linux/delay.h>
 #include <linux/moduleparam.h>
-#endif /* !__FreeBSD__ */
+#if !defined(__FreeBSD__)
+#include <asm/io.h>
+#endif
 
 #include <dahdi/kernel.h>
 
 #include "wct4xxp.h"
 #include "vpm450m.h"
 
-#if !defined(__FreeBSD__)
 /* Work queues are a way to better distribute load on SMP systems */
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20))
 /*
@@ -69,7 +57,6 @@
  */
 /* #define ENABLE_WORKQUEUES */
 #endif
-#endif /* !__FreeBSD__ */
 
 /* Enable prefetching may help performance */
 #define ENABLE_PREFETCH
@@ -384,20 +371,18 @@ struct t4 {
 	int irq_rid;
 	void *irq_handle;
 
-	uint32_t readdma;
 	bus_dma_tag_t   read_dma_tag;
 	bus_dmamap_t    read_dma_map;
 
-	uint32_t writedma;
 	bus_dma_tag_t   write_dma_tag;
 	bus_dmamap_t    write_dma_map;
 #else /* !__FreeBSD__ */
-	dma_addr_t 	readdma;
-	dma_addr_t	writedma;
 	unsigned long memaddr;		/* Base address of card */
 	unsigned long memlen;
 	__iomem volatile unsigned int *membase;	/* Base address of card */
 #endif /* !__FreeBSD__ */
+	dma_addr_t 	readdma;
+	dma_addr_t	writedma;
 
 	/* Add this for our softlockup protector */
 	unsigned int oct_rw_count;
@@ -3750,12 +3735,12 @@ static int t4_allocate_buffers(struct t4 *wc, int numbufs)
 	int res;
 
 	void *readchunk;
-	uint32_t readdma;
+	dma_addr_t readdma;
 	bus_dma_tag_t   read_dma_tag;
 	bus_dmamap_t    read_dma_map;
 
 	void *writechunk;
-	uint32_t writedma;
+	dma_addr_t writedma;
 	bus_dma_tag_t   write_dma_tag;
 	bus_dmamap_t    write_dma_map;
 
@@ -3823,12 +3808,12 @@ static void t4_increase_latency(struct t4 *wc, int newlatency)
 	unsigned long flags;
 #if defined(__FreeBSD__)
 	void *readchunk;
-	uint32_t readdma;
+	dma_addr_t readdma;
 	bus_dma_tag_t   read_dma_tag;
 	bus_dmamap_t    read_dma_map;
 
 	void *writechunk;
-	uint32_t writedma;
+	dma_addr_t writedma;
 	bus_dma_tag_t   write_dma_tag;
 	bus_dmamap_t    write_dma_map;
 #else /* !__FreeBSD__ */
@@ -5107,7 +5092,7 @@ t4_device_detach(device_t dev)
 {
 	struct t4 *wc = device_get_softc(dev);
 
-	if (dahdi_module_usecount(THIS_MODULE) > 0)
+	if (_linux_module_usecount(THIS_MODULE) > 0)
 		return (EBUSY);
 
 	/* unregister */
@@ -5135,7 +5120,7 @@ static driver_t t4_pci_driver = {
 
 static devclass_t t4_devclass;
 
-DAHDI_DRIVER_MODULE(wct4xxp, pci, t4_pci_driver, t4_devclass);
+LINUX_DRIVER_MODULE(wct4xxp, pci, t4_pci_driver, t4_devclass);
 MODULE_DEPEND(wct4xxp, pci, 1, 1, 1);
 MODULE_DEPEND(wct4xxp, dahdi, 1, 1, 1);
 MODULE_DEPEND(wct4xxp, firmware, 1, 1, 1);

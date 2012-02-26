@@ -29,12 +29,7 @@
 #ifndef __VOICEBUS_H__
 #define __VOICEBUS_H__
 
-#if defined(__FreeBSD__)
-#include <machine/bus.h>
-#else
 #include <linux/interrupt.h>
-#endif /* __FreeBSD__ */
-
 
 #ifdef VOICEBUS_NET_DEBUG
 #include <linux/netdevice.h>
@@ -109,10 +104,8 @@ struct voicebus_descriptor_list {
 #if defined(__FreeBSD__)
 	bus_dma_tag_t	dma_tag;
 	bus_dmamap_t	dma_map;
-	uint32_t	desc_dma;
-#else
-	dma_addr_t	desc_dma;
 #endif
+	dma_addr_t	desc_dma;
 	atomic_t 	count;
 	unsigned int	padding;
 };
@@ -168,10 +161,8 @@ struct voicebus {
 #if defined(__FreeBSD__)
 	bus_dma_tag_t		idle_vbb_dma_tag;
 	bus_dmamap_t		idle_vbb_dma_map;
-	uint32_t		idle_vbb_dma_addr;
-#else
-	dma_addr_t		idle_vbb_dma_addr;
 #endif
+	dma_addr_t		idle_vbb_dma_addr;
 	const int		*debug;
 	struct tasklet_struct 	tasklet;
 	enum voicebus_mode	mode;

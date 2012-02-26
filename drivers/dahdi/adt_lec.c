@@ -25,11 +25,7 @@
 #ifndef _ADT_LEC_C
 #define _ADT_LEC_C
 
-#if defined(__FreeBSD__)
-#include <sys/ctype.h>
-#else /* !__FreeBSD__ */
 #include <linux/ctype.h>
-#endif /* !__FreeBSD__ */
 
 static inline void adt_lec_init_defaults(struct adt_lec_params *params, __u32 tap_length)
 {

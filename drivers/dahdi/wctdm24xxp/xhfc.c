@@ -20,17 +20,10 @@
  * this program for more details.
  */
 
-#if defined(__FreeBSD__)
-#include <sys/types.h>
-#include <sys/bus.h>
-
-#include <net/ppp_defs.h>
-#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/pci.h>
 #include <linux/ppp_defs.h>
 #include <linux/delay.h>
-#endif /* !__FreeBSD__ */
 
 #define FAST_HDLC_NEED_TABLES
 #include <dahdi/kernel.h>

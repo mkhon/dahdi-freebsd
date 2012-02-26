@@ -22,14 +22,6 @@
  * this program for more details.
  */
 
-#if defined(__FreeBSD__)
-#include <sys/types.h>
-#include <sys/param.h>
-#include <sys/conf.h>
-#include <sys/module.h>
-
-#include "ng_dahdi_netdev.h"
-#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -38,10 +30,15 @@
 #include <linux/slab.h>
 #include <linux/kmod.h>
 #include <linux/netdevice.h>
+#if !defined(__FreeBSD__)
 #include <linux/notifier.h>
-#endif /* !__FreeBSD__ */
+#endif
 
 #include <dahdi/kernel.h>
+
+#if defined(__FreeBSD__)
+#include "ng_dahdi_netdev.h"
+#endif
 
 #define ETH_P_DAHDI_DETH	0xd00d
 
@@ -500,7 +497,7 @@ static void __exit ztdeth_exit(void)
 }
 
 #if defined(__FreeBSD__)
-DAHDI_DEV_MODULE(dahdi_dynamic_eth);
+LINUX_DEV_MODULE(dahdi_dynamic_eth);
 MODULE_VERSION(dahdi_dynamic_eth, 1);
 MODULE_DEPEND(dahdi_dynamic_eth, dahdi, 1, 1, 1);
 MODULE_DEPEND(dahdi_dynamic_eth, dahdi_dynamic, 1, 1, 1);

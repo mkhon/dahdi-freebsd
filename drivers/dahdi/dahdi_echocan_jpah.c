@@ -26,14 +26,6 @@
  * this program for more details.
  */
 
-#if defined(__FreeBSD__)
-#include <sys/param.h>
-#include <sys/types.h>
-#include <sys/conf.h>
-#include <sys/ctype.h>
-#include <sys/libkern.h>
-#include <sys/module.h>
-#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
@@ -41,7 +33,6 @@
 #include <linux/init.h>
 #include <linux/ctype.h>
 #include <linux/moduleparam.h>
-#endif /* !__FreeBSD__ */
 
 #include <dahdi/kernel.h>
 
@@ -149,7 +140,7 @@ SYSCTL_NODE(_dahdi_echocan, OID_AUTO, jpah, CTLFLAG_RW, 0, "DAHDI 'JPAH' Echo Ca
 #define MODULE_PARAM_PREFIX "dahdi.echocan.jpah"
 #define MODULE_PARAM_PARENT _dahdi_echocan_jpah
 
-DAHDI_DEV_MODULE(dahdi_echocan_jpah);
+LINUX_DEV_MODULE(dahdi_echocan_jpah);
 MODULE_VERSION(dahdi_echocan_jpah, 1);
 MODULE_DEPEND(dahdi_echocan_jpah, dahdi, 1, 1, 1);
 #endif

@@ -21,31 +21,15 @@
  */
 
 #if defined(__FreeBSD__)
-#include <sys/types.h>
-#include <sys/bus.h>
-#include <sys/module.h>
-#include <sys/param.h>
-#include <sys/queue.h>
-#include <sys/rman.h>
-#include <sys/systm.h>
-
-#include <machine/bus.h>
-#include <dev/pci/pcireg.h>
-#include <dev/pci/pcivar.h>
-
-#ifdef mb
-#undef mb
-#endif
-#define mb()
-
-#ifdef wmb
-#undef wmb
-#endif
-#define wmb()
-
 #define mmiowb()
 #else /* !__FreeBSD__ */
 #include <linux/autoconf.h>
+#include <linux/cdev.h>
+#include <linux/proc_fs.h>
+#include <asm/io.h>
+#include <asm/system.h>		/* cli(), *_flags */
+#include <asm/uaccess.h>	/* copy_*_user */
+#endif /* !__FreeBSD__ */
 #include <linux/init.h>
 
 #include <linux/kernel.h>	/* printk() */
@@ -54,20 +38,14 @@
 #include <linux/types.h>	/* size_t */
 #include <linux/fcntl.h>	/* O_ACCMODE */
 #include <linux/fs.h>
-#include <linux/cdev.h>
 #include <linux/pci.h>		/* for PCI structures */
 #include <linux/delay.h>
-#include <asm/io.h>
 #include <linux/spinlock.h>
 #include <linux/device.h>	/* dev_err() */
 #include <linux/interrupt.h>
-#include <asm/system.h>		/* cli(), *_flags */
-#include <asm/uaccess.h>	/* copy_*_user */
 #include <linux/workqueue.h>	/* work_struct */
 #include <linux/timer.h>	/* timer_struct */
 #include <linux/moduleparam.h>
-#include <linux/proc_fs.h>
-#endif /* !__FreeBSD__ */
 
 #include <dahdi/kernel.h>
 
@@ -3146,7 +3124,7 @@ b4xxp_device_detach(device_t dev)
 {
 	struct b4xxp *b4 = device_get_softc(dev);
 
-	if (dahdi_module_usecount(THIS_MODULE) > 0)
+	if (_linux_module_usecount(THIS_MODULE) > 0)
 		return (EBUSY);
 
 	/* unregister */
@@ -3173,7 +3151,7 @@ static driver_t b4xxp_pci_driver = {
 
 static devclass_t b4xxp_devclass;
 
-DAHDI_DRIVER_MODULE(wcb4xxp, pci, b4xxp_pci_driver, b4xxp_devclass);
+LINUX_DRIVER_MODULE(wcb4xxp, pci, b4xxp_pci_driver, b4xxp_devclass);
 MODULE_DEPEND(wcb4xxp, pci, 1, 1, 1);
 MODULE_DEPEND(wcb4xxp, dahdi, 1, 1, 1);
 

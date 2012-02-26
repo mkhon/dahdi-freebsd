@@ -23,12 +23,7 @@
 #ifndef _VPM450M_H
 #define _VPM450M_H
 
-#if defined(__FreeBSD__)
-#include <sys/types.h>
-#include <sys/firmware.h>
-#else
 #include <linux/firmware.h>
-#endif
 
 struct vpm450m;
 

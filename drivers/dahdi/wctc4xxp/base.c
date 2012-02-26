@@ -19,20 +19,6 @@
  * this program for more details.
  */
 
-#if defined(__FreeBSD__)
-#include <sys/types.h>
-#include <sys/bus.h>
-#include <sys/fcntl.h>
-#include <sys/firmware.h>
-#include <sys/module.h>
-#include <sys/rman.h>
-
-#include <dev/pci/pcivar.h>
-#include <dev/pci/pcireg.h>
-#include <machine/resource.h>
-#include <net/ethernet.h>
-#include <vm/uma.h>
-#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -46,11 +32,14 @@
 #include <linux/jiffies.h>
 #include <linux/moduleparam.h>
 #include <linux/firmware.h>
+#include <linux/timer.h>
 #include <linux/if_ether.h>
+#if defined(__FreeBSD__)
+#include <vm/uma.h>
+#else /* !__FreeBSD__ */
 #include <linux/ip.h>
 #include <linux/udp.h>
 #include <linux/etherdevice.h>
-#include <linux/timer.h>
 #endif /* !__FreeBSD__ */
 
 #include <stdbool.h>
@@ -58,11 +47,6 @@
 #include "dahdi/kernel.h"
 
 #if defined(__FreeBSD__)
-#ifdef wmb
-#undef wmb
-#endif
-#define wmb()
-
 #define DMA_FROM_DEVICE	0
 #define DMA_TO_DEVICE	1
 
@@ -1027,14 +1011,12 @@ struct wctc4xxp_descriptor_ring {
 #if defined(__FreeBSD__)
 	bus_dma_tag_t   dma_tag;
 	bus_dmamap_t    dma_map;
-	uint32_t        desc_dma;
 
 	bus_dma_tag_t	tcb_dma_tag;
 	bus_dmamap_t	tcb_dma_map[DRING_SIZE];
-#else /* !__FreeBSD__ */
+#endif /* !__FreeBSD__ */
 	/* PCI Bus address of the descriptor list. */
 	dma_addr_t	desc_dma;
-#endif /* !__FreeBSD__ */
 	/*! either DMA_FROM_DEVICE or DMA_TO_DEVICE */
 	unsigned int 	direction;
 	/*! The number of buffers currently submitted to the hardware. */
@@ -4232,7 +4214,7 @@ wctc4xxp_device_attach(device_t dev)
 static int
 wctc4xxp_device_detach(device_t dev)
 {
-	if (dahdi_module_usecount(THIS_MODULE) > 0)
+	if (_linux_module_usecount(THIS_MODULE) > 0)
 		return (EBUSY);
 
 	wctc4xxp_remove_one(dev);
@@ -4254,7 +4236,7 @@ static driver_t wctc4xxp_pci_driver = {
 
 static devclass_t wctc4xxp_devclass;
 
-DAHDI_DRIVER_MODULE(wctc4xxp, pci, wctc4xxp_pci_driver, wctc4xxp_devclass);
+LINUX_DRIVER_MODULE(wctc4xxp, pci, wctc4xxp_pci_driver, wctc4xxp_devclass);
 MODULE_DEPEND(wctc4xxp, dahdi, 1, 1, 1);
 MODULE_DEPEND(wctc4xxp, dahdi_transcode, 1, 1, 1);
 #else /* !__FreeBSD__ */

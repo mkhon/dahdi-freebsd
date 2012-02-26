@@ -22,10 +22,6 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
  */
 
-#if defined(__FreeBSD__)
-#include <sys/types.h>
-#include <sys/module.h>
-#else
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
@@ -33,7 +29,6 @@
 #include <linux/init.h>
 #include <linux/ctype.h>
 #include <linux/moduleparam.h>
-#endif /* !__FreeBSD__ */
 
 /* Fix this if OSLEC is elsewhere */
 #include "../staging/echo/oslec.h"

@@ -36,14 +36,6 @@
 #ifndef _GPAKCUST_H  /* prevent multiple inclusion */
 #define _GPAKCUST_H
 
-#if defined(__FreeBSD__)
-#include <sys/types.h>
-#include <sys/systm.h>
-
-#include <dahdi/compat/types.h>
-#include <dahdi/compat/list.h>
-#include <dahdi/compat/bsd.h>
-#else /* !__FreeBSD__ */
 #include <linux/device.h>
 #include <linux/completion.h>
 #include <linux/workqueue.h>
@@ -53,7 +45,6 @@
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 25)
 #include <linux/semaphore.h>
 #endif
-#endif /* !__FreeBSD__ */
 
 #include "gpakenum.h"
 #include "adt_lec.h"

@@ -28,14 +28,12 @@
 
 #include <dahdi/kernel.h>
 
-#if !defined(__FreeBSD__)
 #include <linux/version.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,26)
 #include <linux/semaphore.h>
 #else
 #include <asm/semaphore.h>
 #endif
-#endif /* !__FreeBSD__ */
 
 #include "voicebus/voicebus.h"
 

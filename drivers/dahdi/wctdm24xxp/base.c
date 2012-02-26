@@ -37,16 +37,6 @@ Tx Gain - No Pre-Emphasis: -35.99 to 12.00 db
 Tx Gain - W/Pre-Emphasis: -23.99 to 0.00 db
 */
 
-#if defined(__FreeBSD__)
-#include <sys/types.h>
-#include <sys/bus.h>
-#include <sys/firmware.h>
-#include <sys/module.h>
-
-#include <dev/pci/pcivar.h>
-
-#define fatal_signal_pending(c) 0
-#else /* !__FreeBSD__ */
 #include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -65,6 +55,9 @@ Tx Gain - W/Pre-Emphasis: -23.99 to 0.00 db
 #else
 #include <asm/semaphore.h>
 #endif
+#if defined(__FreeBSD__)
+#define fatal_signal_pending(x)	0
+#else /* !__FreeBSD__ */
 #include <linux/crc32.h>
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 30)
@@ -5470,7 +5463,7 @@ wctdm_device_attach(device_t dev)
 static int
 wctdm_device_detach(device_t dev)
 {
-	if (dahdi_module_usecount(THIS_MODULE) > 0)
+	if (_linux_module_usecount(THIS_MODULE) > 0)
 		return (EBUSY);
 
 	wctdm_remove_one(dev);
@@ -5492,7 +5485,7 @@ static driver_t wctdm_pci_driver = {
 
 static devclass_t wctdm_devclass;
 
-DAHDI_DRIVER_MODULE(wctdm24xxp, pci, wctdm_pci_driver, wctdm_devclass);
+LINUX_DRIVER_MODULE(wctdm24xxp, pci, wctdm_pci_driver, wctdm_devclass);
 MODULE_DEPEND(wctdm24xxp, pci, 1, 1, 1);
 MODULE_DEPEND(wctdm24xxp, dahdi, 1, 1, 1);
 MODULE_DEPEND(wctdm24xxp, dahdi_voicebus, 1, 1, 1);

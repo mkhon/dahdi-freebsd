@@ -19,31 +19,25 @@
  * this program for more details.
  */
 
-#if defined(__FreeBSD__)
-#include <sys/types.h>
-#include <sys/libkern.h>
-#include <sys/time.h>
-
-#include <dahdi/compat/bsd.h>
-#else
 #include <linux/slab.h>
-#include <linux/vmalloc.h>
 #include <linux/string.h>
-#include <linux/time.h>
 #include <linux/version.h>
-#endif /* !__FreeBSD__ */
 
 #include "vpm450m.h"
 #include "oct6100api/oct6100_api.h"
 
 #if defined(__FreeBSD__)
+#include <linux/kernel.h>	/* linux/time.h */
+
 #define vmalloc(size) kmalloc(size, 0)
 #define vfree(p) kfree(p)
-#else
+#else /* !__FreeBSD__ */
+#include <linux/time.h>
+#include <linux/vmalloc.h>
+#endif /* !__FreeBSD__ */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,18)
 #include <linux/config.h>
 #endif
-#endif /* !__FreeBSD__ */
 
 /* API for Octasic access */
 UINT32 Oct6100UserGetTime(tPOCT6100_GET_TIME f_pTime)

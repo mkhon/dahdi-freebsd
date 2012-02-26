@@ -3,11 +3,11 @@
 .PATH: ${.CURDIR}/../../drivers/dahdi
 
 KMOD=		dahdi
-SRCS=		dahdi-base.c ng_dahdi_iface.c
+SRCS=		dahdi-base.c dahdi-bsd.c ng_dahdi_iface.c
 SRCS+=		bsd-compat.c
 SRCS+=		version.h
 SRCS+=		device_if.h bus_if.h pci_if.h
-CLEANFILES=	version.h
+CLEANFILES=	version.h dahdi
 CFLAGS+=	-I${.CURDIR}
 INCS=		user.h wctdm_user.h compat/types.h
 
@@ -16,6 +16,7 @@ version.h::
 	@DAHDIVERSION="${DAHDIVERSION}" ${.CURDIR}/../../build_tools/make_version_h >${.TARGET}.tmp
 	@if ! cmp -s ${.TARGET}.tmp ${.TARGET}; then echo "Updating ${.TARGET}"; mv ${.TARGET}.tmp ${.TARGET}; fi
 	@rm -f ${.TARGET}.tmp
+	@[ -e dahdi ] || ln -sf . dahdi
 
 afterinstall: install-headers
 

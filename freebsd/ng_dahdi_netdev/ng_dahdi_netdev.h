@@ -34,6 +34,8 @@
 #include <net/if.h>
 #include <net/ethernet.h>
 
+#include <linux/netdevice.h>
+
 /**
  * Notifier network device events
  */
@@ -59,16 +61,6 @@ int register_netdevice_notifier(struct notifier_block *block);
  * Unregister notifier
  */
 int unregister_netdevice_notifier(struct notifier_block *block);
-
-/**
- * Network device
- */
-struct net_device {
-	char name[IFNAMSIZ];		// interface name
-	u_char dev_addr[ETHER_ADDR_LEN];// interface ethernet address
-	struct ng_node *node;		// corresponding netgraph node
-	struct ng_hook *upper;		// hook connected to ether node
-};
 
 /**
  * Packet type descriptor

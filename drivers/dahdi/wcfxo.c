@@ -23,29 +23,21 @@
  * this program for more details.
  */
 
-#if defined(__FreeBSD__)
-#include <sys/types.h>
-#include <sys/bus.h>
-#include <sys/module.h>
-#include <sys/param.h>
-#include <sys/rman.h>
-
-#include <machine/bus.h>
-#include <dev/pci/pcireg.h>
-#include <dev/pci/pcivar.h>
-
-#define set_current_state(x)
-#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/usb.h>
 #include <linux/errno.h>
 #include <linux/pci.h>
-#include <asm/io.h>
 #include <linux/moduleparam.h>
-#endif /* !__FreeBSD__ */
+#if defined(__FreeBSD__)
+#include <linux/sched.h>	/* linux/usb.h */
+
+#define set_current_state(x)
+#else
+#include <linux/usb.h>
+#include <asm/io.h>
+#endif
 
 #include <dahdi/kernel.h>
 
@@ -195,18 +187,16 @@ struct wcfxo {
 	int irq_rid;
 	void *irq_handle;
 
-	uint32_t readdma;
 	bus_dma_tag_t   read_dma_tag;
 	bus_dmamap_t    read_dma_map;
 
-	uint32_t writedma;
 	bus_dma_tag_t   write_dma_tag;
 	bus_dmamap_t    write_dma_map;
 #else /* !__FreeBSD__ */
 	unsigned long ioaddr;
+#endif /* !__FreeBSD__ */
 	dma_addr_t 	readdma;
 	dma_addr_t	writedma;
-#endif /* !__FreeBSD__ */
 	volatile int *writechunk;					/* Double-word aligned write memory */
 	volatile int *readchunk;					/* Double-word aligned read memory */
 #ifdef ZERO_BATT_RING
@@ -1299,7 +1289,7 @@ wcfxo_device_detach(device_t dev)
 {
 	struct wcfxo *wc = device_get_softc(dev);
 
-	if (dahdi_module_usecount(THIS_MODULE) > 0)
+	if (_linux_module_usecount(THIS_MODULE) > 0)
 		return (EBUSY);
 
 	/* Stop any DMA */
@@ -1336,7 +1326,7 @@ static driver_t wcfxo_pci_driver = {
 
 static devclass_t wcfxo_devclass;
 
-DAHDI_DRIVER_MODULE(wcfxo, pci, wcfxo_pci_driver, wcfxo_devclass);
+LINUX_DRIVER_MODULE(wcfxo, pci, wcfxo_pci_driver, wcfxo_devclass);
 MODULE_DEPEND(wcfxo, pci, 1, 1, 1);
 MODULE_DEPEND(wcfxo, dahdi, 1, 1, 1);
 #else /* !__FreeBSD__ */

@@ -30,10 +30,6 @@
  * this program for more details.
  */
 
-#if defined(__FreeBSD__)
-#include <sys/types.h>
-#include <sys/bus.h>
-#else /* !__FreeBSD__ */
 #include <linux/version.h>
 #include <linux/types.h>
 #include <linux/pci.h>
@@ -42,7 +38,6 @@
 #else
 #include <asm/semaphore.h>
 #endif
-#endif /* !__FreeBSD__ */
 
 #include <dahdi/kernel.h>
 #include <dahdi/user.h>

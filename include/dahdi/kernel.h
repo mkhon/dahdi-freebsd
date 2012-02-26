@@ -37,18 +37,6 @@
 #include <dahdi/fasthdlc.h>
 #include <dahdi/dahdi_config.h>
 
-#if defined(__FreeBSD__)
-#include <sys/param.h>
-#include <sys/kernel.h>
-#include <sys/selinfo.h>
-#include <sys/taskqueue.h>
-#include <sys/uio.h>
-#include <sys/libkern.h>
-
-#include <dahdi/compat/types.h>
-#include <dahdi/compat/list.h>
-#include <dahdi/compat/bsd.h>
-#else /* !__FreeBSD */
 #include <linux/version.h>
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,18)
 #include <linux/config.h>
@@ -74,7 +62,9 @@
 #define dahdi_pci_module pci_module_init
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
+#if defined(__FreeBSD__)
+#define DAHDI_IRQ_HANDLER(a) static int a(void *dev_id)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
 #define DAHDI_IRQ_HANDLER(a) static irqreturn_t a(int irq, void *dev_id)
 #else
 #define DAHDI_IRQ_HANDLER(a) static irqreturn_t a(int irq, void *dev_id, struct pt_regs *regs)
@@ -103,6 +93,40 @@
 	snprintf((dev)->bus_id, BUS_ID_SIZE, format, ## __VA_ARGS__);
 #endif
 
+#if defined(__FreeBSD__)
+#include <sys/malloc.h>
+#include <sys/module.h>
+#include <sys/selinfo.h>
+#include <sys/sysctl.h>
+#include <sys/taskqueue.h>
+
+#define dahdi_pci_get_bus(pci_dev)	pci_get_bus((pci_dev)->dev)
+#define dahdi_pci_get_slot(pci_dev)	pci_get_slot((pci_dev)->dev)
+#define dahdi_pci_get_irq(pci_dev)	pci_get_irq((pci_dev)->dev)
+#define dahdi_pci_get_device(pci_dev)	pci_get_device((pci_dev)->dev)
+#define dahdi_pci_get_vendor(pci_dev)	pci_get_vendor((pci_dev)->dev)
+
+void
+dahdi_dma_map_addr(void *arg, bus_dma_segment_t *segs, int nseg, int error);
+
+int
+dahdi_dma_allocate(device_t dev, int size, bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, bus_addr_t *ppaddr);
+
+void
+dahdi_dma_free(bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, bus_addr_t *ppaddr);
+
+void rlprintf(int pps, const char *fmt, ...)
+	__printflike(2, 3);
+
+void
+device_rlprintf(int pps, device_t dev, const char *fmt, ...)
+	__printflike(3, 4);
+
+struct pci_device_id *dahdi_pci_device_id_lookup(device_t dev, struct pci_device_id *tbl);
+
+SYSCTL_DECL(_dahdi);
+SYSCTL_DECL(_dahdi_echocan);
+#else /* !__FreeBSD__ */
 #define spin_lock_destroy(lock)
 #define _LIST_HEAD(n)	LIST_HEAD(n)
 

@@ -6,9 +6,7 @@
 #ifndef _B4XX_H_
 #define _B4XX_H_
 
-#if !defined(__FreeBSD__)
 #include <linux/ioctl.h>
-#endif
 
 #define HFC_NR_FIFOS	32
 #define HFC_ZMIN	0x80			/* from datasheet */

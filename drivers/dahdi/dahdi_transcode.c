@@ -22,16 +22,6 @@
  * this program for more details.
  */
 
-#if defined(__FreeBSD__)
-#include <sys/types.h>
-#include <sys/param.h>
-#include <sys/conf.h>
-#include <sys/fcntl.h>
-#include <sys/ioccom.h>
-#include <sys/module.h>
-#include <sys/poll.h>
-#include <sys/filio.h>
-#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -41,11 +31,14 @@
 #include <linux/kmod.h>
 #include <linux/sched.h>
 #include <linux/interrupt.h>
-#include <linux/vmalloc.h>
 #include <linux/mm.h>
+#if defined(__FreeBSD__)
+#include <sys/filio.h>
+#else
+#include <linux/vmalloc.h>
 #include <linux/page-flags.h>
 #include <asm/io.h>
-#endif /* !__FreeBSD__ */
+#endif
 
 #include <dahdi/kernel.h>
 
@@ -517,7 +510,7 @@ SYSCTL_NODE(_dahdi, OID_AUTO, transcode, CTLFLAG_RW, 0, "DAHDI Transcoder Suppor
 #define MODULE_PARAM_PREFIX "dahdi.transcode"
 #define MODULE_PARAM_PARENT _dahdi_transcode
 
-DAHDI_DEV_MODULE(dahdi_transcode);
+LINUX_DEV_MODULE(dahdi_transcode);
 MODULE_VERSION(dahdi_transcode, 1);
 MODULE_DEPEND(dahdi_transcode, dahdi, 1, 1, 1);
 #endif /* __FreeBSD__ */

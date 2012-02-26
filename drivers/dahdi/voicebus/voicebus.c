@@ -27,36 +27,17 @@
  * this program for more details.
  */
 
-#if defined(__FreeBSD__)
-#include <sys/types.h>
-#include <sys/param.h>
-#include <sys/bus.h>
-#include <sys/conf.h>
-#include <sys/libkern.h>
-#include <sys/limits.h>
-#include <sys/module.h>
-#include <sys/rman.h>
-
-#include <dev/pci/pcireg.h>
-#include <dev/pci/pcivar.h>
-
-#include <machine/resource.h>
-
-#ifdef wmb
-#undef wmb
-#endif
-#define wmb()
-#else /* !__FreeBSD__ */
 #include <linux/version.h>
 #include <linux/slab.h>
 #include <linux/pci.h>
-#include <linux/ioport.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/timer.h>
 #include <linux/module.h>
 #include <linux/sched.h>
-#endif /* !__FreeBSD__ */
+#if !defined(__FreeBSD__)
+#include <linux/ioport.h>
+#endif
 
 #include <dahdi/kernel.h>
 #include "voicebus.h"
@@ -2330,7 +2311,7 @@ static void __exit voicebus_module_cleanup(void)
 }
 
 #if defined(__FreeBSD__)
-DAHDI_DEV_MODULE(dahdi_voicebus);
+LINUX_DEV_MODULE(dahdi_voicebus);
 MODULE_VERSION(dahdi_voicebus, 1);
 MODULE_DEPEND(dahdi_voicebus, dahdi, 1, 1, 1);
 #endif /* __FreeBSD__ */

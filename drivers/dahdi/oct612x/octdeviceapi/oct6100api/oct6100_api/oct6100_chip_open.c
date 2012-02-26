@@ -33,12 +33,7 @@ $Octasic_Revision: 347 $
 
 /*****************************  INCLUDE FILES  *******************************/
 
-#if defined(__FreeBSD__)
-#include <sys/types.h>
-#include <dahdi/compat/bsd.h>
-#else
 #include <linux/slab.h>
-#endif
 
 #include "octdef.h"
 

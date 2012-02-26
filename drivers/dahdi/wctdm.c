@@ -23,19 +23,6 @@
  * this program for more details.
  */
 
-#if defined(__FreeBSD__)
-#include <sys/types.h>
-#include <sys/bus.h>
-#include <sys/module.h>
-#include <sys/param.h>
-#include <sys/rman.h>
-
-#include <machine/bus.h>
-#include <dev/pci/pcireg.h>
-#include <dev/pci/pcivar.h>
-
-#define set_current_state(x)
-#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -45,8 +32,11 @@
 #include <linux/interrupt.h>
 #include <linux/moduleparam.h>
 #include <linux/sched.h>
+#if defined(__FreeBSD__)
+#define set_current_state(x)
+#else
 #include <asm/io.h>
-#endif /* !__FreeBSD__ */
+#endif
 #include "proslic.h"
 
 /*
@@ -290,18 +280,16 @@ struct wctdm {
 	int irq_rid;
 	void *irq_handle;
 
-	uint32_t readdma;
 	bus_dma_tag_t   read_dma_tag;
 	bus_dmamap_t    read_dma_map;
 
-	uint32_t writedma;
 	bus_dma_tag_t   write_dma_tag;
 	bus_dmamap_t    write_dma_map;
 #else /* !__FreeBSD__ */
 	unsigned long ioaddr;
+#endif /* !__FreeBSD__ */
 	dma_addr_t 	readdma;
 	dma_addr_t	writedma;
-#endif /* !__FreeBSD__ */
 	volatile unsigned int *writechunk;				/* Double-word aligned write memory */
 	volatile unsigned int *readchunk;				/* Double-word aligned read memory */
 	struct dahdi_chan _chans[NUM_CARDS];
@@ -3077,7 +3065,7 @@ wctdm_device_detach(device_t dev)
 {
 	struct wctdm *wc = device_get_softc(dev);
 
-	if (dahdi_module_usecount(THIS_MODULE) > 0)
+	if (_linux_module_usecount(THIS_MODULE) > 0)
 		return (EBUSY);
 
 	/* Stop any DMA */
@@ -3115,7 +3103,7 @@ static driver_t wctdm_pci_driver = {
 
 static devclass_t wctdm_devclass;
 
-DAHDI_DRIVER_MODULE(wctdm, pci, wctdm_pci_driver, wctdm_devclass);
+LINUX_DRIVER_MODULE(wctdm, pci, wctdm_pci_driver, wctdm_devclass);
 MODULE_DEPEND(wctdm, pci, 1, 1, 1);
 MODULE_DEPEND(wctdm, dahdi, 1, 1, 1);
 #else /* !__FreeBSD__ */

@@ -23,14 +23,6 @@
  *
  */
 
-#if defined(__FreeBSD__)
-#include <sys/types.h>
-#include <sys/param.h>
-#include <sys/conf.h>
-#include <sys/module.h>
-
-#include "ng_dahdi_netdev.h"
-#else /* !__FreeBSD__ */
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -42,15 +34,16 @@
 #include <linux/interrupt.h>
 #include <linux/moduleparam.h>
 #include <linux/netdevice.h>
+#if !defined(__FreeBSD__)
 #include <linux/notifier.h>
 #include <linux/crc32.h>
+#endif /* !__FreeBSD__ */
 
 /**
  * Undefine USE_PROC_FS, if you do not want the /proc/dahdi/dynamic-ethmf
  * support. Undefining this would give a slight performance increase.
  */
-#define USE_PROC_FS
-#endif /* !__FreeBSD__ */
+#undef USE_PROC_FS
 
 #ifdef USE_PROC_FS
 # include <linux/proc_fs.h>
@@ -63,6 +56,10 @@
 
 #include <dahdi/kernel.h>
 #include <dahdi/user.h>
+
+#if defined(__FreeBSD__)
+#include "ng_dahdi_netdev.h"
+#endif
 
 #define ETH_P_ZTDETH			0xd00d
 #define ETHMF_MAX_PER_SPAN_GROUP	8
@@ -954,7 +951,7 @@ static void __exit ztdethmf_exit(void)
 }
 
 #if defined(__FreeBSD__)
-DAHDI_DEV_MODULE(dahdi_dynamic_ethmf);
+LINUX_DEV_MODULE(dahdi_dynamic_ethmf);
 MODULE_VERSION(dahdi_dynamic_ethmf, 1);
 MODULE_DEPEND(dahdi_dynamic_ethmf, dahdi, 1, 1, 1);
 MODULE_DEPEND(dahdi_dynamic_ethmf, dahdi_dynamic, 1, 1, 1);
