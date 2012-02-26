@@ -1,5 +1,5 @@
 # $Id$
 
-SUBDIR=	freebsd
+SUBDIR=	bsd-kmod
 
 .include <bsd.subdir.mk>
