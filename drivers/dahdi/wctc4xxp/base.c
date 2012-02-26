@@ -4214,7 +4214,7 @@ wctc4xxp_device_attach(device_t dev)
 static int
 wctc4xxp_device_detach(device_t dev)
 {
-	if (_linux_module_usecount(THIS_MODULE) > 0)
+	if (module_refcount(THIS_MODULE) > 0)
 		return (EBUSY);
 
 	wctc4xxp_remove_one(dev);

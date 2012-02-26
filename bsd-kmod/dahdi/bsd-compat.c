@@ -363,7 +363,7 @@ module_put(struct module *m)
 }
 
 int
-_linux_module_usecount(struct module *m)
+module_refcount(struct module *m)
 {
 	return atomic_read(&m->refcount);
 }
@@ -384,7 +384,7 @@ _linux_module_modevent(module_t mod, int type, void *data)
 			m->exit();
 		return (0);
 	case MOD_QUIESCE:
-		if (_linux_module_usecount(m) > 0)
+		if (module_refcount(m) > 0)
 			return (EBUSY);
 		return (0);
 	default:

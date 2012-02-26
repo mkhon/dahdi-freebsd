@@ -1289,7 +1289,7 @@ wcfxo_device_detach(device_t dev)
 {
 	struct wcfxo *wc = device_get_softc(dev);
 
-	if (_linux_module_usecount(THIS_MODULE) > 0)
+	if (module_refcount(THIS_MODULE) > 0)
 		return (EBUSY);
 
 	/* Stop any DMA */

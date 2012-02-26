@@ -29,8 +29,6 @@ struct module_ptr_args {
 	void *value;
 };
 
-int _linux_module_usecount(struct module *);
-
 int _linux_module_modevent(struct module *mod, int type, void *data);
 
 #define _LINUX_MODULE(name)						\
@@ -66,6 +64,7 @@ void _linux_module_ptr_sysinit(void *arg);
 
 int try_module_get(struct module *);
 void module_put(struct module *);
+int module_refcount(struct module *);
 
 #define EXPORT_SYMBOL(s)
 #define EXPORT_SYMBOL_GPL(s)

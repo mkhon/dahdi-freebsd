@@ -2502,7 +2502,7 @@ te12xp_device_attach(device_t dev)
 static int
 te12xp_device_detach(device_t dev)
 {
-	if (_linux_module_usecount(THIS_MODULE) > 0)
+	if (module_refcount(THIS_MODULE) > 0)
 		return (EBUSY);
 
 	te12xp_remove_one(dev);

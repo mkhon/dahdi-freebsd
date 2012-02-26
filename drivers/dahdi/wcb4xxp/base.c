@@ -3124,7 +3124,7 @@ b4xxp_device_detach(device_t dev)
 {
 	struct b4xxp *b4 = device_get_softc(dev);
 
-	if (_linux_module_usecount(THIS_MODULE) > 0)
+	if (module_refcount(THIS_MODULE) > 0)
 		return (EBUSY);
 
 	/* unregister */
