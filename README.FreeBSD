@@ -1,0 +1,46 @@
+FreeBSD Notes
+-------------
+
+FreeBSD port is maintained by Max Khon <fjoe@FreeBSD.org>
+
+Drop me an e-mail if you have hardware that is supported by dahdi-linux
+but is not supported on FreeBSD.
+
+Building
+~~~~~~~~
+
+Run "make", then "make install" in the root directory.
+
+Supported drivers
+~~~~~~~~~~~~~~~~~
+The following drivers are currently supported on FreeBSD:
+- main DAHDI driver
+- dahdi_echocan_jpah
+- dahdi_echocan_kb1
+- dahdi_echocan_mg2
+- dahdi_echocan_sec
+- dahdi_echocan_sec2
+- dahdi_dummy
+- dahdi_dynamic
+- dahdi_dynamic_loc
+- dahdi_dynamic_eth and dahdi_dynamic_ethmf
+- wcb4xxp
+- wcfxo
+- wct4xxp, including HW echo cancellation support (Octasic)
+- wctdm
+- wctdm24xxp
+- wcte11xp
+- wcte12xp
+
+Additional notes
+~~~~~~~~~~~~~~~~
+
+TDMoE (dahdi_dynamic_eth and dahdi_dynamic_ethmf) drivers require ng_ether kernel module
+to be loaded.
+
+Credits
+~~~~~~~
+
+main DAHDI driver and wcb4xxp FreeBSD port sponsored by Ethon Technologies GmbH, http://ethon.de/
+dahdi_dynamic and eth/ethmf FreeBSD port sponsored by Redfone Communications, LLC, http://red-fone.com/
+Remaining hardware drivers port sponsoder by The FreeBSD Foundation, http://freebsdfoundation.org/
