@@ -20,15 +20,16 @@
 #define _DAHDI_CONFIG_H
 
 #ifdef __KERNEL__
-#if !defined(__FreeBSD__)
 #include <linux/version.h>
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,18)
-#include <linux/config.h>
-#endif
-#endif /* !__FreeBSD__ */
 #endif
 
 /* DAHDI compile time options */
+
+/* These default tone lengths are in units of milliseconds. */
+#define DAHDI_CONFIG_DEFAULT_DTMF_LENGTH	100
+#define DAHDI_CONFIG_DEFAULT_MFR1_LENGTH	68
+#define DAHDI_CONFIG_DEFAULT_MFR2_LENGTH	100
+#define DAHDI_CONFIG_PAUSE_LENGTH		500
 
 /*
  * Uncomment if you have a European phone, or any other phone with a 
@@ -72,13 +73,7 @@
 /* You can still override them below */
 #if defined(CONFIG_HDLC) || defined(CONFIG_HDLC_MODULE)
 #define DAHDI_HDLC_TYPE_TRANS
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,3)
 #define HDLC_MAINTAINERS_ARE_MORE_STUPID_THAN_I_THOUGHT
-#endif
-#endif
-
-#ifdef CONFIG_PPP
-#define CONFIG_DAHDI_PPP
 #endif
 
 /*
@@ -88,16 +83,13 @@
 /* #define CONFIG_DAHDI_NET */
 
 /*
- * Uncomment CONFIG_OLD_HDLC_API if your are compiling with CONFIG_DAHDI_NET
- * defined and you are using the old kernel HDLC interface (or if you get
- * an error about ETH_P_HDLC while compiling).
+ * Uncomment for Generic PPP support (i.e. DAHDIRAS)
  */
-/* #define CONFIG_OLD_HDLC_API */
 
-/*
- * Uncomment for Generic PPP support (i.e. ZapRAS)
- */
+#if defined(CONFIG_PPP) || defined(CONFIG_PPP_MODULE)
 /* #define CONFIG_DAHDI_PPP */
+#endif
+
 /*
  * Uncomment to enable "watchdog" to monitor if interfaces
  * stop taking interrupts or otherwise misbehave
@@ -127,6 +119,13 @@
  *
  */
 /* #define CONFIG_DAHDI_NO_ECHOCAN_DISABLE */
+
+/*
+ * Define if you would like to allow software echocans to process the tx audio
+ * in addition to the rx audio.  Used for things like DC removal.
+ *
+ */
+/* #define CONFIG_DAHDI_ECHOCAN_PROCESS_TX */
 
 /* 
  * Uncomment if you happen have an early TDM400P Rev H which 
@@ -185,5 +184,15 @@
  * Pass DAHDI_AUDIOMODE to channel driver as well
  */
 /* #define	DAHDI_AUDIO_NOTIFY */
+
+/*
+ * Creates an interface for mirroring the raw channel data out to a pseudo-chan
+ */
+/* #define CONFIG_DAHDI_MIRROR */
+
+/*
+ * Comment out to disable sysfs support
+ */
+/* #define CONFIG_DAHDI_SYSFS */
 
 #endif

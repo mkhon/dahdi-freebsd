@@ -36,8 +36,8 @@
 #include <linux/netdevice.h>
 #if !defined(__FreeBSD__)
 #include <linux/notifier.h>
-#include <linux/crc32.h>
 #endif /* !__FreeBSD__ */
+#include <linux/crc32.h>
 
 /**
  * Undefine USE_PROC_FS, if you do not want the /proc/dahdi/dynamic-ethmf
@@ -89,8 +89,6 @@ static atomic_t shutdown = ATOMIC_INIT(0);
 #if defined(__FreeBSD__)
 static char g_padding[ETHMF_MAX_CHANNELS * 8];
 static char g_padding_ignore[8];
-
-#define crc32_le(crc, data, len)	crc32_raw(data, len, crc)
 #else
 static struct sk_buff_head skbs;
 #endif
@@ -145,11 +143,7 @@ struct ztdeth {
 /**
  * Lock for adding and removing items in ethmf_list
  */
-#ifdef DEFINE_SPINLOCK
 static DEFINE_SPINLOCK(ethmf_lock);
-#else
-static spinlock_t ethmf_lock = SPIN_LOCK_UNLOCKED;
-#endif
 
 #if defined(__FreeBSD__)
 static inline void
@@ -268,12 +262,9 @@ static inline int ethmf_trx_spans_ready(unsigned int addr_hash, struct ztdeth *(
 #if defined(__FreeBSD__)
 static int ztdethmf_rcv(struct net_device *dev, struct ether_header *eh,
 			unsigned char *msg, int msglen)
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 14)
-static int ztdethmf_rcv(struct sk_buff *skb, struct net_device *dev,
-		struct packet_type *pt, struct net_device *orig_dev)
 #else
 static int ztdethmf_rcv(struct sk_buff *skb, struct net_device *dev,
-		struct packet_type *pt)
+		struct packet_type *pt, struct net_device *orig_dev)
 #endif /* !__FreeBSD__ */
 {
 	int num_spans = 0, span_index = 0;
@@ -436,9 +427,9 @@ static int ztdethmf_notifier(struct notifier_block *block, unsigned long event,
 	return 0;
 }
 
-static int ztdethmf_transmit(void *pvt, unsigned char *msg, int msglen)
+static void ztdethmf_transmit(struct dahdi_dynamic *dyn, u8 *msg, size_t msglen)
 {
-	struct ztdeth *z = pvt, *ready_spans[ETHMF_MAX_PER_SPAN_GROUP];
+	struct ztdeth *z = dyn->pvt, *ready_spans[ETHMF_MAX_PER_SPAN_GROUP];
 #if defined(__FreeBSD__)
 	struct mbuf *m;
 	struct ether_header eh;
@@ -451,19 +442,15 @@ static int ztdethmf_transmit(void *pvt, unsigned char *msg, int msglen)
 	unsigned short subaddr;
 	struct net_device *dev;
 	int spans_ready = 0, index = 0;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 10)
-	static spinlock_t lock = SPIN_LOCK_UNLOCKED;
-	unsigned long flags;
-#endif
 
 	if (atomic_read(&shutdown))
-		return 0;
+		return;
 
 	rcu_read_lock();
 
 	if (unlikely(!z || !z->dev)) {
 		rcu_read_unlock();
-		return 0;
+		return;
 	}
 
 #if defined(__FreeBSD__)
@@ -472,24 +459,12 @@ static int ztdethmf_transmit(void *pvt, unsigned char *msg, int msglen)
 		z->msgbuf_len = msglen;
 	}
 #else /* !__FreeBSD__ */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 10)
-	if (!atomic_read(&z->ready)) {
-		spin_lock_irqsave(&lock, flags);
-		atomic_inc(&z->ready);
-		if (1 == atomic_read(&z->ready)) {
-			memcpy(z->msgbuf, msg, msglen);
-			z->msgbuf_len = msglen;
-		}
-		spin_unlock_irqrestore(&lock, flags);
-	}
-#else
 	if (!atomic_read(&z->ready)) {
 		if (atomic_inc_return(&z->ready) == 1) {
 			memcpy(z->msgbuf, msg, msglen);
 			z->msgbuf_len = msglen;
 		}
 	}
-#endif
 #endif /* !__FreeBSD__ */
 
 	spans_ready = ethmf_trx_spans_ready(z->addr_hash, &ready_spans);
@@ -523,7 +498,7 @@ static int ztdethmf_transmit(void *pvt, unsigned char *msg, int msglen)
 		if (m == NULL) {
 			rcu_read_unlock();
 			ethmf_errors_inc();
-			return 0;
+			return;
 		}
 		MCLGET(m, M_DONTWAIT);
 
@@ -539,7 +514,7 @@ static int ztdethmf_transmit(void *pvt, unsigned char *msg, int msglen)
 		if (unlikely(!skb)) {
 			rcu_read_unlock();
 			ethmf_errors_inc();
-			return 0;
+			return;
 		}
 
 		/* Reserve header space */
@@ -641,7 +616,7 @@ static int ztdethmf_transmit(void *pvt, unsigned char *msg, int msglen)
 
 	rcu_read_unlock();
 
-	return 0;
+	return;
 }
 
 static int ztdethmf_flush(void)
@@ -663,9 +638,9 @@ static struct packet_type ztdethmf_ptype = {
 	.func = ztdethmf_rcv,			/* Receiver */
 };
 
-static void ztdethmf_destroy(void *pvt)
+static void ztdethmf_destroy(struct dahdi_dynamic *dyn)
 {
-	struct ztdeth *z = pvt;
+	struct ztdeth *z = dyn->pvt;
 	unsigned long flags;
 
 	atomic_set(&shutdown, 1);
@@ -684,7 +659,6 @@ static void ztdethmf_destroy(void *pvt)
 			z->span->name);
 		kfree(z->msgbuf);
 		kfree(z);
-		module_put(THIS_MODULE);
 	} else {
 		if (z && z->span && z->span->name) {
 			printk(KERN_ERR "Cannot find interface for %s\n",
@@ -693,13 +667,14 @@ static void ztdethmf_destroy(void *pvt)
 	}
 }
 
-static void *ztdethmf_create(struct dahdi_span *span, char *addr)
+static int ztdethmf_create(struct dahdi_dynamic *dyn, const char *addr)
 {
 	struct ztdeth *z;
 	char src[256];
 	char *src_ptr;
 	int x, bufsize, num_matched;
 	unsigned long flags;
+	struct dahdi_span *const span = &dyn->span;
 
 	BUG_ON(!span);
 	BUG_ON(!addr);
@@ -710,7 +685,7 @@ static void *ztdethmf_create(struct dahdi_span *span, char *addr)
 	}
 	z = kmalloc(sizeof(struct ztdeth), GFP_KERNEL);
 	if (!z)
-		return NULL;
+		return -ENOMEM;
 
 	/* Zero it out */
 	memset(z, 0, sizeof(struct ztdeth));
@@ -724,7 +699,7 @@ static void *ztdethmf_create(struct dahdi_span *span, char *addr)
 	z->rcvbuf = kmalloc(bufsize, GFP_KERNEL);
 
 	/* Address should be <dev>/<macaddr>/subaddr */
-	dahdi_copy_string(src, addr, sizeof(src));
+	strlcpy(src, addr, sizeof(src));
 	/* replace all / with space; otherwise kernel sscanf does not work */
 	src_ptr = src;
 	while (*src_ptr) {
@@ -741,7 +716,7 @@ static void *ztdethmf_create(struct dahdi_span *span, char *addr)
 		printk(KERN_ERR "Only matched %d entries in '%s'\n", num_matched, src);
 		printk(KERN_ERR "Invalid TDMoE Multiframe address: %s\n", addr);
 		kfree(z);
-		return NULL;
+		return -EINVAL;
 	}
 	z->dev = dev_get_by_name(
 #if !defined(__FreeBSD__) && LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 24)
@@ -751,7 +726,7 @@ static void *ztdethmf_create(struct dahdi_span *span, char *addr)
 	if (!z->dev) {
 		printk(KERN_ERR "TDMoE Multiframe: Invalid device '%s'\n", z->ethdev);
 		kfree(z);
-		return NULL;
+		return -EINVAL;
 	}
 	z->span = span;
 	z->subaddr = htons(z->subaddr);
@@ -777,22 +752,21 @@ static void *ztdethmf_create(struct dahdi_span *span, char *addr)
 	atomic_inc(&(ethmf_groups[hashaddr_to_index(z->addr_hash)].spans));
 #endif
 
-	if (!try_module_get(THIS_MODULE))
-		printk(KERN_ERR "TDMoEmf: Unable to increment module use count\n");
-
 	/* enable the timer for enabling the spans */
 	mod_timer(&timer, jiffies + HZ);
 	atomic_set(&shutdown, 0);
-	return z;
+	dyn->pvt = z;
+	return 0;
 }
 
 static struct dahdi_dynamic_driver ztd_ethmf = {
-	"ethmf",
-	"Ethernet",
-	ztdethmf_create,
-	ztdethmf_destroy,
-	ztdethmf_transmit,
-	ztdethmf_flush
+	.owner = THIS_MODULE,
+	.name = "ethmf",
+	.desc = "Ethernet",
+	.create = ztdethmf_create,
+	.destroy = ztdethmf_destroy,
+	.transmit = ztdethmf_transmit,
+	.flush = ztdethmf_flush,
 };
 
 static struct notifier_block ztdethmf_nblock = {
@@ -915,7 +889,7 @@ static int __init ztdethmf_init(void)
 
 	dev_add_pack(&ztdethmf_ptype);
 	register_netdevice_notifier(&ztdethmf_nblock);
-	dahdi_dynamic_register(&ztd_ethmf);
+	dahdi_dynamic_register_driver(&ztd_ethmf);
 
 #if defined(__FreeBSD__)
 	memset(g_padding, 0xdd, sizeof(g_padding));
@@ -942,7 +916,7 @@ static void __exit ztdethmf_exit(void)
 
 	dev_remove_pack(&ztdethmf_ptype);
 	unregister_netdevice_notifier(&ztdethmf_nblock);
-	dahdi_dynamic_unregister(&ztd_ethmf);
+	dahdi_dynamic_unregister_driver(&ztd_ethmf);
 
 #ifdef USE_PROC_FS
 	if (proc_entry)

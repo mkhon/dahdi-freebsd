@@ -3,7 +3,7 @@
  *
  * Written by Shaun Ruffell <sruffell@digium.com>
  *
- * Copyright (C) 2010 Digium, Inc.
+ * Copyright (C) 2010-2011 Digium, Inc.
  *
  * All rights reserved.
 
@@ -35,30 +35,25 @@
 
 #ifdef VOICEBUS_NET_DEBUG
 
-#ifdef HAVE_NETDEV_PRIV
 struct voicebus_netdev_priv {
 	struct voicebus *vb;
 };
-#endif
 
 static inline struct voicebus *
 voicebus_from_netdev(struct net_device *netdev)
 {
-#ifdef HAVE_NETDEV_PRIV
 	struct voicebus_netdev_priv *priv;
 	priv = netdev_priv(netdev);
 	return priv->vb;
-#else
-	return netdev->priv;
-#endif
 }
 
 static void *
 skb_to_vbb(struct voicebus *vb, struct sk_buff *skb)
 {
 	int res;
-	void *vbb;
+	struct vbb *vbb;
 	const int COMMON_HEADER = 30;
+	dma_addr_t dma_addr;
 
 	if (skb->len != (VOICEBUS_SFRAME_SIZE + COMMON_HEADER)) {
 		dev_warn(&vb->pdev->dev, "Packet of length %d is not the "
@@ -67,13 +62,15 @@ skb_to_vbb(struct voicebus *vb, struct sk_buff *skb)
 		return NULL;
 	}
 
-	vbb = voicebus_alloc(vb);
+	vbb = dma_pool_alloc(vb->pool, GFP_KERNEL, &dma_addr);
 	if (!vbb)
 		return NULL;
+
+	vbb->dma_addr = dma_addr;
 	res = skb_copy_bits(skb, COMMON_HEADER, vbb, VOICEBUS_SFRAME_SIZE);
 	if (res) {
 		dev_warn(&vb->pdev->dev, "Failed call to skb_copy_bits.\n");
-		voicebus_free(vb, vbb);
+		dma_pool_free(vb->pool, vbb, vbb->dma_addr);
 		return NULL;
 	}
 	return vbb;
@@ -206,23 +203,14 @@ int vb_net_register(struct voicebus *vb, const char *board_name)
 {
 	int res;
 	struct net_device *netdev;
-#	ifdef HAVE_NETDEV_PRIV
 	struct voicebus_netdev_priv *priv;
-#	endif
 	const char our_mac[] = { 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff};
 
-#	ifdef HAVE_NETDEV_PRIV
 	netdev = alloc_netdev(sizeof(*priv), board_name, ether_setup);
 	if (!netdev)
 		return -ENOMEM;
 	priv = netdev_priv(netdev);
 	priv->vb = vb;
-#	else
-	netdev = alloc_netdev(0, vb->board_name, ether_setup);
-	if (!netdev)
-		return -ENOMEM;
-	netdev->priv = vb;
-#	endif
 	memcpy(netdev->dev_addr, our_mac, sizeof(our_mac));
 #	ifdef HAVE_NET_DEVICE_OPS
 	netdev->netdev_ops = &vb_netdev_ops;

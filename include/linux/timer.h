@@ -3,6 +3,7 @@
 
 #include <sys/lock.h>
 #include <sys/mutex.h>
+#include <linux/ktime.h>
 #include <linux/jiffies.h>
 
 struct timer_list {

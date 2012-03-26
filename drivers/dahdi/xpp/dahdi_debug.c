@@ -20,11 +20,6 @@
  *
  */
 #include <linux/version.h>
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,0)
-#  warning "This module is tested only with 2.6 kernels"
-#endif
-
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -35,57 +30,48 @@
 static const char rcsid[] = "$Id$";
 
 #define	P_(x)	[ x ] = { .value = x, .name = #x, }
-static	struct {
+static struct {
 	int value;
 	char *name;
 } poll_names[] = {
-	P_(POLLIN),
-	P_(POLLPRI),
-	P_(POLLOUT),
-	P_(POLLERR),
-	P_(POLLHUP),
-	P_(POLLNVAL),
-	P_(POLLRDNORM),
-	P_(POLLRDBAND),
-	P_(POLLWRNORM),
-	P_(POLLWRBAND),
-	P_(POLLMSG),
-	P_(POLLREMOVE)
+	P_(POLLIN), P_(POLLPRI), P_(POLLOUT), P_(POLLERR), P_(POLLHUP),
+	    P_(POLLNVAL), P_(POLLRDNORM), P_(POLLRDBAND), P_(POLLWRNORM),
+	    P_(POLLWRBAND), P_(POLLMSG), P_(POLLREMOVE)
 };
+
 #undef	P_
 
 void dump_poll(int debug, const char *msg, int poll)
 {
-	int	i;
+	int i;
 
-	for(i = 0; i < ARRAY_SIZE(poll_names); i++) {
-		if(poll & poll_names[i].value)
+	for (i = 0; i < ARRAY_SIZE(poll_names); i++) {
+		if (poll & poll_names[i].value)
 			DBG(GENERAL, "%s: %s\n", msg, poll_names[i].name);
 	}
 }
+EXPORT_SYMBOL(dump_poll);
 
 void alarm2str(int alarm, char *buf, int buflen)
 {
-	char	*p = buf;
-	int	left = buflen;
-	int	i;
-	int	n;
+	char *p = buf;
+	int left = buflen;
+	int i;
+	int n;
 
-	if(!alarm) {
+	if (!alarm) {
 		snprintf(buf, buflen, "NONE");
 		return;
 	}
 	memset(buf, 0, buflen);
-	for(i = 0; i < 8; i++) {
-		if(left && (alarm & BIT(i))) {
+	for (i = 0; i < 8; i++) {
+		if (left && (alarm & BIT(i))) {
 			n = snprintf(p, left, "%s,", alarmbit2str(i));
 			p += n;
 			left -= n;
 		}
 	}
-	if(p > buf)	/* kill last comma */
+	if (p > buf)		/* kill last comma */
 		*(p - 1) = '\0';
 }
-
-EXPORT_SYMBOL(dump_poll);
 EXPORT_SYMBOL(alarm2str);

@@ -1,8 +1,8 @@
-#ifndef XPP_LOG_H
-#define XPP_LOG_H
+#ifndef	CARD_ECHO_H
+#define	CARD_ECHO_H
 /*
- * Written by Alexander Landau <landau.alex@gmail.com>
- * Copyright (C) 2004-2007, Xorcom
+ * Written by Oron Peled <oron@actcom.co.il>
+ * Copyright (C) 2011, Xorcom
  *
  * All rights reserved.
  *
@@ -21,32 +21,11 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  */
+#include "xpd.h"
 
-#ifdef	__KERNEL__
+enum echo_opcodes {
+	XPROTO_NAME(ECHO, SET) = 0x39,
+	XPROTO_NAME(ECHO, SET_REPLY) = 0x3A,
+};
 
-#include <linux/kernel.h>
-#include <linux/version.h>
-
-#else
-
-/* This is to enable user-space programs to include this. */
-
-#include "xdefs.h"
-
-#endif
-
-#define XPP_LOG_MAGIC	0x10583ADE
-
-struct log_global_header {
-	__u32 magic;
-	__u32 version;
-} __attribute__((packed));
-
-struct log_header {
-	__u32 len;
-	__u32 time;
-	__u8  xpd_num;
-	__u8  direction;
-} __attribute__((packed));
-
-#endif
+#endif /* CARD_ECHO_H */

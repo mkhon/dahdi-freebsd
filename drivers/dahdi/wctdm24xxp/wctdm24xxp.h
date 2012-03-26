@@ -45,28 +45,17 @@
  * \brief Default ringer debounce (in ms)
  */
 #define DEFAULT_RING_DEBOUNCE	1024
-
 #define POLARITY_DEBOUNCE	64		/* Polarity debounce (in ms) */
 
 #define OHT_TIMER		6000	/* How long after RING to retain OHT */
 
-#define FLAG_3215	(1 << 0)
-#define FLAG_EXPRESS	(1 << 1)
+#define FLAG_EXPRESS	(1 << 0)
 
 #define EFRAME_SIZE 108L
 #define EFRAME_GAP 20L
 #define SFRAME_SIZE ((EFRAME_SIZE * DAHDI_CHUNKSIZE) + (EFRAME_GAP * (DAHDI_CHUNKSIZE - 1)))
 
 #define MAX_ALARMS 10
-
-#define MOD_TYPE_NONE		0
-#define MOD_TYPE_FXS		1
-#define MOD_TYPE_FXO		2
-#define MOD_TYPE_FXSINIT	3
-#define MOD_TYPE_VPM		4
-#define MOD_TYPE_QRV		5
-#define MOD_TYPE_VPM150M	6
-#define MOD_TYPE_BRI		7
 
 #define MINPEGTIME	10 * 8		/* 30 ms peak to peak gets us no more than 100 Hz */
 #define PEGTIME		50 * 8		/* 50ms peak to peak gets us rings of 10 Hz or more */
@@ -90,53 +79,61 @@
 			+ ((card) >> 2) + (altcs) + ((altcs) ? -21 : 0))
 #endif
 #define NUM_MODULES		24
-#define NUM_EC			4
 #define NUM_SLOTS		6
-#define MAX_TDM_CHAN		31
 #define MAX_SPANS		9
 
 #define NUM_CAL_REGS		12
 
-#define USER_COMMANDS		8
-#define ISR_COMMANDS		2
 #define QRV_DEBOUNCETIME	20
-
-#define MAX_COMMANDS		(USER_COMMANDS + ISR_COMMANDS)
 
 #define VPM150M_HPI_CONTROL	0x00
 #define VPM150M_HPI_ADDRESS	0x02
 #define VPM150M_HPI_DATA	0x03
 
 #define VPM_SUPPORT
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,0)
 #define VPM150M_SUPPORT
-#endif
-
-#ifdef VPM_SUPPORT
-
-/* Define to get more attention-grabbing but slightly more CPU using echocan status */
-#define FANCY_ECHOCAN
-
-#endif
 
 #ifdef VPM150M_SUPPORT
 #include "voicebus/GpakCust.h"
 #endif
 
+#include "voicebus/vpmoct.h"
+
 struct calregs {
 	unsigned char vals[NUM_CAL_REGS];
 };
 
-struct cmdq {
-	unsigned int cmds[MAX_COMMANDS];
-	unsigned char isrshadow[ISR_COMMANDS];
-};
-
 enum battery_state {
 	BATTERY_UNKNOWN = 0,
+	BATTERY_DEBOUNCING_PRESENT,
+	BATTERY_DEBOUNCING_PRESENT_ALARM,
 	BATTERY_PRESENT,
+	BATTERY_DEBOUNCING_LOST,
+	BATTERY_DEBOUNCING_LOST_ALARM,
 	BATTERY_LOST,
+};
+
+enum ring_detector_state {
+	RINGOFF = 0,
+	DEBOUNCING_RINGING_POSITIVE,
+	DEBOUNCING_RINGING_NEGATIVE,
+	RINGING,
+	DEBOUNCING_RINGOFF,
+};
+
+enum polarity_state {
+	UNKNOWN_POLARITY = 0,
+	POLARITY_DEBOUNCE_POSITIVE,
+	POLARITY_POSITIVE,
+	POLARITY_DEBOUNCE_NEGATIVE,
+	POLARITY_NEGATIVE,
+};
+
+struct wctdm_cmd {
+	struct list_head node;
+	struct completion *complete;
+	u32 cmd;
+	u8 ident;
 };
 
 /**
@@ -163,35 +160,56 @@ struct wctdm_chan {
 	struct dahdi_chan chan;
 	struct dahdi_echocan_state ec;
 	int timeslot;
+	unsigned int hwpreec_enabled:1;
 };
 
-struct wctdm {
-	const struct wctdm_desc *desc;
-	char board_name[80];
-	int usecount;
-	int pos;				/* card number in system */
+struct fxo {
+	enum ring_detector_state ring_state:4;
+	enum battery_state battery_state:4;
+	enum polarity_state polarity_state:4;
+	u8 ring_polarity_change_count:4;
+	u8 hook_ring_shadow;
+	s8 line_voltage_status;
+	int offhook;
+	int neonmwi_state;
+	int neonmwi_last_voltage;
+	unsigned int neonmwi_debounce;
+	unsigned int neonmwi_offcounter;
+	unsigned long display_fxovoltage;
+	unsigned long ringdebounce_timer;
+	unsigned long battdebounce_timer;
+	unsigned long poldebounce_timer;
+};
 
-	spinlock_t frame_list_lock;
-	struct list_head frame_list;
+struct fxs {
+	u8 oht_active:1;
+	u8 off_hook:1;
+	int idletxhookstate;	/* IDLE changing hook state */
+/* lasttxhook reflects the last value written to the proslic's reg
+* 64 (LINEFEED_CONTROL) in bits 0-2.  Bit 4 indicates if the last
+* write is pending i.e. it is in process of being written to the
+* register
+* NOTE: in order for this value to actually be written to the
+* proslic, the appropriate matching value must be written into the
+* sethook variable so that it gets queued and handled by the
+* voicebus ISR.
+*/
+	int lasttxhook;
+	u8 linefeed_control_shadow;
+	u8 hook_state_shadow;
+	int palarms;
+	struct dahdi_vmwi_info vmwisetting;
+	int vmwi_active_messages;
+	int vmwi_linereverse;
+	int reversepolarity;	/* polarity reversal */
+	struct calregs calregs;
+	unsigned long check_alarm;
+	unsigned long check_proslic;
+	unsigned long oppending_timeout;
+	unsigned long ohttimer;
+};
 
-	unsigned int intcount;
-	unsigned char txident;
-	unsigned char rxident;
-
-	int flags[NUM_MODULES];			/* bitmap of board-specific + module-specific flags */
-	unsigned char ctlreg;			/* FIXME: something to do with VPM? */
-
-	int mods_per_board;			/* maximum number of modules for this board */
-	int digi_mods;				/* number of digital modules present */
-	int avchannels;				/* active "voice" (voice, B and D) channels */
-	int modmap;				/* Bit-map of present cards (1=present) */
-
-	int altcs[NUM_MODULES + NUM_EC];
-
-/* FIXME: why are all of these QRV-only members part of the main card structure? */
-	char qrvhook[NUM_MODULES];
-	unsigned short qrvdebtime[NUM_MODULES];
-	int radmode[NUM_MODULES];
+struct qrv {
 #define	RADMODE_INVERTCOR 1
 #define	RADMODE_IGNORECOR 2
 #define	RADMODE_EXTTONE 4
@@ -199,72 +217,70 @@ struct wctdm {
 #define	RADMODE_IGNORECT 16
 #define	RADMODE_PREEMP	32
 #define	RADMODE_DEEMP 64
-	unsigned short debouncetime[NUM_MODULES];
-	signed short rxgain[NUM_MODULES];
-	signed short txgain[NUM_MODULES];
+	char hook;
+	unsigned short debouncetime;
+	unsigned short debtime;
+	int radmode;
+	signed short rxgain;
+	signed short txgain;
+	u8 isrshadow[3];
+};
+
+enum module_type {
+	NONE = 0,
+	FXS,
+	FXO,
+	FXSINIT,
+	QRV,
+	BRI,
+};
+
+struct wctdm_module {
+	union modtypes {
+		struct fxo fxo;
+		struct fxs fxs;
+		struct qrv qrv;
+		struct b400m *bri;
+	} mod;
+
+	/* Protected by wctdm.reglock */
+	struct list_head pending_cmds;
+	struct list_head active_cmds;
+	u8 offsets[3];
+	u8 subaddr;
+	u8 card;
+
+	enum module_type type;
+	int sethook; /* pending hook state command */
+	int dacssrc;
+};
+
+struct wctdm {
+	const struct wctdm_desc *desc;
+	const char *board_name;
+
+	spinlock_t frame_list_lock;
+	struct list_head frame_list;
+
+	unsigned long framecount;
+	unsigned char txident;
+	unsigned char rxident;
+
+	u8 ctlreg;
+	u8 tdm410leds;
+
+	int mods_per_board;			/* maximum number of modules for this board */
+	int digi_mods;				/* number of digital modules present */
+	int avchannels;				/* active "voice" (voice, B and D) channels */
 
 	spinlock_t reglock;			/* held when accessing anything affecting the module array */
-	wait_queue_head_t regq;			/* for dahdi_schluffen() */
+	wait_queue_head_t regq;
+	struct list_head free_isr_commands;
 
-	union {
-		struct fxo {
-			int wasringing;
-			int lastrdtx;
-			int lastrdtx_count;
-			int ringdebounce;
-			int offhook;
-			int battdebounce;
-			int battalarm;
-			enum battery_state battery;
-			int lastpol;
-			int polarity;
-			int polaritydebounce;
-			int neonmwi_state;
-			int neonmwi_last_voltage;
-			unsigned int neonmwi_debounce;
-			unsigned int neonmwi_offcounter;
-		} fxo;
-		struct fxs {
-			int oldrxhook;
-			int debouncehook;
-			int lastrxhook;
-			int debounce;
-			int ohttimer;
-			int idletxhookstate;	/* IDLE changing hook state */
-	/* lasttxhook reflects the last value written to the proslic's reg
-	* 64 (LINEFEED_CONTROL) in bits 0-2.  Bit 4 indicates if the last
-	* write is pending i.e. it is in process of being written to the
-	* register
-	* NOTE: in order for this value to actually be written to the
-	* proslic, the appropriate matching value must be written into the
-	* sethook variable so that it gets queued and handled by the
-	* voicebus ISR.
-	*/
-			int lasttxhook;
-			int oppending_ms;
-			spinlock_t lasttxhooklock;
-			int palarms;
-			struct dahdi_vmwi_info vmwisetting;
-			int vmwi_active_messages;
-			int vmwi_linereverse;
-			int reversepolarity;	/* polarity reversal */
-			struct calregs calregs;
-		} fxs;
-		struct b400m *bri;
-	} mods[NUM_MODULES];
-
-	struct cmdq cmdq[NUM_MODULES + NUM_EC];
-	int modtype[NUM_MODULES + NUM_EC];		/* type of module (FXO/FXS/QRV/VPM/etc.) in this position */
-	int sethook[NUM_MODULES + NUM_EC];		/* pending hook state command for each module */
-	int dacssrc[NUM_MODULES];
-
-	int vpm100;
+	struct wctdm_module mods[NUM_MODULES];
 
 	struct vpmadt032 *vpmadt032;
-#ifdef FANCY_ECHOCAN
-	int echocanpos;
-	int blinktimer;
-#endif
+	struct vpmoct *vpmoct;
 	struct voicebus vb;
 	struct wctdm_span *aspan;			/* pointer to the spans[] holding the analog span */
 	struct wctdm_span *spans[MAX_SPANS];
@@ -278,17 +294,26 @@ struct wctdm {
 	struct semaphore syncsem;
 	int oldsync;
 
-	int initialized;				/* =1 when the entire card is ready to go */
-	unsigned long checkflag;			/* Internal state flags and task bits */
+	int not_ready;		 /* 0 when the entire card is ready to go */
+	unsigned long checkflag; /* Internal state flags and task bits */
 	int companding;
+	struct dahdi_device *ddev;
 };
+
+static inline bool is_initialized(struct wctdm *wc)
+{
+	WARN_ON(wc->not_ready < 0);
+	return (wc->not_ready == 0);
+}
 
 /* Atomic flag bits for checkflag field */
 #define WCTDM_CHECK_TIMING	0
 
-void wait_just_a_bit(int foo);
-int wctdm_getreg(struct wctdm *wc, int card, int addr);
-int wctdm_setreg(struct wctdm *wc, int card, int addr, int val);
+int wctdm_getreg(struct wctdm *wc, struct wctdm_module *const mod, int addr);
+int wctdm_setreg(struct wctdm *wc, struct wctdm_module *const mod,
+		 int addr, int val);
+
+int wctdm_wait_for_ready(struct wctdm *wc);
 
 extern struct semaphore ifacelock;
 extern struct wctdm *ifaces[WC_MAX_IFACES];

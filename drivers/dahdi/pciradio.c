@@ -47,7 +47,6 @@ With driver:	303826  (1.5 %)
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/errno.h>
 #include <linux/pci.h>
 #include <linux/interrupt.h>
 #include <linux/moduleparam.h>
@@ -147,6 +146,7 @@ struct encdec
 
 struct pciradio {
 	struct pci_dev *dev;
+	struct dahdi_device *ddev;
 	struct dahdi_span span;
 	unsigned char ios;
 	int usecount;
@@ -1488,9 +1488,8 @@ static int pciradio_initialize(struct pciradio *rad)
 	rad->span.channels = rad->nchans;
 	rad->span.flags = DAHDI_FLAG_RBS;
 	rad->span.ops = &pciradio_span_ops;
-	init_waitqueue_head(&rad->span.maintq);
 
-	if (dahdi_register(&rad->span, 0)) {
+	if (dahdi_register_device(rad->ddev, &rad->dev->dev)) {
 		printk(KERN_NOTICE "Unable to register span with DAHDI\n");
 		return -1;
 	}
@@ -1779,7 +1778,7 @@ static int __devinit pciradio_init_one(struct pci_dev *pdev, const struct pci_de
 					release_region(rad->ioaddr, 0xff);
 				pci_free_consistent(pdev, DAHDI_MAX_CHUNKSIZE * 2 * 2 * 2 * 4, (void *)rad->writechunk, rad->writedma);
 				pci_set_drvdata(pdev, NULL);
-				dahdi_unregister(&rad->span);
+				dahdi_free_device(rad->ddev);
 				kfree(rad);
 				return -EIO;
 
@@ -1812,7 +1811,7 @@ static int __devinit pciradio_init_one(struct pci_dev *pdev, const struct pci_de
 
 static void pciradio_release(struct pciradio *rad)
 {
-	dahdi_unregister(&rad->span);
+	dahdi_unregister_device(rad->ddev);
 	if (rad->freeregion)
 		release_region(rad->ioaddr, 0xff);
 	kfree(rad);
@@ -1852,7 +1851,7 @@ static void __devexit pciradio_remove_one(struct pci_dev *pdev)
 	}
 }
 
-static struct pci_device_id pciradio_pci_tbl[] = {
+static DEFINE_PCI_DEVICE_TABLE(pciradio_pci_tbl) = {
 	{ 0xe159, 0x0001, 0xe16b, PCI_ANY_ID, 0, 0, (unsigned long)"PCIRADIO" },
 	{ 0 }
 };

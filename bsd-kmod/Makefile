@@ -5,7 +5,8 @@ SUBDIR=\
 	dahdi\
 	dahdi_dynamic\
 	dahdi_transcode\
-	dahdi_voicebus
+	dahdi_voicebus\
+	dahdi-fw-vpmoct032.bin
 
 # dynamic drivers
 SUBDIR+=\
@@ -40,7 +41,9 @@ SUBDIR+=\
 	wcte11xp\
 	wcte12xp\
 	dahdi-fw-oct6114-064.bin\
-	dahdi-fw-oct6114-128.bin
+	dahdi-fw-oct6114-128.bin\
+	dahdi-fw-oct6114-256.bin\
+	dahdi-fw-te820.bin
 
 # ISDN cards
 SUBDIR+=\

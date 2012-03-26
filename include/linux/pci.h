@@ -6,16 +6,22 @@
 #include <linux/errno.h>
 #include <linux/io.h>
 #include <linux/irqreturn.h>
+#include <linux/pci_regs.h>
 #include <asm/atomic.h>
 
 #include <linux/slab.h>		/* asm/pci.h */
 
 #include <sys/bus.h>
-#include <dev/pci/pcireg.h>
 #include <dev/pci/pcivar.h>
 
 struct pci_dev {
-	device_t dev;
+	struct device dev;
 };
+
+static inline int pci_read_config_byte(struct pci_dev *pci_dev, int where, u8 *val)
+{
+	*val = pci_read_config(pci_dev->dev.device, where, 1);
+	return (0);
+}
 
 #endif /* _LINUX_PCI_H_ */

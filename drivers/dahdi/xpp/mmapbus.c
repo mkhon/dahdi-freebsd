@@ -7,7 +7,9 @@ static int mmap_match(struct device *dev, struct device_driver *driver)
 {
 	return !strncmp(dev_name(dev), driver->name, strlen(driver->name));
 }
-static int mmap_uevent(struct device *dev, char **envp, int num_envp, char *buffer, int buffer_size)
+
+static int mmap_uevent(struct device *dev, char **envp, int num_envp,
+		       char *buffer, int buffer_size)
 {
 	envp[0] = buffer;
 	envp[1] = NULL;
@@ -33,8 +35,6 @@ static struct device mmap_bus = {
 	.release = mmap_bus_release,
 };
 
-
-
 int register_mmap_device(struct mmap_device *dev)
 {
 	dev->dev.bus = &mmap_bus_type;
@@ -43,12 +43,12 @@ int register_mmap_device(struct mmap_device *dev)
 	strncpy(dev->dev.bus_id, dev->name, BUS_ID_SIZE);
 	return device_register(&dev->dev);
 }
+EXPORT_SYMBOL(register_mmap_device);
 
 void unregister_mmap_device(struct mmap_device *dev)
 {
 	device_unregister(&dev->dev);
 }
-EXPORT_SYMBOL(register_mmap_device);
 EXPORT_SYMBOL(unregister_mmap_device);
 
 int register_mmap_driver(struct mmap_driver *driver)
@@ -56,12 +56,12 @@ int register_mmap_driver(struct mmap_driver *driver)
 	driver->driver.bus = &mmap_bus_type;
 	return driver_register(&driver->driver);
 }
+EXPORT_SYMBOL(register_mmap_driver);
 
 void unregister_mmap_driver(struct mmap_driver *driver)
 {
 	driver_unregister(&driver->driver);
 }
-EXPORT_SYMBOL(register_mmap_driver);
 EXPORT_SYMBOL(unregister_mmap_driver);
 
 int register_mmap_bus(void)
@@ -78,13 +78,13 @@ bus_reg:
 bus_type_reg:
 	return ret;
 }
+EXPORT_SYMBOL(register_mmap_bus);
 
 void unregister_mmap_bus(void)
 {
 	device_unregister(&mmap_bus);
 	bus_unregister(&mmap_bus_type);
 }
-EXPORT_SYMBOL(register_mmap_bus);
 EXPORT_SYMBOL(unregister_mmap_bus);
 
 MODULE_AUTHOR("Alexander Landau <landau.alex@gmail.com>");

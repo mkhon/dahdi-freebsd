@@ -718,8 +718,8 @@ UINT32 Oct6100ApiTransferToneEvents(
 									break;
 								case 2:
 									/* This is the "STOP" event, invalidate the last value.  The user does not want to know about this. */
-									pEchoChannel->ulLastSSToneDetected = cOCT6100_INVALID_VALUE;
-									pEchoChannel->ulLastSSToneTimestamp = cOCT6100_INVALID_VALUE;
+									pEchoChannel->ulLastSSToneDetected = (PTR_TYPE)cOCT6100_INVALID_VALUE;
+									pEchoChannel->ulLastSSToneTimestamp = (PTR_TYPE)cOCT6100_INVALID_VALUE;
 									break;
 								default:
 									break;
@@ -860,8 +860,8 @@ UINT32 Oct6100ApiTransferToneEvents(
 									break;
 								case 2:
 									/* This is the "STOP" event, invalidate the last value.  The user does not want to know about this. */
-									pEchoChannel->ulLastSSToneDetected = cOCT6100_INVALID_VALUE;
-									pEchoChannel->ulLastSSToneTimestamp = cOCT6100_INVALID_VALUE;
+									pEchoChannel->ulLastSSToneDetected = (PTR_TYPE)cOCT6100_INVALID_VALUE;
+									pEchoChannel->ulLastSSToneTimestamp = (PTR_TYPE)cOCT6100_INVALID_VALUE;
 									break;
 								default:
 									break;
@@ -1241,11 +1241,10 @@ UINT32 Oct6100BufferPlayoutCheckForSpecificEvent(
 	}
 
 	/* Retrieve the current write pointer. */
-	mOCT6100_RETRIEVE_NLP_CONF_DWORD(	f_pApiInstance, 
+	ulResult = oct6100_retrieve_nlp_conf_dword(f_pApiInstance,
 										pEchoChannel, 
 										ulPlayoutBaseAddress + ulWritePtrBytesOfst, 
-										&ulTempData,
-										ulResult );
+										&ulTempData);
 	if ( ulResult != cOCT6100_ERR_OK )
 		return ulResult;
 

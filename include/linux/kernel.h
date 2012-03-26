@@ -7,9 +7,13 @@
 #include <sys/cdefs.h>
 #include <sys/systm.h>
 #include <machine/stdarg.h>
+#include <linux/stddef.h>
 
 #define printk(fmt, args...)		printf(fmt, ##args)
 #define vprintk(fmt, args)		vprintf(fmt, args)
+
+char *kvasprintf(gfp_t gfp, const char *fmt, va_list ap);
+char *kasprintf(gfp_t gfp, const char *fmt, ...);
 
 #define pr_info(fmt, args...)		printf(fmt, ##args)
 
@@ -35,8 +39,8 @@ int printk_ratelimit(void);
  *
  */
 #define container_of(ptr, type, member) ({			\
-	__typeof( ((type *)0)->member ) *__mptr = (ptr);	\
-	(type *)( (char *)__mptr - offsetof(type,member) );})
+	const typeof( ((type *)0)->member ) *__mptr = (ptr);	\
+	(type *)( __DECONST(char *, __mptr) - offsetof(type,member) );})
 
 #define might_sleep()
 

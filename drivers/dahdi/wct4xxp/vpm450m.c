@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2005-2006 Digium, Inc.
+ * Copyright (C) 2005-2012 Digium, Inc.
  *
  * Mark Spencer <markster@digium.com>
  *
@@ -21,23 +21,18 @@
 
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/time.h>
 #include <linux/version.h>
 
 #include "vpm450m.h"
 #include "oct6100api/oct6100_api.h"
 
 #if defined(__FreeBSD__)
-#include <linux/kernel.h>	/* linux/time.h */
-
 #define vmalloc(size) kmalloc(size, 0)
 #define vfree(p) kfree(p)
 #else /* !__FreeBSD__ */
-#include <linux/time.h>
 #include <linux/vmalloc.h>
 #endif /* !__FreeBSD__ */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,18)
-#include <linux/config.h>
-#endif
 
 /* API for Octasic access */
 UINT32 Oct6100UserGetTime(tPOCT6100_GET_TIME f_pTime)
@@ -183,9 +178,9 @@ UINT32 Oct6100UserDriverReadBurstApi(tPOCT6100_READ_BURST_PARAMS f_pBurstParams)
 
 struct vpm450m {
 	tPOCT6100_INSTANCE_API pApiInstance;
-	UINT32 aulEchoChanHndl[ 128 ];
-	int chanflags[128];
-	int ecmode[128];
+	UINT32 aulEchoChanHndl[256];
+	int chanflags[256];
+	int ecmode[256];
 	int numchans;
 };
 
@@ -248,7 +243,7 @@ static void vpm450m_setecmode(struct vpm450m *vpm450m, int channel, int mode)
 	modify->ulChannelHndl = vpm450m->aulEchoChanHndl[channel];
 	ulResult = Oct6100ChannelModify(vpm450m->pApiInstance, modify);
 	if (ulResult != GENERIC_OK) {
-		printk(KERN_NOTICE "Failed to apply echo can changes on channel %d!\n", channel);
+		printk(KERN_NOTICE "Failed to apply echo can changes on channel %d %08x!\n", channel, ulResult);
 	} else {
 #ifdef OCTASIC_DEBUG
 		printk(KERN_DEBUG "Echo can on channel %d set to %d\n", channel, mode);
@@ -330,12 +325,11 @@ int vpm450m_getdtmf(struct vpm450m *vpm450m, int *channel, int *tone, int *start
 {
 	tOCT6100_TONE_EVENT tonefound;
 	tOCT6100_EVENT_GET_TONE tonesearch;
-	UINT32 ulResult;
 	
 	Oct6100EventGetToneDef(&tonesearch);
 	tonesearch.pToneEvent = &tonefound;
 	tonesearch.ulMaxToneEvent = 1;
-	ulResult = Oct6100EventGetTone(vpm450m->pApiInstance, &tonesearch);
+	Oct6100EventGetTone(vpm450m->pApiInstance, &tonesearch);
 	if (tonesearch.ulNumValidToneEvent) {
 		if (channel)
 			*channel = tonefound.ulUserChanId;
@@ -434,11 +428,10 @@ struct vpm450m *init_vpm450m(void *wc, int *isalaw, int numspans, const struct f
 	tOCT6100_GET_INSTANCE_SIZE InstanceSize;
 	tOCT6100_CHANNEL_OPEN *ChannelOpen;
 	UINT32 ulResult;
+	const unsigned int mask = (8 == numspans) ? 0x7 : 0x3;
+	unsigned int sout_stream, rout_stream;
 	struct vpm450m *vpm450m;
 	int x,y,law;
-#ifdef CONFIG_4KSTACKS
-	unsigned long flags;
-#endif
 	
 	if (!(vpm450m = kmalloc(sizeof(struct vpm450m), GFP_KERNEL)))
 		return NULL;
@@ -460,7 +453,7 @@ struct vpm450m *init_vpm450m(void *wc, int *isalaw, int numspans, const struct f
 
 	memset(ChannelOpen, 0, sizeof(tOCT6100_CHANNEL_OPEN));
 
-	for (x=0;x<128;x++)
+	for (x = 0; x < ARRAY_SIZE(vpm450m->ecmode); x++)
 		vpm450m->ecmode[x] = -1;
 
 	vpm450m->numchans = numspans * 32;
@@ -486,9 +479,22 @@ struct vpm450m *init_vpm450m(void *wc, int *isalaw, int numspans, const struct f
 	ChipOpen->ulMemoryType = cOCT6100_MEM_TYPE_DDR;
 	ChipOpen->ulMemoryChipSize = cOCT6100_MEMORY_CHIP_SIZE_32MB;
 	ChipOpen->ulNumMemoryChips = 1;
-	ChipOpen->ulMaxTdmStreams = 4;
 	ChipOpen->aulTdmStreamFreqs[0] = cOCT6100_TDM_STREAM_FREQ_8MHZ;
-	ChipOpen->ulTdmSampling = cOCT6100_TDM_SAMPLE_AT_FALLING_EDGE;
+	ChipOpen->ulMaxFlexibleConfParticipants = 0;
+	ChipOpen->ulMaxConfBridges = 0;
+	ChipOpen->ulMaxRemoteDebugSessions = 0;
+	ChipOpen->fEnableChannelRecording = FALSE;
+	ChipOpen->ulSoftToneEventsBufSize = 64;
+
+	if (vpm450m->numchans <= 128) {
+		ChipOpen->ulMaxTdmStreams = 4;
+		ChipOpen->ulTdmSampling = cOCT6100_TDM_SAMPLE_AT_FALLING_EDGE;
+	} else {
+		ChipOpen->ulMaxTdmStreams = 32;
+		ChipOpen->fEnableFastH100Mode = TRUE;
+		ChipOpen->ulTdmSampling = cOCT6100_TDM_SAMPLE_AT_RISING_EDGE;
+	}
+
 #if 0
 	ChipOpen->fEnableAcousticEcho = TRUE;
 #endif		
@@ -502,7 +508,6 @@ struct vpm450m *init_vpm450m(void *wc, int *isalaw, int numspans, const struct f
 		return NULL;
 	}
 	
-	
 	vpm450m->pApiInstance = vmalloc(InstanceSize.ulApiInstanceSize);
 	if (!vpm450m->pApiInstance) {
 		printk(KERN_NOTICE "Out of memory (can't allocate %d bytes)!\n", InstanceSize.ulApiInstanceSize);
@@ -512,26 +517,20 @@ struct vpm450m *init_vpm450m(void *wc, int *isalaw, int numspans, const struct f
 		return NULL;
 	}
 
-	/* I don't know what to curse more in this comment, the problems caused by
-	 * the 4K kernel stack limit change or the octasic API for being so darn
-	 * stack unfriendly.  Stupid, stupid, stupid.  So we disable IRQs so we
-	 * don't run the risk of overflowing the stack while we initialize the
-	 * octasic. */
-#ifdef CONFIG_4KSTACKS
-	local_irq_save(flags);
-#endif
 	ulResult = Oct6100ChipOpen(vpm450m->pApiInstance, ChipOpen);
 	if (ulResult != cOCT6100_ERR_OK) {
 		printk(KERN_NOTICE "Failed to open chip, code %08x!\n", ulResult);
-#ifdef CONFIG_4KSTACKS
-		local_irq_restore(flags);
-#endif
+		vfree(vpm450m->pApiInstance);
 		kfree(vpm450m);
 		kfree(ChipOpen);
 		kfree(ChannelOpen);
 		return NULL;
 	}
-	for (x=0;x<128;x++) {
+
+	sout_stream = (8 == numspans) ? 29 : 2;
+	rout_stream = (8 == numspans) ? 24 : 3;
+
+	for (x = 0; x < ((8 == numspans) ? 256 : 128); x++) {
 		/* execute this loop always on 4 span cards but
 		*  on 2 span cards only execute for the channels related to our spans */
 		if (( numspans > 2) || ((x & 0x03) <2)) {
@@ -539,7 +538,7 @@ struct vpm450m *init_vpm450m(void *wc, int *isalaw, int numspans, const struct f
 		 	*  therefore, the lower 2 bits tell us which span this 
 			*  timeslot/channel
 		 	*/
-			if (isalaw[x & 0x03]) 
+			if (isalaw[x & mask])
 				law = cOCT6100_PCM_A_LAW;
 			else
 				law = cOCT6100_PCM_U_LAW;
@@ -553,11 +552,13 @@ struct vpm450m *init_vpm450m(void *wc, int *isalaw, int numspans, const struct f
 			ChannelOpen->TdmConfig.ulSinStream = 1;
 			ChannelOpen->TdmConfig.ulSinTimeslot = x;
 			ChannelOpen->TdmConfig.ulSoutPcmLaw = law;
-			ChannelOpen->TdmConfig.ulSoutStream = 2;
+			ChannelOpen->TdmConfig.ulSoutStream = sout_stream;
 			ChannelOpen->TdmConfig.ulSoutTimeslot = x;
+#if 1
 			ChannelOpen->TdmConfig.ulRoutPcmLaw = law;
-			ChannelOpen->TdmConfig.ulRoutStream = 3;
+			ChannelOpen->TdmConfig.ulRoutStream = rout_stream;
 			ChannelOpen->TdmConfig.ulRoutTimeslot = x;
+#endif
 			ChannelOpen->VqeConfig.fEnableNlp = TRUE;
 			ChannelOpen->VqeConfig.fRinDcOffsetRemoval = TRUE;
 			ChannelOpen->VqeConfig.fSinDcOffsetRemoval = TRUE;
@@ -567,9 +568,10 @@ struct vpm450m *init_vpm450m(void *wc, int *isalaw, int numspans, const struct f
 			
 			ulResult = Oct6100ChannelOpen(vpm450m->pApiInstance, ChannelOpen);
 			if (ulResult != GENERIC_OK) {
-				printk(KERN_NOTICE "Failed to open channel %d!\n", x);
+				printk(KERN_NOTICE "Failed to open channel %d %x!\n", x, ulResult);
+				continue;
 			}
-			for (y=0;y<sizeof(tones) / sizeof(tones[0]); y++) {
+			for (y = 0; y < ARRAY_SIZE(tones); y++) {
 				tOCT6100_TONE_DETECTION_ENABLE enable;
 				Oct6100ToneDetectionEnableDef(&enable);
 				enable.ulChannelHndl = vpm450m->aulEchoChanHndl[x];
@@ -580,9 +582,6 @@ struct vpm450m *init_vpm450m(void *wc, int *isalaw, int numspans, const struct f
 		}
 	}
 
-#ifdef CONFIG_4KSTACKS
-	local_irq_restore(flags);
-#endif
 	kfree(ChipOpen);
 	kfree(ChannelOpen);
 	return vpm450m;

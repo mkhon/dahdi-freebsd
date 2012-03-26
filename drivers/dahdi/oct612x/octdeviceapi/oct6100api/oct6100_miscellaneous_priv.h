@@ -208,168 +208,6 @@ $Octasic_Revision: 20 $
 
 #define mOCT6100_ASSIGN_USER_READ_WRITE_OBJ( f_pApiInst, Params )
 
-
-/*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*\
-
-Function:		mOCT6100_RETRIEVE_NLP_CONF_DWORD
-
-Description:    This function is used by the API to store on a per channel basis
-				the various confguration DWORD from the device. The API performs 
-				less read to the chip that way since it is always in synch 
-				with the chip.
-
--------------------------------------------------------------------------------
-|	Argument		|	Description
--------------------------------------------------------------------------------
-
-IN	f_pApiInst				Pointer to API instance. This memory is used to keep
-							the present state of the chip and all its resources.
-IN	f_pChanEntry			Pointer to an API channel structure..
-IN	f_ulAddress				Address that needs to be modified..
-IN	f_pulConfigDword		Pointer to the content stored in the API located at the
-							desired address.
-
-\*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*/
-#define mOCT6100_RETRIEVE_NLP_CONF_DWORD( f_pApiInst, f_pChanEntry, f_ulAddress, f_pulConfigDword, f_ulResult )	\
-{																												\
-	UINT32	_ulFirstEmptyIndex = 0xFFFFFFFF;																	\
-	UINT32	_i;																									\
-																												\
-	f_ulResult = cOCT6100_ERR_FATAL_8E;																			\
-	(*f_pulConfigDword) = cOCT6100_INVALID_VALUE;																\
-																												\
-	/* Search for the Dword.*/																					\
-	for ( _i = 0; _i < cOCT6100_MAX_NLP_CONF_DWORD; _i++ )														\
-	{																											\
-		if ( ( _ulFirstEmptyIndex == 0xFFFFFFFF ) && ( f_pChanEntry->aulNlpConfDword[ _i ][ 0 ] == 0x0 ) )		\
-			_ulFirstEmptyIndex = _i;																			\
-																												\
-		if ( f_pChanEntry->aulNlpConfDword[ _i ][ 0 ] == f_ulAddress )											\
-		{																										\
-			/* We found the matching Dword.*/																	\
-			(*f_pulConfigDword) = f_pChanEntry->aulNlpConfDword[ _i ][ 1 ];										\
-			f_ulResult = cOCT6100_ERR_OK;																		\
-		}																										\
-	}																											\
-																												\
-	if ( ( _i == cOCT6100_MAX_NLP_CONF_DWORD ) && ( _ulFirstEmptyIndex == 0xFFFFFFFF ) )						\
-	{																											\
-		/* Nothing to do here, a fatal error occured, no memory was left. */									\
-	}																											\
-	else																										\
-	{																											\
-		if ( f_ulResult != cOCT6100_ERR_OK )																	\
-		{																										\
-			tOCT6100_READ_PARAMS	_ReadParams;																\
-			UINT16					_usReadData;																\
-																												\
-			/* We did not found any entry, let's create a new entry.*/											\
-			f_pChanEntry->aulNlpConfDword[ _ulFirstEmptyIndex ][ 0 ] = f_ulAddress;								\
-																												\
-			_ReadParams.pProcessContext = f_pApiInst->pProcessContext;											\
-			mOCT6100_ASSIGN_USER_READ_WRITE_OBJ( f_pApiInst, _ReadParams );										\
-			_ReadParams.ulUserChipId = f_pApiInst->pSharedInfo->ChipConfig.ulUserChipId;						\
-			_ReadParams.pusReadData = &_usReadData;																\
-																												\
-			/* Read the first 16 bits.*/																		\
-			_ReadParams.ulReadAddress = f_ulAddress;															\
-			mOCT6100_DRIVER_READ_API( _ReadParams, f_ulResult );												\
-			if ( f_ulResult == cOCT6100_ERR_OK )																\
-			{																									\
-				/* Save data.*/																					\
-				(*f_pulConfigDword) = _usReadData << 16;														\
-																												\
-				/* Read the last 16 bits .*/																	\
-				_ReadParams.ulReadAddress += 2;																	\
-				mOCT6100_DRIVER_READ_API( _ReadParams, f_ulResult );											\
-				if ( f_ulResult == cOCT6100_ERR_OK )															\
-				{																								\
-					/* Save data.*/																				\
-					(*f_pulConfigDword) |= _usReadData;															\
-					f_ulResult = cOCT6100_ERR_OK;																\
-				}																								\
-			}																									\
-		}																										\
-	}																											\
-}
-
-
-/*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*\
-
-Function:		mOCT6100_SAVE_NLP_CONF_DWORD
-
-Description:    This function stores a configuration Dword within an API channel
-				structure and then writes it into the chip.
-
--------------------------------------------------------------------------------
-|	Argument		|	Description
--------------------------------------------------------------------------------
-
-IN	f_pApiInst				Pointer to API instance. This memory is used to keep
-							the present state of the chip and all its resources.
-IN	f_pChanEntry			Pointer to an API channel structure..
-IN	f_ulAddress				Address that needs to be modified..
-IN	f_pulConfigDword		content to be stored in the API located at the
-							desired address.
-
-\*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*/
-#define mOCT6100_SAVE_NLP_CONF_DWORD( f_pApiInst, f_pChanEntry, f_ulAddress, f_ulConfigDword, f_ulResult )	\
-{																											\
-	UINT32	_i;																								\
-	UINT32	_ulLastValue = 0x0;																				\
-																											\
-	/* Search for the Dword.*/																				\
-	for ( _i = 0; _i < cOCT6100_MAX_NLP_CONF_DWORD; _i++ )													\
-	{																										\
-		if ( f_pChanEntry->aulNlpConfDword[ _i ][ 0 ] == f_ulAddress )										\
-		{																									\
-			/* We found the matching Dword.*/																\
-			_ulLastValue = f_pChanEntry->aulNlpConfDword[ _i ][ 1 ];										\
-			f_pChanEntry->aulNlpConfDword[ _i ][ 1 ] = f_ulConfigDword;										\
-			break;																							\
-		}																									\
-	}																										\
-																											\
-	if ( _i == cOCT6100_MAX_NLP_CONF_DWORD )																\
-	{																										\
-		f_ulResult = cOCT6100_ERR_FATAL_8F;																	\
-	}																										\
-	else																									\
-	{																										\
-		/* Write the config DWORD. */																		\
-		tOCT6100_WRITE_PARAMS	_WriteParams;																\
-																											\
-		_WriteParams.pProcessContext = f_pApiInst->pProcessContext;											\
-		mOCT6100_ASSIGN_USER_READ_WRITE_OBJ( f_pApiInst, _WriteParams )										\
-		_WriteParams.ulUserChipId = f_pApiInst->pSharedInfo->ChipConfig.ulUserChipId;						\
-																											\
-			/* Check if it is worth calling the user function. */											\
-		if ( ( f_ulConfigDword & 0xFFFF0000 ) != ( _ulLastValue & 0xFFFF0000 ) )							\
-		{																									\
-			/* Write the first 16 bits. */																	\
-			_WriteParams.ulWriteAddress = f_ulAddress;														\
-			_WriteParams.usWriteData = (UINT16)((f_ulConfigDword >> 16) & 0xFFFF);							\
-			mOCT6100_DRIVER_WRITE_API( _WriteParams, f_ulResult );											\
-		}																									\
-		else																								\
-		{																									\
-			f_ulResult = cOCT6100_ERR_OK;																	\
-		}																									\
-																											\
-		if ( f_ulResult == cOCT6100_ERR_OK )																\
-		{																									\
-			if ( ( f_ulConfigDword & 0x0000FFFF ) != ( _ulLastValue & 0x0000FFFF ) )						\
-			{																								\
-				/* Write the last word. */																	\
-				_WriteParams.ulWriteAddress = f_ulAddress + 2;												\
-				_WriteParams.usWriteData = (UINT16)(f_ulConfigDword & 0xFFFF);								\
-				mOCT6100_DRIVER_WRITE_API( _WriteParams, f_ulResult );										\
-			}																								\
-		}																									\
-	}																										\
-}
-
-
 #define mOCT6100_CREATE_FEATURE_MASK( f_ulFieldSize, f_ulFieldBitOffset, f_pulFieldMask )					\
 {																											\
 	(*f_pulFieldMask) = ( 1 << f_ulFieldSize );																\
@@ -427,5 +265,15 @@ UINT8 Oct6100ApiHexToAscii(
 
 UINT32 Oct6100ApiRand( 
 				IN		UINT32						f_ulRange );
+
+UINT32 oct6100_retrieve_nlp_conf_dword(tPOCT6100_INSTANCE_API f_pApiInst,
+								tPOCT6100_API_CHANNEL f_pChanEntry,
+								UINT32 f_ulAddress,
+								UINT32 *f_pulConfigDword);
+
+UINT32 oct6100_save_nlp_conf_dword(tPOCT6100_INSTANCE_API f_pApiInst,
+								tPOCT6100_API_CHANNEL f_pChanEntry,
+								UINT32 f_ulAddress,
+								UINT32 f_ulConfigDword);
 
 #endif /* __OCT6100_MISCELLANEOUS_PRIV_H__ */

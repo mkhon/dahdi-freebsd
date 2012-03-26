@@ -9,7 +9,7 @@
 #define kmalloc(size, flags)	malloc((size), M_LINUX, M_NOWAIT)
 #define kcalloc(n, size, flags)	malloc((n) * (size), M_LINUX, M_NOWAIT | M_ZERO)
 #define kzalloc(a, b)		kcalloc(1, (a), (b))
-#define kfree(p)		free(p, M_LINUX)
+#define kfree(p)		free(__DECONST(void *, p), M_LINUX)
 
 MALLOC_DECLARE(M_LINUX);
 

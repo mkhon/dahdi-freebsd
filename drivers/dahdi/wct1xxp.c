@@ -29,7 +29,6 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/usb.h>
-#include <linux/errno.h>
 #include <linux/pci.h>
 #include <linux/spinlock.h>
 #include <linux/moduleparam.h>
@@ -160,6 +159,7 @@ struct t1xxp {
 	unsigned char ec_chunk2[31][DAHDI_CHUNKSIZE];
 	unsigned char tempo[32];
 	struct dahdi_span span;						/* Span */
+	struct dahdi_device *ddev;
 	struct dahdi_chan *chans[31];					/* Channels */
 };
 
@@ -273,10 +273,11 @@ static void t1xxp_release(struct t1xxp *wc)
 {
 	unsigned int x;
 
-	dahdi_unregister(&wc->span);
+	dahdi_unregister_device(wc->ddev);
 	for (x = 0; x < (wc->ise1 ? 31 : 24); x++) {
 		kfree(wc->chans[x]);
 	}
+	dahdi_free_device(wc->ddev);
 	kfree(wc);
 	printk(KERN_INFO "Freed a Wildcard\n");
 }
@@ -609,7 +610,7 @@ static inline struct t1xxp *t1xxp_from_span(struct dahdi_span *span)
 	return container_of(span, struct t1xxp, span);
 }
 
-static int t1xxp_startup(struct dahdi_span *span)
+static int t1xxp_startup(struct file *file, struct dahdi_span *span)
 {
 	struct t1xxp *wc = t1xxp_from_span(span);
 
@@ -674,7 +675,6 @@ static int t1xxp_maint(struct dahdi_span *span, int cmd)
 			break;
 		case DAHDI_MAINT_LOOPUP:
 		case DAHDI_MAINT_LOOPDOWN:
-		case DAHDI_MAINT_LOOPSTOP:
 			res = -ENOSYS;
 			break;
 		default:
@@ -687,6 +687,7 @@ static int t1xxp_maint(struct dahdi_span *span, int cmd)
 	    case DAHDI_MAINT_NONE:
 			__t1_set_reg(wc,0x19,0); /* no local loop */
 			__t1_set_reg(wc,0x0a,0); /* no remote loop */
+			__t1_set_reg(wc, 0x30, 0); /* stop sending loopup code*/
 			break;
 	    case DAHDI_MAINT_LOCALLOOP:
 			__t1_set_reg(wc,0x19,0x40); /* local loop */
@@ -706,9 +707,6 @@ static int t1xxp_maint(struct dahdi_span *span, int cmd)
 			__t1_set_reg(wc,0x12,0x62); /* send loopdown code */
 			__t1_set_reg(wc,0x13,0x90); /* send loopdown code */
 			break;
-	    case DAHDI_MAINT_LOOPSTOP:
-			__t1_set_reg(wc,0x30,0);	/* stop sending loopup code */
-			break;
 	    default:
 			printk(KERN_NOTICE "wct1xxp/T1: Unknown maint command: %d\n", cmd);
 			res = -EINVAL;
@@ -718,7 +716,8 @@ static int t1xxp_maint(struct dahdi_span *span, int cmd)
 	return res;
 }
 
-static int t1xxp_chanconfig(struct dahdi_chan *chan, int sigtype)
+static int
+t1xxp_chanconfig(struct file *file, struct dahdi_chan *chan, int sigtype)
 {
 	struct t1xxp *wc = chan->pvt;
 	unsigned long flags;
@@ -733,7 +732,9 @@ static int t1xxp_chanconfig(struct dahdi_chan *chan, int sigtype)
 	return 0;
 }
 
-static int t1xxp_spanconfig(struct dahdi_span *span, struct dahdi_lineconfig *lc)
+static int
+t1xxp_spanconfig(struct file *file, struct dahdi_span *span,
+		 struct dahdi_lineconfig *lc)
 {
 	struct t1xxp *wc = t1xxp_from_span(span);
 
@@ -741,7 +742,7 @@ static int t1xxp_spanconfig(struct dahdi_span *span, struct dahdi_lineconfig *lc
 	wc->sync = (lc->sync) ? 1 : 0;
 	/* If already running, apply changes immediately */
 	if (span->flags & DAHDI_FLAG_RUNNING)
-		return t1xxp_startup(span);
+		return t1xxp_startup(file, span);
 
 	return 0;
 }
@@ -771,14 +772,20 @@ static int t1xxp_software_init(struct t1xxp *wc)
 	}
 	if (x >= WC_MAX_CARDS)
 		return -1;
+
+	wc->ddev = dahdi_create_device(wc->dev);
+
 	wc->num = x;
 	sprintf(wc->span.name, "WCT1/%d", wc->num);
 	snprintf(wc->span.desc, sizeof(wc->span.desc) - 1, "%s Card %d", wc->variety, wc->num);
-	wc->span.manufacturer = "Digium";
-	dahdi_copy_string(wc->span.devicetype, wc->variety, sizeof(wc->span.devicetype));
-	snprintf(wc->span.location, sizeof(wc->span.location) - 1,
-		 "PCI Bus %02d Slot %02d", wc->dev->bus->number, PCI_SLOT(wc->dev->devfn) + 1);
-	wc->span.irq = wc->dev->irq;
+	wc->ddev->manufacturer = "Digium";
+	wc->ddev->devicetype = wc->variety;
+	wc->ddev->location = kasprintf(GFP_KERNEL, "PCI Bus %02d Slot %02d",
+				      wc->dev->bus->number,
+				      PCI_SLOT(wc->dev->devfn) + 1);
+	if (!wc->ddev->location)
+		return -ENOMEM;
+
 	wc->span.chans = wc->chans;
 	wc->span.flags = DAHDI_FLAG_RBS;
 	if (wc->ise1) {
@@ -792,7 +799,6 @@ static int t1xxp_software_init(struct t1xxp *wc)
 		wc->span.linecompat = DAHDI_CONFIG_AMI | DAHDI_CONFIG_B8ZS | DAHDI_CONFIG_D4 | DAHDI_CONFIG_ESF;
 		wc->span.spantype = "T1";
 	}
-	init_waitqueue_head(&wc->span.maintq);
 	for (x=0;x<wc->span.channels;x++) {
 		sprintf(wc->chans[x]->name, "WCT1/%d/%d", wc->num, x + 1);
 		wc->chans[x]->sigcap = DAHDI_SIG_EM | DAHDI_SIG_CLEAR | DAHDI_SIG_EM_E1 | 
@@ -803,7 +809,8 @@ static int t1xxp_software_init(struct t1xxp *wc)
 		wc->chans[x]->chanpos = x + 1;
 	}
 	wc->span.ops = &t1xxp_span_ops;
-	if (dahdi_register(&wc->span, 0)) {
+	list_add_tail(&wc->span.device_node, &wc->ddev->spans);
+	if (dahdi_register_device(wc->ddev, &wc->dev->dev)) {
 		printk(KERN_NOTICE "Unable to register span with DAHDI\n");
 		return -1;
 	}
@@ -910,10 +917,10 @@ static void t1xxp_receiveprep(struct t1xxp *wc, int ints)
 	if (((oldcan & 0xffff0000) >> 16) != CANARY) {
 		/* Check top part */
 		if (debug) printk(KERN_DEBUG "Expecting top %04x, got %04x\n", CANARY, (oldcan & 0xffff0000) >> 16);
-		wc->span.irqmisses++;
+		wc->ddev->irqmisses++;
 	} else if ((oldcan & 0xffff) != ((wc->canary - 1) & 0xffff)) {
 		if (debug) printk(KERN_DEBUG "Expecting bottom %d, got %d\n", wc->canary - 1, oldcan & 0xffff);
-		wc->span.irqmisses++;
+		wc->ddev->irqmisses++;
 	}
 	for (y=0;y<DAHDI_CHUNKSIZE;y++) {
 		for (x=0;x<wc->span.channels;x++) {
@@ -1072,7 +1079,7 @@ static void t1xxp_check_alarms(struct t1xxp *wc)
 	if (wc->span.lineconfig & DAHDI_CONFIG_NOTOPEN) {
 		for (x=0,j=0;x < wc->span.channels;x++)
 			if ((wc->chans[x]->flags & DAHDI_FLAG_OPEN) ||
-			    (wc->chans[x]->flags & DAHDI_FLAG_NETDEV))
+			    dahdi_have_netdev(wc->chans[x]))
 				j++;
 		if (!j)
 			alarms |= DAHDI_ALARM_NOTOPEN;
@@ -1402,7 +1409,7 @@ static void __devexit t1xxp_remove_one(struct pci_dev *pdev)
 	}
 }
 
-static struct pci_device_id t1xxp_pci_tbl[] = {
+static DEFINE_PCI_DEVICE_TABLE(t1xxp_pci_tbl) = {
 	{ 0xe159, 0x0001, 0x6159, PCI_ANY_ID, 0, 0, (unsigned long) "Digium Wildcard T100P T1/PRI or E100P E1/PRA Board" },
 	{ 0 }
 };

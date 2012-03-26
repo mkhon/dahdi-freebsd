@@ -128,10 +128,10 @@ dahdi_dma_free(bus_dma_tag_t *ptag, bus_dmamap_t *pmap, void **pvaddr, bus_addr_
 	}
 }
 
-struct pci_device_id *
-dahdi_pci_device_id_lookup(device_t dev, struct pci_device_id *tbl)
+const struct pci_device_id *
+dahdi_pci_device_id_lookup(device_t dev, const struct pci_device_id *tbl)
 {
-	struct pci_device_id *id;
+	const struct pci_device_id *id;
 	uint16_t vendor = pci_get_vendor(dev);
 	uint16_t device = pci_get_device(dev);
 	uint16_t subvendor = pci_get_subvendor(dev);

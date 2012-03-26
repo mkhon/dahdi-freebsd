@@ -62,6 +62,7 @@ void _linux_module_ptr_sysinit(void *arg);
 #define MODULE_PARM_DESC(name, desc)
 #define MODULE_DEVICE_TABLE(type, name)
 
+void __module_get(struct module *);
 int try_module_get(struct module *);
 void module_put(struct module *);
 int module_refcount(struct module *);

@@ -59,36 +59,43 @@
 
 #include <dahdi/kernel.h>
 
-#ifdef DEFINE_SPINLOCK
-static DEFINE_SPINLOCK(zlock);
-#else
-static spinlock_t zlock = SPIN_LOCK_UNLOCKED;
-#endif
-
-static struct ztdlocal {
+/**
+ * struct dahdi_dynamic_loc - For local dynamic spans
+ * @monitor_rx_peer:   Indicates the peer span that monitors this span.
+ * @peer:	       Indicates the rw peer for this span.
+ *
+ */
+struct dahdi_dynamic_local {
 	unsigned short key;
 	unsigned short id;
-	struct ztdlocal *monitor_rx_peer; /* Indicates the peer span that monitors this span */
-	struct ztdlocal *peer; /* Indicates the rw peer for this span */
+	struct dahdi_dynamic_local *monitor_rx_peer;
+	struct dahdi_dynamic_local *peer;
 	struct dahdi_span *span;
-	struct ztdlocal *next;
-} *zdevs = NULL;
+	struct list_head node;
+};
 
-static int ztdlocal_transmit(void *pvt, unsigned char *msg, int msglen)
+static DEFINE_SPINLOCK(local_lock);
+static _LIST_HEAD(dynamic_local_list);
+
+static void
+dahdi_dynamic_local_transmit(struct dahdi_dynamic *dyn, u8 *msg, size_t msglen)
 {
-	struct ztdlocal *z;
+	struct dahdi_dynamic_local *const d = dyn->pvt;
 	unsigned long flags;
 
-	spin_lock_irqsave(&zlock, flags);
-	z = pvt;
-	if (z->peer && z->peer->span) {
-		dahdi_dynamic_receive(z->peer->span, msg, msglen);
+	spin_lock_irqsave(&local_lock, flags);
+	if (d && d->peer && d->peer->span) {
+		if (test_bit(DAHDI_FLAGBIT_REGISTERED, &d->peer->span->flags))
+			dahdi_dynamic_receive(d->peer->span, msg, msglen);
 	}
-	if (z->monitor_rx_peer && z->monitor_rx_peer->span) {
-		dahdi_dynamic_receive(z->monitor_rx_peer->span, msg, msglen);
+	if (d && d->monitor_rx_peer && d->monitor_rx_peer->span) {
+		if (test_bit(DAHDI_FLAGBIT_REGISTERED,
+			     &d->monitor_rx_peer->span->flags))  {
+			dahdi_dynamic_receive(d->monitor_rx_peer->span,
+					      msg, msglen);
+		}
 	}
-	spin_unlock_irqrestore(&zlock, flags);
-	return 0;
+	spin_unlock_irqrestore(&local_lock, flags);
 }
 
 static int digit2int(char d)
@@ -123,46 +130,35 @@ static int digit2int(char d)
 	return -1;
 }
 
-static void ztdlocal_destroy(void *pvt)
+static void dahdi_dynamic_local_destroy(struct dahdi_dynamic *dyn)
 {
-	struct ztdlocal *z = pvt;
+	struct dahdi_dynamic_local *d = dyn->pvt;
 	unsigned long flags;
-	struct ztdlocal *prev=NULL, *cur;
+	struct dahdi_dynamic_local *cur;
 
-	spin_lock_irqsave(&zlock, flags);
-	cur = zdevs;
-	while(cur) {
-		if (cur->peer == z)
+	spin_lock_irqsave(&local_lock, flags);
+	list_for_each_entry(cur, &dynamic_local_list, node) {
+		if (cur->peer == d)
 			cur->peer = NULL;
-		if (cur->monitor_rx_peer == z)
+		if (cur->monitor_rx_peer == d)
 			cur->monitor_rx_peer = NULL;
-		cur = cur->next;
 	}
-	cur = zdevs;
-	while(cur) {
-		if (cur == z) {
-			if (prev)
-				prev->next = cur->next;
-			else
-				zdevs = cur->next;
-			break;
-		}
-		prev = cur;
-		cur = cur->next;
-	}
-	spin_unlock_irqrestore(&zlock, flags);
-	if (cur == z) {
-		printk(KERN_INFO "TDMoL: Removed interface for %s, key %d id %d\n", z->span->name, z->key, z->id);
-		module_put(THIS_MODULE);
-		kfree(z);
-	}
+	list_del(&d->node);
+	dyn->pvt = NULL;
+	spin_unlock_irqrestore(&local_lock, flags);
+
+	printk(KERN_INFO "TDMoL: Removed interface for %s, key %d "
+		"id %d\n", d->span->name, d->key, d->id);
+	kfree(d);
 }
 
-static void *ztdlocal_create(struct dahdi_span *span, char *address)
+static int dahdi_dynamic_local_create(struct dahdi_dynamic *dyn,
+				      const char *address)
 {
-	struct ztdlocal *z, *l;
+	struct dahdi_dynamic_local *d, *l;
 	unsigned long flags;
 	int key = -1, id = -1, monitor = -1;
+	struct dahdi_span *const span = &dyn->span;
 
 	if (strlen(address) >= 3) {
 		if (address[1] != ':')
@@ -179,86 +175,92 @@ static void *ztdlocal_create(struct dahdi_span *span, char *address)
 	if (key == -1 || id == -1)
 		goto INVALID_ADDRESS;
 
-	z = kmalloc(sizeof(struct ztdlocal), GFP_KERNEL);
-	if (z) {
-		/* Zero it out */
-		memset(z, 0, sizeof(struct ztdlocal));
+	d = kzalloc(sizeof(*d), GFP_KERNEL);
+	if (!d)
+		return -ENOMEM;
 
-		z->key = key;
-		z->id = id;
-		z->span = span;
-			
-		spin_lock_irqsave(&zlock, flags);
-		/* Add this peer to any existing spans with same key
-		   And add them as peers to this one */
-		for (l = zdevs; l; l = l->next)
-			if (l->key == z->key) {
-				if (l->id == z->id) {
-					printk(KERN_DEBUG "TDMoL: Duplicate id (%d) for key %d\n", z->id, z->key);
-					goto CLEAR_AND_DEL_FROM_PEERS;
-				}
-				if (monitor == -1) {
-					if (l->peer) {
-						printk(KERN_DEBUG "TDMoL: Span with key %d and id %d already has a R/W peer\n", z->key, z->id);
-						goto CLEAR_AND_DEL_FROM_PEERS;
-					} else {
-						l->peer = z;
-						z->peer = l;
-					}
-				}
-				if (monitor == l->id) {
-					if (l->monitor_rx_peer) {
-						printk(KERN_DEBUG "TDMoL: Span with key %d and id %d already has a monitoring peer\n", z->key, z->id);
-						goto CLEAR_AND_DEL_FROM_PEERS;
-					} else {
-						l->monitor_rx_peer = z;
-					}
-				}
+	d->key = key;
+	d->id = id;
+	d->span = span;
+
+	spin_lock_irqsave(&local_lock, flags);
+	/* Add this peer to any existing spans with same key
+	   And add them as peers to this one */
+	list_for_each_entry(l, &dynamic_local_list, node) {
+		if (l->key != d->key)
+			continue;
+
+		if (l->id == d->id) {
+			printk(KERN_DEBUG "TDMoL: Duplicate id (%d) for key "
+				"%d\n", d->id, d->key);
+			goto CLEAR_AND_DEL_FROM_PEERS;
+		}
+		if (monitor == -1) {
+			if (l->peer) {
+				printk(KERN_DEBUG "TDMoL: Span with key %d and "
+					"id %d already has a R/W peer\n",
+					d->key, d->id);
+				goto CLEAR_AND_DEL_FROM_PEERS;
+			} else {
+				l->peer = d;
+				d->peer = l;
 			}
-		z->next = zdevs;
-		zdevs = z;
-		spin_unlock_irqrestore(&zlock, flags);
-		if(!try_module_get(THIS_MODULE))
-			printk(KERN_DEBUG "TDMoL: Unable to increment module use count\n");
-
-		printk(KERN_INFO "TDMoL: Added new interface for %s, key %d id %d\n", span->name, z->key, z->id);
+		}
+		if (monitor == l->id) {
+			if (l->monitor_rx_peer) {
+				printk(KERN_DEBUG "TDMoL: Span with key %d and "
+					"id %d already has a monitoring peer\n",
+					d->key, d->id);
+				goto CLEAR_AND_DEL_FROM_PEERS;
+			} else {
+				l->monitor_rx_peer = d;
+			}
+		}
 	}
-	return z;
+	list_add(&d->node, &dynamic_local_list);
+	dyn->pvt = d;
+	spin_unlock_irqrestore(&local_lock, flags);
+
+	printk(KERN_INFO "TDMoL: Added new interface for %s, "
+	       "key %d id %d\n", span->name, d->key, d->id);
+
+	span->cannot_provide_timing = 1;
+	return 0;
 
 CLEAR_AND_DEL_FROM_PEERS:
-	for (l = zdevs; l; l = l->next) {
-		if (l->peer == z)
+	list_for_each_entry(l, &dynamic_local_list, node) {
+		if (l->peer == d)
 			l->peer = NULL;
-		if (l->monitor_rx_peer == z)
+		if (l->monitor_rx_peer == d)
 			l->monitor_rx_peer = NULL;
 	}
-	kfree (z);
-	spin_unlock_irqrestore(&zlock, flags);
-	return NULL;
+	kfree(d);
+	spin_unlock_irqrestore(&local_lock, flags);
+	return -EINVAL;
 	
 INVALID_ADDRESS:
 	printk (KERN_NOTICE "TDMoL: Invalid address %s\n", address);
-	return NULL;
+	return -EINVAL;
 }
 
-static struct dahdi_dynamic_driver ztd_local = {
-	"loc",
-	"Local",
-	ztdlocal_create,
-	ztdlocal_destroy,
-	ztdlocal_transmit,
-	NULL	/* flush */
+static struct dahdi_dynamic_driver dahdi_dynamic_local = {
+	.owner = THIS_MODULE,
+	.name = "loc",
+	.desc = "Local",
+	.create = dahdi_dynamic_local_create,
+	.destroy = dahdi_dynamic_local_destroy,
+	.transmit = dahdi_dynamic_local_transmit,
 };
 
-static int __init ztdlocal_init(void)
+static int __init dahdi_dynamic_local_init(void)
 {
-	dahdi_dynamic_register(&ztd_local);
+	dahdi_dynamic_register_driver(&dahdi_dynamic_local);
 	return 0;
 }
 
-static void __exit ztdlocal_exit(void)
+static void __exit dahdi_dynamic_local_exit(void)
 {
-	dahdi_dynamic_unregister(&ztd_local);
+	dahdi_dynamic_unregister_driver(&dahdi_dynamic_local);
 }
 
 #if defined(__FreeBSD__)
@@ -268,7 +270,7 @@ MODULE_DEPEND(dahdi_dynamic_loc, dahdi, 1, 1, 1);
 MODULE_DEPEND(dahdi_dynamic_loc, dahdi_dynamic, 1, 1, 1);
 #endif /* __FreeBSD__ */
 
-module_init(ztdlocal_init);
-module_exit(ztdlocal_exit);
+module_init(dahdi_dynamic_local_init);
+module_exit(dahdi_dynamic_local_exit);
 
 MODULE_LICENSE("GPL v2");

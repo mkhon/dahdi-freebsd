@@ -45,6 +45,8 @@
 #include <linux/workqueue.h>
 
 #include <sys/syscallsubr.h>	/* kern_kldload() */
+#include <sys/refcount.h>
+#include <sys/sbuf.h>
 
 SYSCTL_NODE(, OID_AUTO, dahdi, CTLFLAG_RW, 0, "DAHDI");
 SYSCTL_NODE(_dahdi, OID_AUTO, echocan, CTLFLAG_RW, 0, "DAHDI Echo Cancelers");
@@ -93,6 +95,18 @@ void
 tasklet_kill(struct tasklet_struct *t)
 {
 	taskqueue_drain(taskqueue_fast, &t->task);
+}
+
+/*
+ * Time API
+ */
+struct timespec
+current_kernel_time(void)
+{
+	struct timespec ts;
+
+	getnanotime(&ts);
+	return ts;
 }
 
 /*
@@ -229,14 +243,17 @@ complete(struct completion *c)
 /*
  * Semaphore API
  */
+#undef sema_init
+#undef sema_destroy
+
 void
-_sema_init(struct semaphore *s, int value)
+_linux_sema_init(struct semaphore *s, int value)
 {
 	sema_init(&s->sema, value, "DAHDI semaphore");
 }
 
 void
-_sema_destroy(struct semaphore *s)
+_linux_sema_destroy(struct semaphore *s)
 {
 	sema_destroy(&s->sema);
 }
@@ -266,14 +283,28 @@ up(struct semaphore *s)
 	sema_post(&s->sema);
 }
 
+void
+_linux_sema_sysinit(struct semaphore *s)
+{
+	_linux_sema_init(s, 1);
+}
+
 /*
  * Workqueue API
  */
-void
+static void
 _work_run(void *context, int pending)
 {
 	struct work_struct *work = (struct work_struct *) context;
 	work->func(work);
+}
+
+void
+_linux_work_init(struct _linux_work_init_args *a)
+{
+	TASK_INIT(&a->work->task, 0, _work_run, a->work);
+	a->work->func = a->func;
+	a->work->tq = taskqueue_fast;
 }
 
 void
@@ -335,6 +366,73 @@ queue_work(struct workqueue_struct *wq, struct work_struct *work)
 }
 
 /*
+ * kref API
+ */
+void
+kref_set(struct kref *kref, int num)
+{
+	refcount_init(&kref->refcount, 1);
+}
+
+void
+kref_init(struct kref *kref)
+{
+	kref_set(kref, 1);
+}
+
+void
+kref_get(struct kref *kref)
+{
+	refcount_acquire(&kref->refcount);
+}
+
+int
+kref_put(struct kref *kref, void (*release) (struct kref *kref))
+{
+	if (refcount_release(&kref->refcount)) {
+		release(kref);
+		return 1;
+	}
+
+	return 0;
+}
+
+/*
+ * k[v]asprintf
+ */
+char *
+kvasprintf(gfp_t gfp, const char *fmt, va_list ap)
+{
+	struct sbuf *sb = sbuf_new_auto();
+	char *res;
+
+	sbuf_vprintf(sb, fmt, ap);
+	if (sbuf_finish(sb)) {
+		res = NULL;
+	} else {
+		int len = sbuf_len(sb);
+		res = kmalloc(len + 1, gfp);
+		if (res != NULL)
+			bcopy(sbuf_data(sb), res, len + 1);
+	}
+	sbuf_delete(sb);
+	return res;
+}
+
+char *
+kasprintf(gfp_t gfp, const char *fmt, ...)
+{
+	va_list ap;
+	char *res;
+
+	va_start(ap, fmt);
+	res = kvasprintf(gfp, fmt, ap);
+	va_end(ap);
+
+	return res;
+}
+
+/*
  * Logging API
  */
 int
@@ -349,6 +447,12 @@ printk_ratelimit(void)
 /*
  * Kernel module API
  */
+void
+__module_get(struct module *m)
+{
+	atomic_inc(&m->refcount);
+}
+
 int
 try_module_get(struct module *m)
 {
@@ -417,7 +521,7 @@ request_module(const char *fmt, ...)
  * Firmware API
  */
 int
-request_firmware(const struct firmware **firmware_p, const char *name, device_t *device)
+request_firmware(const struct firmware **firmware_p, const char *name, struct device *device)
 {
 	*firmware_p = firmware_get(name);
 	return *firmware_p == NULL;

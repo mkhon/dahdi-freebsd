@@ -41,6 +41,7 @@
 #endif
 
 #include <dahdi/kernel.h>
+#include "dahdi.h"
 
 static int debug;
 /* The registration list contains transcoders in the order in which they were
@@ -50,11 +51,7 @@ static _LIST_HEAD(registration_list);
  * is used as a simplistic way to spread the load amongst the different hardware
  * transcoders in the system. */
 static _LIST_HEAD(active_list);
-#ifdef DEFINE_SPINLOCK
 static DEFINE_SPINLOCK(translock);
-#else
-static spinlock_t translock = SPIN_LOCK_UNLOCKED;
-#endif
 
 EXPORT_SYMBOL(dahdi_transcoder_register);
 EXPORT_SYMBOL(dahdi_transcoder_unregister);
@@ -158,7 +155,6 @@ int dahdi_transcoder_alert(struct dahdi_transcoder_channel *chan)
 
 static int dahdi_tc_open(struct inode *inode, struct file *file)
 {
-#if !defined(__FreeBSD__)
 	const struct file_operations *original_fops;	
 	BUG_ON(!dahdi_transcode_fops);
 	original_fops = file->f_op;
@@ -169,7 +165,6 @@ static int dahdi_tc_open(struct inode *inode, struct file *file)
 	 * responsible for taking a reference out on this module before
 	 * calling this function. */
 	module_put(original_fops->owner);
-#endif /* !__FreeBSD__ */
 	return 0;
 }
 
@@ -184,7 +179,7 @@ static void dtc_release(struct dahdi_transcoder_channel *chan)
 
 static int dahdi_tc_release(struct inode *inode, struct file *file)
 {
-	struct dahdi_transcoder_channel *chan = dahdi_get_private_data(file);
+	struct dahdi_transcoder_channel *chan = file->private_data;
 	/* There will not be a transcoder channel associated with this file if
 	 * the ALLOCATE ioctl never succeeded. 
 	 */
@@ -264,7 +259,7 @@ __find_free_channel(struct list_head *list, const struct dahdi_transcoder_format
 static long dahdi_tc_allocate(struct file *file, unsigned long data)
 {
 	int res;
-	struct dahdi_transcoder_channel *chan = NULL, *old_chan;
+	struct dahdi_transcoder_channel *chan = NULL;
 	struct dahdi_transcoder_formats fmts;
 	
 	if (copy_from_user(&fmts, (__user const void *) data, sizeof(fmts))) {
@@ -284,14 +279,16 @@ static long dahdi_tc_allocate(struct file *file, unsigned long data)
 	chan->srcfmt = fmts.srcfmt;
 	chan->dstfmt = fmts.dstfmt;
 
-	if ((old_chan = dahdi_get_private_data(file)) != NULL) {
+	if (file->private_data) {
 		/* This open file is moving to a new channel. Cleanup and
 		 * close the old channel here.  */
-		dtc_release(old_chan);
+		dtc_release(file->private_data);
 	}
 
-	dahdi_set_private_data(file, chan);
-#if !defined(__FreeBSD__)
+	file->private_data = chan;
+#if defined(__FreeBSD__)
+	file->f_op = &chan->parent->fops;
+#else
 	if (chan->parent->fops.owner != file->f_op->owner) {
 		if (!try_module_get(chan->parent->fops.owner)) {
 			/* Failed to get a reference on the driver for the
@@ -341,7 +338,7 @@ static long dahdi_tc_getinfo(unsigned long data)
 		return -ENOSYS;
 	}
 
-	dahdi_copy_string(info.name, tc->name, sizeof(info.name));
+	strlcpy(info.name, tc->name, sizeof(info.name));
 	info.numchannels = tc->numchannels;
 	info.srcfmts = tc->srcfmts;
 	info.dstfmts = tc->dstfmts;
@@ -351,13 +348,7 @@ static long dahdi_tc_getinfo(unsigned long data)
 
 static ssize_t dahdi_tc_write(FOP_WRITE_ARGS_DECL)
 {
-	struct dahdi_transcoder_channel *chan = dahdi_get_private_data(file);
-
-	if (chan != NULL) {
-#if defined(__FreeBSD__)
-		if (chan->parent->fops.write)
-			return chan->parent->fops.write(FOP_WRITE_ARGS);
-#endif /* __FreeBSD__ */
+	if (file->private_data) {
 		/* file->private_data will not be NULL if DAHDI_TC_ALLOCATE was
 		 * called, and therefore indicates that the transcoder driver
 		 * did not export a read function. */
@@ -372,13 +363,7 @@ static ssize_t dahdi_tc_write(FOP_WRITE_ARGS_DECL)
 
 static ssize_t dahdi_tc_read(FOP_READ_ARGS_DECL)
 {
-	struct dahdi_transcoder_channel *chan = dahdi_get_private_data(file);
-
-	if (chan != NULL) {
-#if defined(__FreeBSD__)
-		if (chan->parent->fops.read)
-			return chan->parent->fops.read(FOP_READ_ARGS);
-#endif /* __FreeBSD__ */
+	if (file->private_data) {
 		/* file->private_data will not be NULL if DAHDI_TC_ALLOCATE was
 		 * called, and therefore indicates that the transcoder driver
 		 * did not export a write function. */
@@ -433,16 +418,10 @@ static int dahdi_tc_ioctl(struct inode *inode, struct file *file, unsigned int c
 }
 #endif
 
-static int dahdi_tc_mmap(struct file *file, struct vm_area_struct *vma)
-{
-	printk(KERN_ERR "%s: mmap interface deprecated.\n", THIS_MODULE->name);
-	return -ENOSYS;
-}
-
 static unsigned int dahdi_tc_poll(struct file *file, struct poll_table_struct *wait_table)
 {
 	int ret;
-	struct dahdi_transcoder_channel *chan = dahdi_get_private_data(file);
+	struct dahdi_transcoder_channel *chan = file->private_data;
 
 	if (!chan) {
 		/* This is because the DAHDI_TC_ALLOCATE ioctl was not called
@@ -450,7 +429,7 @@ static unsigned int dahdi_tc_poll(struct file *file, struct poll_table_struct *w
 		return -EINVAL;
 	}
 
-	dahdi_poll_wait(file, &chan->ready, wait_table);
+	poll_wait(file, &chan->ready, wait_table);
 
 	ret =  dahdi_tc_is_busy(chan)         ? 0       : POLLPRI;
 	ret |= dahdi_tc_is_built(chan)        ? POLLOUT : 0;
@@ -470,12 +449,11 @@ static struct file_operations __dahdi_transcode_fops = {
 	.read =    dahdi_tc_read,
 	.write =   dahdi_tc_write,
 	.poll =    dahdi_tc_poll,
-	.mmap =    dahdi_tc_mmap,
 };
 
 static struct dahdi_chardev transcode_chardev = {
 	.name = "transcode",
-	.minor = 250,
+	.minor = DAHDI_TRANSCODE,
 };
 
 static int dahdi_transcode_init(void)

@@ -1,7 +1,7 @@
 /*
  * DAHDI Telephony Interface to VPMADT032 Firmware Loader
  *
- * Copyright (C) 2008-2010 Digium, Inc. All rights reserved.
+ * Copyright (C) 2008-2012 Digium, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -16,7 +16,6 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
-
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -39,18 +38,9 @@ logger(const char *format, ...)
 	int res;
 	va_list args;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 9)
 	va_start(args, format);
 	res = vprintk(format, args);
 	va_end(args);
-#else
-	char buf[256];
-
-	va_start(args, format);
-	res = vsnprintf(buf, sizeof(buf), format, args);
-	va_end(args);
-	printk(KERN_INFO "%s", buf);
-#endif
 
 	return res;
 }
@@ -69,21 +59,14 @@ struct private_context {
 	struct voicebus *vb;
 	void *pvt;
 	struct completion done;
+	struct voicebus_operations ops;
 };
-
-static void init_private_context(struct private_context *ctx)
-{
-	init_completion(&ctx->done);
-}
 
 static void handle_receive(struct voicebus *vb, struct list_head *buffers)
 {
-#if defined(__FreeBSD__)
-	struct private_context *ctx = (struct private_context *) vb->ctx;
-#else
-	struct private_context *ctx = pci_get_drvdata(vb->pdev);
-#endif
 	struct vbb *vbb;
+	struct private_context *ctx = container_of(vb->ops,
+						struct private_context, ops);
 	list_for_each_entry(vbb, buffers, entry) {
 		__vpmadt032_receive(ctx->pvt, vbb->data);
 		if (__vpmadt032_done(ctx->pvt))
@@ -94,28 +77,24 @@ static void handle_receive(struct voicebus *vb, struct list_head *buffers)
 static void handle_transmit(struct voicebus *vb, struct list_head *buffers)
 {
 	struct vbb *vbb;
-#if defined(__FreeBSD__)
-	struct private_context *ctx = (struct private_context *) vb->ctx;
-#else
-	struct private_context *ctx = pci_get_drvdata(vb->pdev);
-#endif
+	struct private_context *ctx = container_of(vb->ops,
+						struct private_context, ops);
 	list_for_each_entry(vbb, buffers, entry)
 		__vpmadt032_transmit(ctx->pvt, vbb->data);
 }
 
-static const struct voicebus_operations loader_operations = {
-	.handle_receive = handle_receive,
-	.handle_transmit = handle_transmit,
-};
+static void init_private_context(struct private_context *ctx)
+{
+	init_completion(&ctx->done);
+	ctx->ops.handle_receive = handle_receive;
+	ctx->ops.handle_transmit = handle_transmit;
+}
 
 static int vpmadt032_load_firmware(struct voicebus *vb)
 {
 	int ret = 0;
 	struct private_context *ctx;
 	const struct voicebus_operations *old;
-#if !defined(__FreeBSD__)
-	void *old_drvdata;
-#endif
 	int id;
 	might_sleep();
 	ctx = kzalloc(sizeof(struct private_context), GFP_KERNEL);
@@ -132,22 +111,11 @@ static int vpmadt032_load_firmware(struct voicebus *vb)
 	ret = __vpmadt032_start_load(0, id, &ctx->pvt);
 	if (ret)
 		goto error_exit;
-#if defined(__FreeBSD__)
-	vb->ctx = ctx;
-#else
-	old_drvdata = pci_get_drvdata(vb->pdev);
-	pci_set_drvdata(vb->pdev, ctx);
-#endif
 	old = vb->ops;
-	vb->ops = &loader_operations;
+	vb->ops = &ctx->ops;
 	if (!wait_for_completion_timeout(&ctx->done, HZ*20))
 		ret = -EIO;
 	vb->ops = old;
-#if defined(__FreeBSD__)
-	vb->ctx = NULL;
-#else
-	pci_set_drvdata(vb->pdev, old_drvdata);
-#endif
 	__vpmadt032_cleanup(ctx->pvt);
 error_exit:
 	kfree(ctx);
@@ -184,7 +152,6 @@ MODULE_DEPEND(dahdi_vpmadt032_loader, dahdi_voicebus, 1, 1, 1);
 #endif
 
 module_param(debug, int, S_IRUGO | S_IWUSR);
-
 MODULE_DESCRIPTION("DAHDI VPMADT032 (Hardware Echo Canceller) Firmware Loader");
 MODULE_AUTHOR("Digium Incorporated <support@digium.com>");
 MODULE_LICENSE("Digium Commercial");

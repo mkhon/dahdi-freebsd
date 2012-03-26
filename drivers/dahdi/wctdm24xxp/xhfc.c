@@ -24,6 +24,7 @@
 #include <linux/pci.h>
 #include <linux/ppp_defs.h>
 #include <linux/delay.h>
+#include <linux/sched.h>
 
 #define FAST_HDLC_NEED_TABLES
 #include <dahdi/kernel.h>
@@ -614,27 +615,32 @@ static inline void flush_hw(void)
 {
 }
 
-static int xhfc_getreg(struct wctdm *wc, int card,
+static int xhfc_getreg(struct wctdm *wc, struct wctdm_module *const mod,
 		       int addr, u8 *lastreg)
 {
 	int x;
 
 	if (*lastreg != (unsigned char)addr) {
-		wctdm_setreg(wc, card, 0x60, addr);
+		wctdm_setreg(wc, mod, 0x60, addr);
 		*lastreg = (unsigned char)addr;
 	}
-	x = wctdm_getreg(wc, card, 0x80);
+	x = wctdm_getreg(wc, mod, 0x80);
 	return x;
 }
 
-static int xhfc_setreg(struct wctdm *wc, int card, int addr,
-		       int val, u8 *lastreg)
+static int xhfc_setreg(struct wctdm *wc, struct wctdm_module *const mod,
+		       int addr, int val, u8 *lastreg)
 {
 	if (*lastreg != (unsigned char)addr) {
-		wctdm_setreg(wc, card, 0x60, addr);
+		wctdm_setreg(wc, mod, 0x60, addr);
 		*lastreg = (unsigned char)addr;
 	}
-	return wctdm_setreg(wc, card, 0x00, val);
+	return wctdm_setreg(wc, mod, 0x00, val);
+}
+
+static inline struct wctdm_module *get_mod(struct b400m *b4)
+{
+	return &b4->wc->mods[b4->position];
 }
 
 static int b400m_getreg(struct b400m *b4, int addr)
@@ -649,7 +655,7 @@ static int b400m_getreg(struct b400m *b4, int addr)
 		}
 	}
 
-	x = xhfc_getreg(b4->wc, b4->position, addr, &b4->lastreg);
+	x = xhfc_getreg(b4->wc, get_mod(b4), addr, &b4->lastreg);
 	up(&b4->regsem);
 
 	return x;
@@ -667,7 +673,7 @@ static int b400m_setreg(struct b400m *b4, const int addr, const int val)
 		}
 	}
 
-	x = xhfc_setreg(b4->wc, b4->position, addr, val, &b4->lastreg);
+	x = xhfc_setreg(b4->wc, get_mod(b4), addr, val, &b4->lastreg);
 	up(&b4->regsem);
 
 	return x;
@@ -688,8 +694,8 @@ static void b400m_setreg_ra(struct b400m *b4, u8 r, u8 rd, u8 a, u8 ad)
 		}
 	}
 
-	xhfc_setreg(b4->wc, b4->position, r, rd, &b4->lastreg);
-	xhfc_setreg(b4->wc, b4->position, a, ad, &b4->lastreg);
+	xhfc_setreg(b4->wc, get_mod(b4), r, rd, &b4->lastreg);
+	xhfc_setreg(b4->wc, get_mod(b4), a, ad, &b4->lastreg);
 	up(&b4->regsem);
 }
 
@@ -704,8 +710,8 @@ static u8 b400m_getreg_ra(struct b400m *b4, u8 r, u8 rd, u8 a)
 		}
 	}
 
-	xhfc_setreg(b4->wc, b4->position, r, rd, &b4->lastreg);
-	res = xhfc_getreg(b4->wc, b4->position, a, &b4->lastreg);
+	xhfc_setreg(b4->wc, get_mod(b4), r, rd, &b4->lastreg);
+	res = xhfc_getreg(b4->wc, get_mod(b4), a, &b4->lastreg);
 	up(&b4->regsem);
 	return res;
 }
@@ -785,7 +791,7 @@ static void hfc_reset(struct b400m *b4)
 	b400m_setreg(b4, R_CIRM, V_SRES);
 	flush_hw();
 
-	wait_just_a_bit(HZ/10);
+	msleep(100);
 
 	b400m_setreg(b4, R_CIRM, 0x00);
 	flush_hw();
@@ -1154,7 +1160,7 @@ static int xhfc_find_sync_with_timingcable(struct b400m *b4)
 	}
 
 	for (j = 0; j < WC_MAX_IFACES && ifaces[j]; j++) {
-		if (!ifaces[j]->initialized) {
+		if (is_initialized(ifaces[j])) {
 			set_bit(WCTDM_CHECK_TIMING, &wc->checkflag);
 			osrc = -2;
 			goto out;
@@ -1675,10 +1681,8 @@ static void hfc_start_st(struct b400m_span *s)
 static int hdlc_start(struct b400m *b4, int fifo);
 static void hfc_init_all_st(struct b400m *b4)
 {
-	int i, gpio;
+	int i;
 	struct b400m_span *s;
-
-	gpio = 0;
 
 	for (i = 0; i < 4; i++) {
 		s = &b4->spans[i];
@@ -2092,8 +2096,8 @@ static void b400m_enable_workqueues(struct wctdm *wc)
 
 	spin_lock_irqsave(&wc->reglock, flags);
 	for (i = 0; i < wc->mods_per_board; i += 4) {
-		if (wc->modtype[i] == MOD_TYPE_BRI)
-			b4s[numb4s++] = wc->mods[i].bri;
+		if (wc->mods[i].type == BRI)
+			b4s[numb4s++] = wc->mods[i].mod.bri;
 	}
 	spin_unlock_irqrestore(&wc->reglock, flags);
 
@@ -2112,8 +2116,8 @@ static void b400m_disable_workqueues(struct wctdm *wc)
 
 	spin_lock_irqsave(&wc->reglock, flags);
 	for (i = 0; i < wc->mods_per_board; i += 4) {
-		if (wc->modtype[i] == MOD_TYPE_BRI)
-			b4s[numb4s++] = wc->mods[i].bri;
+		if (wc->mods[i].type == BRI)
+			b4s[numb4s++] = wc->mods[i].mod.bri;
 	}
 	spin_unlock_irqrestore(&wc->reglock, flags);
 
@@ -2166,7 +2170,7 @@ static int b400m_set_ntte(struct b400m_span *bspan, int te_mode, int term_on)
 	addr = 0x10 | all_modes;
 
 	msleep(voicebus_current_latency(&b4->wc->vb) + 2);
-	wctdm_setreg(b4->wc, b4->position, addr, data);
+	wctdm_setreg(b4->wc, get_mod(b4), addr, data);
 
 	b4->lastreg = 0xff;
 	msleep(voicebus_current_latency(&b4->wc->vb) + 2);
@@ -2180,17 +2184,26 @@ static int b400m_set_ntte(struct b400m_span *bspan, int te_mode, int term_on)
 }
 
 /* spanconfig for us means ...? */
-int b400m_spanconfig(struct dahdi_span *span, struct dahdi_lineconfig *lc)
+int b400m_spanconfig(struct file *file, struct dahdi_span *span,
+		     struct dahdi_lineconfig *lc)
 {
 	struct b400m_span *bspan;
 	struct b400m *b4;
 	struct wctdm *wc;
 	int te_mode, term;
 	int pos;
+	int res;
 
 	bspan = bspan_from_dspan(span);
 	b4 = bspan->parent;
 	wc = b4->wc;
+
+	if ((file->f_flags & O_NONBLOCK) && !is_initialized(wc))
+		return -EAGAIN;
+
+	res = wctdm_wait_for_ready(wc);
+	if (res)
+		return res;
 
 	b400m_disable_workqueues(b4->wc);
 
@@ -2255,12 +2268,19 @@ int b400m_spanconfig(struct dahdi_span *span, struct dahdi_lineconfig *lc)
  * The solution to that is to simply increment the span's "restart" flag, and
  * the driver's workqueue will do the dirty work on our behalf.
  */
-int b400m_chanconfig(struct dahdi_chan *chan, int sigtype)
+int b400m_chanconfig(struct file *file, struct dahdi_chan *chan, int sigtype)
 {
 	int alreadyrunning;
 	struct b400m_span *bspan = bspan_from_dspan(chan->span);
 	struct b400m *b4 = bspan->parent;
 	int res;
+
+	if ((file->f_flags & O_NONBLOCK) && !is_initialized(b4->wc))
+		return -EAGAIN;
+
+	res = wctdm_wait_for_ready(b4->wc);
+	if (res)
+		return res;
 
 	alreadyrunning = bspan->wspan->span.flags & DAHDI_FLAG_RUNNING;
 
@@ -2379,7 +2399,7 @@ static void xhfc_work(struct work_struct *work)
 	int i, j, k, fifo;
 	unsigned char b, b2;
 
-	if (b4->shutdown || !b4->wc->initialized)
+	if (b4->shutdown || !is_initialized(b4->wc))
 		return;
 
 	b4->irq_oview = b400m_getreg(b4, R_IRQ_OVIEW);
@@ -2492,37 +2512,30 @@ static void xhfc_work(struct work_struct *work)
 	hfc_update_st_timers(b4);
 }
 
-int wctdm_bri_checkisr(struct wctdm *wc, int modpos, int offset)
+void wctdm_bri_checkisr(struct wctdm *wc, struct wctdm_module *const mod,
+			int offset)
 {
-	struct b400m *b4;
-	int ret = 0;
+	struct b400m *b4 = mod->mod.bri;
 
 	/* don't do anything for non-base card slots */
-	if (modpos & 0x03)
-		return 0;
+	if (mod->card & 0x03)
+		return;
 
 	/* DEFINITELY don't do anything if our structures aren't ready! */
-	if (!wc || !wc->initialized || !(wc->mods[modpos].bri) ||
-	    !((struct b400m *)wc->mods[modpos].bri)->inited) {
-		return 0;
-	}
+	if (!is_initialized(wc) || !b4 || !b4->inited)
+		return;
 
-	b4 = (struct b400m *)wc->mods[modpos].bri;
 	if (offset == 0) {
-		if (!b4->shutdown) {
-			/* if (!(wc->intcount % 50)) */
-				queue_work(b4->xhfc_ws, &b4->xhfc_wq);
-		}
+		if (!b4->shutdown)
+			queue_work(b4->xhfc_ws, &b4->xhfc_wq);
 		b4->ticks++;
 	}
-
-	return ret;
+	return;
 }
 
 /* DAHDI calls this when it has data it wants to send to the HDLC controller */
 void wctdm_hdlc_hard_xmit(struct dahdi_chan *chan)
 {
-	struct wctdm *wc;
 	struct b400m *b4;
 	struct b400m_span *bspan;
 	struct dahdi_span *dspan;
@@ -2531,7 +2544,6 @@ void wctdm_hdlc_hard_xmit(struct dahdi_chan *chan)
 	dspan = chan->span;
 	bspan = bspan_from_dspan(dspan);
 	b4 = bspan->parent;
-	wc = b4->wc;
 	span = bspan->port;
 
 	if ((DBG_FOPS || DBG_HDLC) && DBG_SPANFILTER) {
@@ -2554,8 +2566,8 @@ static int b400m_probe(struct wctdm *wc, int modpos)
 	unsigned long flags;
 	int chiprev;
 
-	wctdm_setreg(wc, modpos, 0x10, 0x10);
-	id = xhfc_getreg(wc, modpos, R_CHIP_ID, &x);
+	wctdm_setreg(wc, &wc->mods[modpos], 0x10, 0x10);
+	id = xhfc_getreg(wc, &wc->mods[modpos], R_CHIP_ID, &x);
 
 	/* chip ID high 7 bits must be 0x62, see datasheet */
 	if ((id & 0xfe) != 0x62)
@@ -2575,13 +2587,13 @@ static int b400m_probe(struct wctdm *wc, int modpos)
 	/* which B400M in the system is this one? count all of them found so
 	 * far */
 	for (x = 0; x < modpos; x += 4) {
-		if (wc->modtype[x] == MOD_TYPE_BRI)
+		if (wc->mods[x].type == BRI)
 			++b4->b400m_no;
 	}
 
 	spin_lock_init(&b4->reglock);
-	init_MUTEX(&b4->regsem);
-	init_MUTEX(&b4->fifosem);
+	sema_init(&b4->regsem, 1);
+	sema_init(&b4->fifosem, 1);
 
 	for (x = 0; x < 4; x++) {
 		fasthdlc_init(&b4->spans[x].rxhdlc, FASTHDLC_MODE_16);
@@ -2608,7 +2620,7 @@ static int b400m_probe(struct wctdm *wc, int modpos)
 	hfc_enable_interrupts(b4);
 
 	spin_lock_irqsave(&wc->reglock, flags);
-	wc->mods[modpos].bri = (void *)b4;
+	wc->mods[modpos].mod.bri = (void *)b4;
 	spin_unlock_irqrestore(&wc->reglock, flags);
 
 	return 0;
@@ -2619,7 +2631,7 @@ void b400m_post_init(struct b400m *b4)
 	snprintf(b4->name, sizeof(b4->name) - 1, "b400m-%d",
 		 b4->b400m_no);
 	b4->xhfc_ws = create_singlethread_workqueue(b4->name);
-#if	LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+#	if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 	INIT_WORK(&b4->xhfc_wq, xhfc_work, b4);
 #	else
 	INIT_WORK(&b4->xhfc_wq, xhfc_work);
@@ -2630,37 +2642,40 @@ void b400m_post_init(struct b400m *b4)
 /* functions called from the wctdm code */
 int wctdm_init_b400m(struct wctdm *wc, int card)
 {
-	int i, ret = 0;
+	int ret = 0;
 	unsigned long flags;
 
-	if (wc->modtype[card & 0xfc] == MOD_TYPE_QRV)
+	if (wc->mods[card & 0xfc].type == QRV)
 		return -2;
 
 	if (!(card & 0x03)) { /* only init if at lowest port in module */
 		spin_lock_irqsave(&wc->reglock, flags);
-		wc->modtype[card + 0] = MOD_TYPE_BRI;
-		wc->modtype[card + 1] = MOD_TYPE_BRI;
-		wc->modtype[card + 2] = MOD_TYPE_BRI;
-		wc->modtype[card + 3] = MOD_TYPE_BRI;
+		wc->mods[card + 0].type = BRI;
+		wc->mods[card + 0].mod.bri = NULL;
+		wc->mods[card + 1].type = BRI;
+		wc->mods[card + 1].mod.bri = NULL;
+		wc->mods[card + 2].type = BRI;
+		wc->mods[card + 2].mod.bri = NULL;
+		wc->mods[card + 3].type = BRI;
+		wc->mods[card + 3].mod.bri = NULL;
 		spin_unlock_irqrestore(&wc->reglock, flags);
 
-		for (i = 0; i < 10; i++)
-			dahdi_schluffen(&wc->regq);
+		msleep(20);
 
 		if (b400m_probe(wc, card) != 0) {
 			spin_lock_irqsave(&wc->reglock, flags);
-			wc->modtype[card + 0] = MOD_TYPE_NONE;
-			wc->modtype[card + 1] = MOD_TYPE_NONE;
-			wc->modtype[card + 2] = MOD_TYPE_NONE;
-			wc->modtype[card + 3] = MOD_TYPE_NONE;
+			wc->mods[card + 0].type = NONE;
+			wc->mods[card + 1].type = NONE;
+			wc->mods[card + 2].type = NONE;
+			wc->mods[card + 3].type = NONE;
 			spin_unlock_irqrestore(&wc->reglock, flags);
 			ret = -2;
 		}
 	} else {	/* for the "sub-cards" */
-		if (wc->modtype[card & 0xfc] == MOD_TYPE_BRI) {
+		if (wc->mods[card & 0xfc].type == BRI) {
 			spin_lock_irqsave(&wc->reglock, flags);
-			wc->modtype[card] = MOD_TYPE_BRI;
-			wc->mods[card].bri = wc->mods[card & 0xfc].bri;
+			wc->mods[card].type = BRI;
+			wc->mods[card].mod.bri = wc->mods[card & 0xfc].mod.bri;
 			spin_unlock_irqrestore(&wc->reglock, flags);
 		} else {
 			ret = -2;
@@ -2672,7 +2687,7 @@ int wctdm_init_b400m(struct wctdm *wc, int card)
 
 void wctdm_unload_b400m(struct wctdm *wc, int card)
 {
-	struct b400m *b4 = wc->mods[card].bri;
+	struct b400m *b4 = wc->mods[card].mod.bri;
 	int i;
 
 	/* TODO: shutdown once won't work if just a single card is hotswapped
@@ -2715,7 +2730,7 @@ void wctdm_unload_b400m(struct wctdm *wc, int card)
 	if (b4) {
 		b4->inited = 0;
 
-		wait_just_a_bit(HZ/10);
+		msleep(100);
 
 		/* TODO: wait for tdm24xx driver to unregister the spans */
 		/* 	do { ... } while(not_unregistered); */
@@ -2738,17 +2753,17 @@ void wctdm_unload_b400m(struct wctdm *wc, int card)
 
 		destroy_workqueue(b4->xhfc_ws);
 
-		/* Set these to MOD_TYPE_NONE to ensure that our checkisr
+		/* Set these to NONE to ensure that our checkisr
 		 * routines are not entered */
-		wc->modtype[card] = MOD_TYPE_NONE;
-		wc->modtype[card + 1] = MOD_TYPE_NONE;
-		wc->modtype[card + 2] = MOD_TYPE_NONE;
-		wc->modtype[card + 3] = MOD_TYPE_NONE;
+		wc->mods[card].type = NONE;
+		wc->mods[card + 1].type = NONE;
+		wc->mods[card + 2].type = NONE;
+		wc->mods[card + 3].type = NONE;
 
-		wc->mods[card].bri = NULL;
-		wc->mods[card + 1].bri = NULL;
-		wc->mods[card + 2].bri = NULL;
-		wc->mods[card + 3].bri = NULL;
+		wc->mods[card].mod.bri = NULL;
+		wc->mods[card + 1].mod.bri = NULL;
+		wc->mods[card + 2].mod.bri = NULL;
+		wc->mods[card + 3].mod.bri = NULL;
 
 		spin_lock_destroy(&b4->reglock);
 		destroy_MUTEX(&b4->regsem);

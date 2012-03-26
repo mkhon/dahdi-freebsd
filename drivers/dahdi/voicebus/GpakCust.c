@@ -49,7 +49,7 @@
 #include "voicebus.h"
 #include "vpmadtreg.h"
 
-static rwlock_t ifacelock;
+static DEFINE_SPINLOCK(ifacelock);
 static struct vpmadt032 *ifaces[MAX_DSP_CORES];
 
 #define vpm_info(vpm, format, arg...)         \
@@ -59,13 +59,13 @@ static inline struct vpmadt032 *find_iface(const unsigned short dspid)
 {
 	struct vpmadt032 *ret;
 
-	read_lock(&ifacelock);
+	spin_lock(&ifacelock);
 	if (ifaces[dspid]) {
 		ret = ifaces[dspid];
 	} else {
 		ret = NULL;
 	}
-	read_unlock(&ifacelock);
+	spin_unlock(&ifacelock);
 	return ret;
 }
 
@@ -132,8 +132,8 @@ static int vpmadt032_getreg_full_return(struct vpmadt032 *vpm, int pagechange,
 	unsigned long ret;
 	BUG_ON(!cmd);
 
-	/* We'll wait for 200ms */
-	ret = wait_for_completion_timeout(&cmd->complete, HZ/5);
+	/* We'll wait for 2s */
+	ret = wait_for_completion_timeout(&cmd->complete, HZ*2);
 	if (unlikely(!ret)) {
 		spin_lock_irqsave(&vpm->list_lock, flags);
 		list_del(&cmd->node);
@@ -498,29 +498,16 @@ void vpmadt032_echocan_free(struct vpmadt032 *vpm, int channo,
 EXPORT_SYMBOL(vpmadt032_echocan_free);
 
 struct vpmadt032 *
-vpmadt032_alloc(struct vpmadt032_options *options, const char *board_name)
+vpmadt032_alloc(struct vpmadt032_options *options)
 {
 	struct vpmadt032 *vpm;
 	int i;
-	const char *suffix = "-vpm";
-	size_t length;
 
 	might_sleep();
 
-	length = strlen(board_name) + strlen(suffix) + 1;
-
-	/* Add a little extra to store the wq_name. */
-	vpm = kzalloc(sizeof(*vpm) + length, GFP_KERNEL);
+	vpm = kzalloc(sizeof(*vpm), GFP_KERNEL);
 	if (!vpm)
 		return NULL;
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 18)
-	/* There is a limit on the length of the name of the workqueue. */
-	strcpy(vpm->wq_name, "vpmadt032");
-#else
-	strcpy(vpm->wq_name, board_name);
-	strcat(vpm->wq_name, suffix);
-#endif
 
 	/* Init our vpmadt032 struct */
 	memcpy(&vpm->options, options, sizeof(*options));
@@ -529,15 +516,20 @@ vpmadt032_alloc(struct vpmadt032_options *options, const char *board_name)
 	INIT_LIST_HEAD(&vpm->change_list);
 	INIT_LIST_HEAD(&vpm->pending_cmds);
 	INIT_LIST_HEAD(&vpm->active_cmds);
-	_sema_init(&vpm->sem, 1);
+	sema_init(&vpm->sem, 1);
 	vpm->curpage = 0x80;
 	vpm->dspid = -1;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+	INIT_WORK(&vpm->work, vpmadt032_bh, vpm);
+#else
+	INIT_WORK(&vpm->work, vpmadt032_bh);
+#endif
 
 	/* Do not use the global workqueue for processing these events.  Some of
 	 * the operations can take 100s of ms, most of that time spent sleeping.
 	 * On single CPU systems, this unduly serializes operations accross
 	 * multiple vpmadt032 instances. */
-	vpm->wq = create_singlethread_workqueue(vpm->wq_name);
+	vpm->wq = create_singlethread_workqueue("vpmadt032");
 	if (!vpm->wq) {
 		kfree(vpm);
 		return NULL;
@@ -545,7 +537,7 @@ vpmadt032_alloc(struct vpmadt032_options *options, const char *board_name)
 
 	/* Place this structure in the ifaces array so that the DspId from the
 	 * Gpak Library can be used to locate it. */
-	write_lock(&ifacelock);
+	spin_lock(&ifacelock);
 	for (i=0; i<MAX_DSP_CORES; ++i) {
 		if (NULL == ifaces[i]) {
 			ifaces[i] = vpm;
@@ -553,7 +545,7 @@ vpmadt032_alloc(struct vpmadt032_options *options, const char *board_name)
 			break;
 		}
 	}
-	write_unlock(&ifacelock);
+	spin_unlock(&ifacelock);
 
 	if (-1 == vpm->dspid) {
 		kfree(vpm);
@@ -570,27 +562,45 @@ int vpmadt032_reset(struct vpmadt032 *vpm)
 	int res;
 	gpakPingDspStat_t pingstatus;
 	u16 version;
+	unsigned long stoptime;
+	struct device *const dev = &vpm->vb->pdev->dev;
 
 	might_sleep();
 
 	set_bit(VPM150M_HPIRESET, &vpm->control);
 	msleep(2000);
-	while (test_bit(VPM150M_HPIRESET, &vpm->control))
+	/* It should never take longer than 5 seconds. */
+	stoptime = jiffies + 3*HZ;
+	while (test_bit(VPM150M_HPIRESET, &vpm->control) &&
+	       time_before(jiffies, stoptime))
 		msleep(1);
+
+	if (time_after(jiffies, stoptime)) {
+		dev_dbg(dev, "Detected failure to clear HPIRESET.\n");
+		return -EIO;
+	}
 
 	/* Set us up to page 0 */
 	vpmadt032_setpage(vpm, 0);
 
 	res = vpmadtreg_loadfirmware(vpm->vb);
 	if (res) {
-		dev_info(&vpm->vb->pdev->dev, "Failed to load the firmware.\n");
+		dev_err(dev, "Failed to load VPMADT032 firmware.\n");
 		return res;
 	}
 	vpm->curpage = -1;
 
+	stoptime = jiffies + 3*HZ;
 	set_bit(VPM150M_SWRESET, &vpm->control);
-	while (test_bit(VPM150M_SWRESET, &vpm->control))
+	while (test_bit(VPM150M_SWRESET, &vpm->control) &&
+	       time_before(jiffies, stoptime))
 		msleep(1);
+
+	if (time_after(jiffies, stoptime)) {
+		dev_dbg(dev, "Detected failure to clear SWRESET.\n");
+		return -EIO;
+	}
+
 
 	/* Set us up to page 0 */
 	pingstatus = gpakPingDsp(vpm->dspid, &version);
@@ -606,50 +616,84 @@ int vpmadt032_reset(struct vpmadt032 *vpm)
 }
 EXPORT_SYMBOL(vpmadt032_reset);
 
-int
-vpmadt032_init(struct vpmadt032 *vpm, struct voicebus *vb)
+/**
+ * vpmadt032_test - Check if there is a VPMADT032 present on voicebus device.
+ * @vpm:	Allocated with vpmadt032_alloc previously.
+ * @vb:		Voicebus structure to test on.
+ *
+ * Returns 0 if there is a device, otherwise -ENODEV.
+ *
+ */
+int vpmadt032_test(struct vpmadt032 *vpm, struct voicebus *vb)
 {
-	int i;
-	u16 reg;
-	int res = -EFAULT;
-	gpakPingDspStat_t pingstatus;
-
-	BUG_ON(!vpm->setchanconfig_from_state);
-	BUG_ON(!vpm->wq);
-	BUG_ON(!vb);
+	u8 reg;
+	int i, x;
+	struct device *dev = &vb->pdev->dev;
 
 	vpm->vb = vb;
 
-	might_sleep();
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
-	INIT_WORK(&vpm->work, vpmadt032_bh, vpm);
-#else
-	INIT_WORK(&vpm->work, vpmadt032_bh);
-#endif
 	if (vpm->options.debug & DEBUG_VPMADT032_ECHOCAN)
-		dev_info(&vpm->vb->pdev->dev, "VPMADT032 Testing page access: ");
+		dev_info(dev, "VPMADT032 Testing page access: ");
 
 	for (i = 0; i < 0xf; i++) {
-		int x;
 		for (x = 0; x < 3; x++) {
 			vpmadt032_setpage(vpm, i);
 			reg = vpmadt032_getpage(vpm);
 			if (reg != i) {
-				if (vpm->options.debug & DEBUG_VPMADT032_ECHOCAN)
-					dev_info(&vpm->vb->pdev->dev, "Failed: Sent %x != %x VPMADT032 Failed HI page test\n", i, reg);
-				res = -ENODEV;
-				goto failed_exit;
+				if (vpm->options.debug &
+				    DEBUG_VPMADT032_ECHOCAN) {
+					dev_err(dev, "Failed: Sent %x != %x " \
+						"VPMADT032 Failed HI page " \
+						"test\n", i, reg);
+				}
+				return -ENODEV;
 			}
 		}
 	}
 
 	if (vpm->options.debug & DEBUG_VPMADT032_ECHOCAN)
-		dev_info(&vpm->vb->pdev->dev, "Passed\n");
+		dev_info(dev, "Passed\n");
 
+	return 0;
+}
+EXPORT_SYMBOL(vpmadt032_test);
+
+/**
+ * vpmadt032_init - Initialize and load VPMADT032 firmware.
+ * @vpm:	Allocated with vpmadt032_alloc previously.
+ *
+ * Returns 0 on success.  This must be called after vpmadt032_test already
+ * checked if there appears to be a VPMADT032 installed on the board.
+ *
+ */
+int vpmadt032_init(struct vpmadt032 *vpm)
+{
+	int i;
+	u16 reg;
+	int res = -EFAULT;
+	unsigned long stoptime;
+	struct device *dev;
+	gpakPingDspStat_t pingstatus;
+
+	BUG_ON(!vpm->setchanconfig_from_state);
+	BUG_ON(!vpm->wq);
+	BUG_ON(!vpm->vb);
+
+	might_sleep();
+
+	dev = &vpm->vb->pdev->dev;
+
+	stoptime = jiffies + 3*HZ;
 	set_bit(VPM150M_HPIRESET, &vpm->control);
-	while (test_bit(VPM150M_HPIRESET, &vpm->control))
+	while (test_bit(VPM150M_HPIRESET, &vpm->control) &&
+	       time_before(jiffies, stoptime))
 		msleep(1);
+
+	if (time_after(jiffies, stoptime)) {
+		dev_dbg(dev, "Detected failure to clear HPIRESET.\n");
+		res = -EIO;
+		goto failed_exit;
+	}
 	msleep(250);
 
 	/* Set us up to page 0 */
@@ -672,26 +716,43 @@ vpmadt032_init(struct vpmadt032 *vpm, struct voicebus *vb)
 	if (vpm->options.debug & DEBUG_VPMADT032_ECHOCAN)
 		dev_info(&vpm->vb->pdev->dev, "Passed\n");
 
+	stoptime = jiffies + 3*HZ;
 	set_bit(VPM150M_HPIRESET, &vpm->control);
-	while (test_bit(VPM150M_HPIRESET, &vpm->control))
+	while (test_bit(VPM150M_HPIRESET, &vpm->control) &&
+	       time_before(jiffies, stoptime))
 		msleep(1);
 
-	res = vpmadtreg_loadfirmware(vb);
+	if (time_after(jiffies, stoptime)) {
+		dev_dbg(dev, "Detected failure to clear SWRESET.\n");
+		res = -EIO;
+		goto failed_exit;
+	}
+
+	res = vpmadtreg_loadfirmware(vpm->vb);
 	if (res) {
-		dev_info(&vb->pdev->dev, "Failed to load the firmware.\n");
+		dev_info(&vpm->vb->pdev->dev, "Failed to load the firmware.\n");
 		return res;
 	}
 	vpm->curpage = -1;
 
-	dev_info(&vb->pdev->dev, "Booting VPMADT032\n");
+	dev_info(&vpm->vb->pdev->dev, "Booting VPMADT032\n");
+
+	stoptime = jiffies + 3*HZ;
 	set_bit(VPM150M_SWRESET, &vpm->control);
-	while (test_bit(VPM150M_SWRESET, &vpm->control))
+	while (test_bit(VPM150M_SWRESET, &vpm->control) &&
+	       time_before(jiffies, stoptime))
 		msleep(1);
+
+	if (time_after(jiffies, stoptime)) {
+		dev_dbg(dev, "Detected failure to clear SWRESET.\n");
+		res = -EIO;
+		goto failed_exit;
+	}
 
 	pingstatus = gpakPingDsp(vpm->dspid, &vpm->version);
 
 	if (!pingstatus) {
-		dev_info(&vb->pdev->dev, "VPM present and operational "
+		dev_info(&vpm->vb->pdev->dev, "VPM present and operational "
 			"(Firmware version %x)\n", vpm->version);
 	} else {
 		dev_notice(&vpm->vb->pdev->dev, "VPMADT032 Failed! Unable to ping the DSP (%d)!\n", pingstatus);
@@ -714,7 +775,13 @@ void vpmadt032_get_default_parameters(struct GpakEcanParms *p)
 	p->EcanTapLength = 1024;
 	p->EcanNlpType = DEFAULT_NLPTYPE;
 	p->EcanAdaptEnable = 1;
+
+#ifdef CONFIG_DAHDI_NO_ECHOCAN_DISABLE
+	p->EcanG165DetEnable = 0;
+#else
 	p->EcanG165DetEnable = 1;
+#endif
+
 	p->EcanDblTalkThresh = 6;
 	p->EcanMaxDoubleTalkThres = 40;
 	p->EcanNlpThreshold = DEFAULT_NLPTHRESH;
@@ -771,22 +838,15 @@ void vpmadt032_free(struct vpmadt032 *vpm)
 	}
 
 	BUG_ON(ifaces[vpm->dspid] != vpm);
-	write_lock(&ifacelock);
+	spin_lock(&ifacelock);
 	ifaces[vpm->dspid] = NULL;
-	write_unlock(&ifacelock);
-	_sema_destroy(&vpm->sem);
+	spin_unlock(&ifacelock);
+	sema_destroy(&vpm->sem);
 	spin_lock_destroy(&vpm->change_list_lock);
 	spin_lock_destroy(&vpm->list_lock);
 	kfree(vpm);
 }
 EXPORT_SYMBOL(vpmadt032_free);
-
-int vpmadt032_module_init(void)
-{
-	rwlock_init(&ifacelock);
-	memset(ifaces, 0, sizeof(ifaces));
-	return 0;
-}
 
 /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
  * gpakReadDspMemory - Read DSP memory.

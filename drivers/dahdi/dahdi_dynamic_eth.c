@@ -3,7 +3,7 @@
  *
  * Written by Mark Spencer <markster@digium.com>
  *
- * Copyright (C) 2001-2008, Digium, Inc.
+ * Copyright (C) 2001-2012, Digium, Inc.
  *
  * All rights reserved.
  *
@@ -48,11 +48,7 @@ struct ztdeth_header {
 
 /* We take the raw message, put it in an ethernet frame, and add a
    two byte addressing header at the top for future use */
-#ifdef DEFINE_SPINLOCK
 static DEFINE_SPINLOCK(zlock);
-#else
-static spinlock_t zlock = SPIN_LOCK_UNLOCKED;
-#endif
 
 #if !defined(__FreeBSD__)
 static struct sk_buff_head skbs;
@@ -83,6 +79,8 @@ static struct dahdi_span *ztdeth_getspan(unsigned char *addr, unsigned short sub
 	if (z)
 		span = z->span;
 	spin_unlock_irqrestore(&zlock, flags);
+	if (!span || !test_bit(DAHDI_FLAGBIT_REGISTERED, &span->flags))
+		return NULL;
 	return span;
 }
 
@@ -104,11 +102,7 @@ static int ztdeth_rcv(struct net_device *dev, struct ether_header *eh,
 	return 0;
 }
 #else /* !__FreeBSD__ */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,14)
 static int ztdeth_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt, struct net_device *orig_dev)
-#else
-static int ztdeth_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt)
-#endif
 {
 	struct dahdi_span *span;
 	struct ztdeth_header *zh;
@@ -117,11 +111,7 @@ static int ztdeth_rcv(struct sk_buff *skb, struct net_device *dev, struct packet
 #else
 	zh = (struct ztdeth_header *)skb->nh.raw;
 #endif
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,9)
 	span = ztdeth_getspan(eth_hdr(skb)->h_source, zh->subaddr);
-#else
-	span = ztdeth_getspan(skb->mac.ethernet->h_source, zh->subaddr);
-#endif	
 	if (span) {
 		skb_pull(skb, sizeof(struct ztdeth_header));
 #ifdef NEW_SKB_LINEARIZE
@@ -171,7 +161,7 @@ static int ztdeth_notifier(struct notifier_block *block, unsigned long event, vo
 	return 0;
 }
 
-static int ztdeth_transmit(void *pvt, unsigned char *msg, int msglen)
+static void ztdeth_transmit(struct dahdi_dynamic *dyn, u8 *msg, size_t msglen)
 {
 	struct ztdeth *z;
 #if defined(__FreeBSD__)
@@ -188,7 +178,7 @@ static int ztdeth_transmit(void *pvt, unsigned char *msg, int msglen)
 	struct net_device *dev;
 
 	spin_lock_irqsave(&zlock, flags);
-	z = pvt;
+	z = dyn->pvt;
 	if (z->dev) {
 		/* Copy fields to local variables to remove spinlock ASAP */
 #if defined(__FreeBSD__)
@@ -253,20 +243,48 @@ static int ztdeth_transmit(void *pvt, unsigned char *msg, int msglen)
 	}
 	else
 		spin_unlock_irqrestore(&zlock, flags);
-	return 0;
 }
 
-
-static int ztdeth_flush(void)
+/**
+ * dahdi_dynamic_flush_work_fn - Flush all pending transactions.
+ *
+ * This function is run in a work queue since we can't guarantee interrupts
+ * will be enabled when we're called, and dev_queue_xmit() requires that
+ * interrupts be enabled.
+ *
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+static void dahdi_dynamic_flush_work_fn(void *data)
+#else
+static void dahdi_dynamic_flush_work_fn(struct work_struct *work)
+#endif
 {
 #if !defined(__FreeBSD__)
 	struct sk_buff *skb;
-
 	/* Handle all transmissions now */
 	while ((skb = skb_dequeue(&skbs))) {
 		dev_queue_xmit(skb);
 	}
 #endif /* !__FreeBSD__ */
+}
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+static DECLARE_WORK(dahdi_dynamic_eth_flush_work,
+		    dahdi_dynamic_flush_work_fn, NULL);
+#else
+static DECLARE_WORK(dahdi_dynamic_eth_flush_work,
+		    dahdi_dynamic_flush_work_fn);
+#endif
+
+/**
+ * ztdeth_flush - Flush all pending transactions.
+ *
+ * This function is called in interrupt context while processing the master
+ * span.
+ */
+static int ztdeth_flush(void)
+{
+	schedule_work(&dahdi_dynamic_eth_flush_work);
 	return 0;
 }
 
@@ -333,9 +351,9 @@ static int hex2int(char *s)
 	return tmp;
 }
 
-static void ztdeth_destroy(void *pvt)
+static void ztdeth_destroy(struct dahdi_dynamic *dyn)
 {
-	struct ztdeth *z = pvt;
+	struct ztdeth *z = dyn->pvt;
 	unsigned long flags;
 	struct ztdeth *prev=NULL, *cur;
 	spin_lock_irqsave(&zlock, flags);
@@ -355,17 +373,17 @@ static void ztdeth_destroy(void *pvt)
 	if (cur == z) {	/* Successfully removed */
 		printk(KERN_INFO "TDMoE: Removed interface for %s\n", z->span->name);
 		kfree(z);
-		module_put(THIS_MODULE);
 	}
 }
 
-static void *ztdeth_create(struct dahdi_span *span, char *addr)
+static int ztdeth_create(struct dahdi_dynamic *dyn, const char *addr)
 {
 	struct ztdeth *z;
 	char src[256];
 	char tmp[256], *tmp2, *tmp3, *tmp4 = NULL;
 	int res,x;
 	unsigned long flags;
+	struct dahdi_span *const span = &dyn->span;
 
 	z = kmalloc(sizeof(struct ztdeth), GFP_KERNEL);
 	if (z) {
@@ -373,16 +391,16 @@ static void *ztdeth_create(struct dahdi_span *span, char *addr)
 		memset(z, 0, sizeof(struct ztdeth));
 
 		/* Address should be <dev>/<macaddr>[/subaddr] */
-		dahdi_copy_string(tmp, addr, sizeof(tmp));
+		strlcpy(tmp, addr, sizeof(tmp));
 		tmp2 = strchr(tmp, '/');
 		if (tmp2) {
 			*tmp2 = '\0';
 			tmp2++;
-			dahdi_copy_string(z->ethdev, tmp, sizeof(z->ethdev));
+			strlcpy(z->ethdev, tmp, sizeof(z->ethdev));
 		} else {
 			printk(KERN_NOTICE "Invalid TDMoE address (no device) '%s'\n", addr);
 			kfree(z);
-			return NULL;
+			return -EINVAL;
 		}
 		if (tmp2) {
 			tmp4 = strchr(tmp2+1, '/');
@@ -410,12 +428,12 @@ static void *ztdeth_create(struct dahdi_span *span, char *addr)
 			if (x != 6) {
 				printk(KERN_NOTICE "TDMoE: Invalid MAC address in: %s\n", addr);
 				kfree(z);
-				return NULL;
+				return -EINVAL;
 			}
 		} else {
 			printk(KERN_NOTICE "TDMoE: Missing MAC address\n");
 			kfree(z);
-			return NULL;
+			return -EINVAL;
 		}
 		if (tmp4) {
 			int sub = 0;
@@ -429,7 +447,7 @@ static void *ztdeth_create(struct dahdi_span *span, char *addr)
 				} else {
 					printk(KERN_NOTICE "TDMoE: Invalid subaddress\n");
 					kfree(z);
-					return NULL;
+					return -EINVAL;
 				}
 				mul *= 10;
 				tmp3--;
@@ -444,7 +462,7 @@ static void *ztdeth_create(struct dahdi_span *span, char *addr)
 		if (!z->dev) {
 			printk(KERN_NOTICE "TDMoE: Invalid device '%s'\n", z->ethdev);
 			kfree(z);
-			return NULL;
+			return -EINVAL;
 		}
 		z->span = span;
 		src[0] ='\0';
@@ -456,20 +474,20 @@ static void *ztdeth_create(struct dahdi_span *span, char *addr)
 		spin_lock_irqsave(&zlock, flags);
 		z->next = zdevs;
 		zdevs = z;
+		dyn->pvt = z;
 		spin_unlock_irqrestore(&zlock, flags);
-		if(!try_module_get(THIS_MODULE))
-			printk(KERN_DEBUG "TDMoE: Unable to increment module use count\n");
 	}
-	return z;
+	return (z) ? 0 : -ENOMEM;
 }
 
 static struct dahdi_dynamic_driver ztd_eth = {
-	"eth",
-	"Ethernet",
-	ztdeth_create,
-	ztdeth_destroy,
-	ztdeth_transmit,
-	ztdeth_flush
+	.owner = THIS_MODULE,
+	.name = "eth",
+	.desc = "Ethernet",
+	.create = ztdeth_create,
+	.destroy = ztdeth_destroy,
+	.transmit = ztdeth_transmit,
+	.flush = ztdeth_flush,
 };
 
 static struct notifier_block ztdeth_nblock = {
@@ -480,7 +498,7 @@ static int __init ztdeth_init(void)
 {
 	dev_add_pack(&ztdeth_ptype);
 	register_netdevice_notifier(&ztdeth_nblock);
-	dahdi_dynamic_register(&ztd_eth);
+	dahdi_dynamic_register_driver(&ztd_eth);
 
 #if !defined(__FreeBSD__)
 	skb_queue_head_init(&skbs);
@@ -491,9 +509,14 @@ static int __init ztdeth_init(void)
 
 static void __exit ztdeth_exit(void)
 {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 22)
+	flush_scheduled_work();
+#else
+	cancel_work_sync(&dahdi_dynamic_eth_flush_work);
+#endif
 	dev_remove_pack(&ztdeth_ptype);
 	unregister_netdevice_notifier(&ztdeth_nblock);
-	dahdi_dynamic_unregister(&ztd_eth);
+	dahdi_dynamic_unregister_driver(&ztd_eth);
 }
 
 #if defined(__FreeBSD__)

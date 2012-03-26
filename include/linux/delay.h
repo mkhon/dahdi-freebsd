@@ -11,5 +11,6 @@
 #undef msleep
 #endif
 #define msleep(msec)		mdelay(msec)
+#define msleep_interruptible(msec)	msleep(msec)
 
 #endif /* _LINUX_DELAY_H_ */

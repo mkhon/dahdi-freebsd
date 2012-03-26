@@ -5,7 +5,7 @@
  *
  * Based upon kb1ec.h and mec2.h
  * 
- * Copyright (C) 2002, Digium, Inc.
+ * Copyright (C) 2002-2012, Digium, Inc.
  *
  * Additional background on the techniques used in this code can be found in:
  *
@@ -43,9 +43,6 @@
 
 static int debug;
 static int aggressive;
-
-#define module_printk(level, fmt, args...) printk(level "%s: " fmt, THIS_MODULE->name, ## args)
-#define debug_printk(level, fmt, args...) if (debug >= level) printk("%s (%s): " fmt, THIS_MODULE->name, __FUNCTION__, ## args)
 
 #define ABS(a) abs(a!=-32768?a:-32767)
 
@@ -180,9 +177,11 @@ static void echo_can_free(struct dahdi_chan *chan, struct dahdi_echocan_state *e
 static void echo_can_process(struct dahdi_echocan_state *ec, short *isig, const short *iref, u32 size);
 static int echo_can_traintap(struct dahdi_echocan_state *ec, int pos, short val);
 static void echocan_NLP_toggle(struct dahdi_echocan_state *ec, unsigned int enable);
+static const char *name = "MG2";
+static const char *ec_name(const struct dahdi_chan *chan) { return name; }
 
 static const struct dahdi_echocan_factory my_factory = {
-	.name = "MG2",
+	.get_name = ec_name,
 	.owner = THIS_MODULE,
 	.echocan_create = echo_can_create,
 };
@@ -192,7 +191,6 @@ static const struct dahdi_echocan_features my_features = {
 };
 
 static const struct dahdi_echocan_ops my_ops = {
-	.name = "MG2",
 	.echocan_free = echo_can_free,
 	.echocan_process = echo_can_process,
 	.echocan_traintap = echo_can_traintap,
@@ -387,7 +385,7 @@ static void echo_can_free(struct dahdi_chan *chan, struct dahdi_echocan_state *e
 }
 
 #ifdef DC_NORMALIZE
-static short inline dc_removal(int *dc_estimate, short samp)
+static inline short dc_removal(int *dc_estimate, short samp)
 {
 	*dc_estimate += ((((int)samp << 15) - *dc_estimate) >> 9);
 	return samp - (*dc_estimate >> 15);
@@ -870,7 +868,8 @@ static int __init mod_init(void)
 		return -EPERM;
 	}
 
-	module_printk(KERN_NOTICE, "Registered echo canceler '%s'\n", my_factory.name);
+	module_printk(KERN_NOTICE, "Registered echo canceler '%s'\n",
+		      my_factory.get_name(NULL));
 
 	return 0;
 }

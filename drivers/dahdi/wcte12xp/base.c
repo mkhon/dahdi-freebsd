@@ -8,7 +8,7 @@
  *            Matthew Fredrickson <creslin@digium.com>
  *            William Meadows <wmeadows@digium.com>
  *
- * Copyright (C) 2007-2010, Digium, Inc.
+ * Copyright (C) 2007-2012, Digium, Inc.
  *
  * All rights reserved.
  *
@@ -31,7 +31,6 @@
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/errno.h>
 #include <linux/pci.h>
 #include <linux/moduleparam.h>
 #include <linux/interrupt.h>
@@ -40,6 +39,9 @@
 #include <linux/sched.h>
 #if defined(__FreeBSD__)
 #include <vm/uma.h>
+
+#define fatal_signal_pending(current)	(0)
+#define smp_mb__after_clear_bit()
 #else
 #include <linux/proc_fs.h>
 #endif
@@ -50,6 +52,7 @@
 #include "wct4xxp/wct4xxp.h"	/* For certain definitions */
 
 #include "voicebus/voicebus.h"
+#include "voicebus/vpmoct.h"
 #include "wcte12xp.h"
 
 #include "voicebus/GpakCust.h"
@@ -59,14 +62,22 @@
 #error VOICEBUS_SFRAME_SIZE != SFRAME_SIZE
 #endif
 
+#ifndef pr_fmt
+#define pr_fmt(fmt)             KBUILD_MODNAME ": " fmt
+#endif
+
 static int debug;
 static int j1mode = 0;
 static int alarmdebounce = 2500; /* LOF/LFA def to 2.5s AT&T TR54016*/
 static int losalarmdebounce = 2500; /* LOS def to 2.5s AT&T TR54016*/
 static int aisalarmdebounce = 2500; /* AIS(blue) def to 2.5s AT&T TR54016*/
 static int yelalarmdebounce = 500; /* RAI(yellow) def to 0.5s AT&T devguide */
-static int t1e1override = -1;
-static int unchannelized = 0;
+static int t1e1override = -1; /* deprecated */
+#if defined(__FreeBSD__)
+static char default_linemode[] = "auto"; /* 'auto', 'e1', or 't1' */
+#else
+static char *default_linemode = "auto"; /* 'auto', 'e1', or 't1' */
+#endif
 static int latency = VOICEBUS_DEFAULT_LATENCY;
 static unsigned int max_latency = VOICEBUS_DEFAULT_MAXLATENCY;
 static int vpmsupport = 1;
@@ -78,7 +89,6 @@ static int vpmnlpmaxsupp = DEFAULT_NLPMAXSUPP;
 
 static void echocan_free(struct dahdi_chan *chan, struct dahdi_echocan_state *ec);
 static int t1xxp_clear_maint(struct dahdi_span *span);
-static int check_and_load_vpm(struct t1 *wc);
 
 static const struct dahdi_echocan_features vpm150m_ec_features = {
 	.NLP_automatic = 1,
@@ -87,9 +97,10 @@ static const struct dahdi_echocan_features vpm150m_ec_features = {
 };
 
 static const struct dahdi_echocan_ops vpm150m_ec_ops = {
-	.name = "VPM150M",
 	.echocan_free = echocan_free,
 };
+
+static struct t1 *ifaces[WC_MAX_IFACES];
 
 struct t1_desc {
 	const char *name;
@@ -98,6 +109,15 @@ struct t1_desc {
 static const struct t1_desc te120p = {"Wildcard TE120P"};
 static const struct t1_desc te122 = {"Wildcard TE122"};
 static const struct t1_desc te121 = {"Wildcard TE121"};
+
+static inline bool is_pcie(const struct t1 *t1)
+{
+	return (0 == strcmp(t1->variety, te121.name));
+}
+
+/* names of HWEC modules */
+static const char *vpmadt032_name = "VPMADT032";
+static const char *vpmoct_name = "VPMOCT032";
 
 #if defined(__FreeBSD__)
 static uma_zone_t cmd_cache;
@@ -144,41 +164,86 @@ static void free_cmd(struct t1 *wc, struct command *cmd)
 }
 #endif /* !__FreeBSD__ */
 
-static struct command *get_pending_cmd(struct t1 *wc)
+static struct command *_get_pending_cmd(struct t1 *wc)
 {
 	struct command *cmd = NULL;
-	unsigned long flags;
-	spin_lock_irqsave(&wc->cmd_list_lock, flags);
 	if (!list_empty(&wc->pending_cmds)) {
 		cmd = list_entry(wc->pending_cmds.next, struct command, node);
 		list_move_tail(&cmd->node, &wc->active_cmds);
 	}
-	spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
 	return cmd;
 }
 
 static void submit_cmd(struct t1 *wc, struct command *cmd)
 {
 	unsigned long flags;
-	spin_lock_irqsave(&wc->cmd_list_lock, flags);
-	list_add_tail(&cmd->node, &wc->pending_cmds);
-	spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
-}
-
-static void resend_cmds(struct t1 *wc)
-{
-	unsigned long flags;
-	spin_lock_irqsave(&wc->cmd_list_lock, flags);
-	list_splice_init(&wc->active_cmds, &wc->pending_cmds);
-	spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
-
 	spin_lock_irqsave(&wc->reglock, flags);
-	if (wc->vpmadt032)
-		vpmadt032_resend(wc->vpmadt032);
+	list_add_tail(&cmd->node, &wc->pending_cmds);
 	spin_unlock_irqrestore(&wc->reglock, flags);
 }
 
-static void cmd_dequeue(struct t1 *wc, unsigned char *writechunk, int eframe, int slot)
+static void _resend_cmds(struct t1 *wc)
+{
+	list_splice_init(&wc->active_cmds, &wc->pending_cmds);
+	if (wc->vpmadt032)
+		vpmadt032_resend(wc->vpmadt032);
+}
+
+static inline void cmd_dequeue_vpmoct(struct t1 *wc, u8 *eframe)
+{
+	struct vpmoct *vpm = wc->vpmoct;
+	struct vpmoct_cmd *cmd;
+	u8 i;
+
+	/* Pop a command off pending list */
+	spin_lock(&vpm->list_lock);
+	if (list_empty(&vpm->pending_list)) {
+		spin_unlock(&vpm->list_lock);
+		return;
+	}
+	cmd = list_entry(vpm->pending_list.next, struct vpmoct_cmd, node);
+	/* Push the command onto active list, if it's a syncronous cmd */
+	if (is_vpmoct_cmd_read(cmd))
+		list_move_tail(&cmd->node, &vpm->active_list);
+	else
+		list_del_init(&cmd->node);
+
+	/* Skip audio */
+	eframe += 66;
+
+	/* Save ident so we can match the return eframe */
+	cmd->txident = wc->txident;
+	/* We have four timeslots to work with for a regular spi packet */
+	/* TODO: Create debug flag for this in dev */
+	eframe[CMD_BYTE(0, 0, 1)] = 0x12;
+	eframe[CMD_BYTE(0, 1, 1)] = 0x34;
+	eframe[CMD_BYTE(0, 2, 1)] = 0x56;
+	eframe[CMD_BYTE(1, 0, 1)] = cmd->command;
+	eframe[CMD_BYTE(1, 1, 1)] = cmd->address;
+	eframe[CMD_BYTE(1, 2, 1)] = cmd->data[0];
+	for (i = 1; i < cmd->chunksize; i++) {
+		/* Every time slot is filled with chunk data
+		 * ignoring command/address/data structure */
+		eframe[CMD_BYTE(1, 2, 1) + 2*i] = cmd->data[i];
+	}
+
+	/* Clean up fire-and-forget messages from memory */
+	if (list_empty(&cmd->node))
+		kfree(cmd);
+
+	spin_unlock(&vpm->list_lock);
+#if 0
+	dev_info(&wc->vb.pdev->dev, "Wrote: ");
+	for (i = 0; i < 7; i++) {
+		dev_info(&wc->vb.pdev->dev, "|%x %x %x|",
+				eframe[CMD_BYTE(i, 0, 1)],
+				eframe[CMD_BYTE(i, 1, 1)],
+				eframe[CMD_BYTE(i, 2, 1)]);
+	}
+#endif
+}
+
+static void cmd_dequeue(struct t1 *wc, unsigned char *eframe, int frame_num, int slot)
 {
 	struct command *curcmd=NULL;
 	u16 address;
@@ -186,13 +251,13 @@ static void cmd_dequeue(struct t1 *wc, unsigned char *writechunk, int eframe, in
 	u32 flags;
 
 	/* Skip audio */
-	writechunk += 66;
+	eframe += 66;
 	/* Search for something waiting to transmit */
-	if ((slot < 6) && (eframe) && (eframe < DAHDI_CHUNKSIZE - 1)) { 
+	if ((slot < 6) && (frame_num) && (frame_num < DAHDI_CHUNKSIZE - 1)) {
 		/* only 6 useable cs slots per */
 
 		/* framer */
-		curcmd = get_pending_cmd(wc);
+		curcmd = _get_pending_cmd(wc);
 		if (curcmd) {
 			curcmd->cs_slot = slot;
 			curcmd->ident = wc->txident;
@@ -208,28 +273,27 @@ static void cmd_dequeue(struct t1 *wc, unsigned char *writechunk, int eframe, in
 		}
 
 		if (flags & __CMD_WR)
-			writechunk[CMD_BYTE(slot, 0, 0)] = 0x0c; /* 0c write command */
+			eframe[CMD_BYTE(slot, 0, 0)] = 0x0c; /* 0c write command */
 		else if (flags & __CMD_LEDS)
-			writechunk[CMD_BYTE(slot, 0, 0)] = 0x10 | ((address) & 0x0E); /* led set command */
+			eframe[CMD_BYTE(slot, 0, 0)] = 0x10 | ((address) & 0x0E); /* led set command */
 		else if (flags & __CMD_PINS)
-			writechunk[CMD_BYTE(slot, 0, 0)] = 0x30; /* CPLD2 pin state */
+			eframe[CMD_BYTE(slot, 0, 0)] = 0x30; /* CPLD2 pin state */
 		else
-			writechunk[CMD_BYTE(slot, 0, 0)] = 0x0a; /* read command */
-		writechunk[CMD_BYTE(slot, 1, 0)] = address;
-		writechunk[CMD_BYTE(slot, 2, 0)] = data;
+			eframe[CMD_BYTE(slot, 0, 0)] = 0x0a; /* read command */
+		eframe[CMD_BYTE(slot, 1, 0)] = address;
+		eframe[CMD_BYTE(slot, 2, 0)] = data;
 	}
 
 }
 
-static inline void cmd_decipher(struct t1 *wc, const u8 *readchunk)
+static inline void cmd_decipher(struct t1 *wc, const u8 *eframe)
 {
 	struct command *cmd = NULL;
-	unsigned long flags;
 	const int IS_VPM = 0;
 
 	/* Skip audio */
-	readchunk += 66;
-	spin_lock_irqsave(&wc->cmd_list_lock, flags);
+	eframe += 66;
+
 	while (!list_empty(&wc->active_cmds)) {
 		cmd = list_entry(wc->active_cmds.next, struct command, node);
 		if (cmd->ident != wc->rxident)
@@ -241,17 +305,59 @@ static inline void cmd_decipher(struct t1 *wc, const u8 *readchunk)
 			list_del_init(&cmd->node);
 			free_cmd(wc, cmd);
 		} else {
-			cmd->data |= readchunk[CMD_BYTE(cmd->cs_slot, 2, IS_VPM)];
+			cmd->data |= eframe[CMD_BYTE(cmd->cs_slot, 2, IS_VPM)];
 			list_del_init(&cmd->node);
 			complete(&cmd->complete);
 		}
 	}
-	spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
 }
 
-static inline void cmd_decipher_vpmadt032(struct t1 *wc, const u8 *readchunk)
+static inline void cmd_decipher_vpmoct(struct t1 *wc, const u8 *eframe)
 {
-	unsigned long flags;
+	int i;
+	struct vpmoct *vpm = wc->vpmoct;
+	struct vpmoct_cmd *cmd;
+
+	/* Skip audio and first 6 timeslots */
+	eframe += 66;
+
+	spin_lock(&vpm->list_lock);
+	/* No command to handle, just exit */
+	if (list_empty(&vpm->active_list)) {
+		spin_unlock(&vpm->list_lock);
+		return;
+	}
+
+	cmd = list_entry(vpm->active_list.next, struct vpmoct_cmd, node);
+	if (wc->rxident == cmd->txident)
+		list_del_init(&cmd->node);
+	else
+		cmd = NULL;
+	spin_unlock(&vpm->list_lock);
+
+	if (!cmd)
+		return;
+
+#if 0
+	/* Store result */
+	dev_info(&wc->vb.pdev->dev, "Read: ");
+	for (i = 0; i < 7; i++) {
+		dev_info(&wc->vb.pdev->dev, "|%x %x %x|",
+				eframe[CMD_BYTE(i, 0, 1)],
+				eframe[CMD_BYTE(i, 1, 1)],
+				eframe[CMD_BYTE(i, 2, 1)]);
+	}
+	dev_info(&wc->vb.pdev->dev, "\n");
+#endif
+	cmd->command = eframe[CMD_BYTE(1, 0, 1)];
+	cmd->address = eframe[CMD_BYTE(1, 1, 1)];
+	for (i = 0; i < cmd->chunksize; ++i)
+		cmd->data[i] = eframe[CMD_BYTE(1, 2, 1) + 2*i];
+	complete(&cmd->complete);
+}
+
+static inline void cmd_decipher_vpmadt032(struct t1 *wc, const u8 *eframe)
+{
 	struct vpmadt032 *vpm = wc->vpmadt032;
 	struct vpmadt032_cmd *cmd;
 
@@ -263,25 +369,25 @@ static inline void cmd_decipher_vpmadt032(struct t1 *wc, const u8 *readchunk)
 		return;
 	}
 
-	spin_lock_irqsave(&vpm->list_lock, flags);
+	spin_lock(&vpm->list_lock);
 	cmd = list_entry(vpm->active_cmds.next, struct vpmadt032_cmd, node);
 	if (wc->rxident == cmd->txident) {
 		list_del_init(&cmd->node);
 	} else {
 		cmd = NULL;
 	}
-	spin_unlock_irqrestore(&vpm->list_lock, flags);
+	spin_unlock(&vpm->list_lock);
 
 	if (!cmd) {
 		return;
 	}
 
 	/* Skip audio */
-	readchunk += 66;
+	eframe += 66;
 
 	/* Store result */
-	cmd->data  = (0xff & readchunk[CMD_BYTE(2, 1, 1)]) << 8;
-	cmd->data |= readchunk[CMD_BYTE(2, 2, 1)];
+	cmd->data  = (0xff & eframe[CMD_BYTE(2, 1, 1)]) << 8;
+	cmd->data |= eframe[CMD_BYTE(2, 2, 1)];
 	if (cmd->desc & __VPM150M_WR) {
 		vpmadt032_free_cmd(cmd);
 	} else {
@@ -418,7 +524,7 @@ static int config_vpmadt032(struct vpmadt032 *vpm, struct t1 *wc)
 #define debug_printk(wc, lvl, fmt, args...) if (debug >= (lvl)) do { \
 	t1_info((wc), fmt , ## args); } while (0)
 
-static void cmd_dequeue_vpmadt032(struct t1 *wc, unsigned char *writechunk, int whichframe)
+static void cmd_dequeue_vpmadt032(struct t1 *wc, unsigned char *eframe)
 {
 	struct vpmadt032_cmd *cmd;
 	struct vpmadt032 *vpm = wc->vpmadt032;
@@ -426,20 +532,23 @@ static void cmd_dequeue_vpmadt032(struct t1 *wc, unsigned char *writechunk, int 
 	unsigned char leds = ~((atomic_read(&wc->txints) / 1000) % 8) & 0x7;
 
 	/* Skip audio */
-	writechunk += 66;
+	eframe += 66;
 
-	if (test_bit(VPM150M_SPIRESET, &vpm->control) || test_bit(VPM150M_HPIRESET, &vpm->control)) {
+	if (test_bit(VPM150M_HPIRESET, &vpm->control)) {
 		debug_printk(wc, 1, "HW Resetting VPMADT032 ...\n");
 		for (x = 0; x < 4; x++) {
 			if (!x) {
-				if (test_and_clear_bit(VPM150M_SPIRESET, &vpm->control))
-					writechunk[CMD_BYTE(x, 0, 1)] = 0x08;
-				else if (test_and_clear_bit(VPM150M_HPIRESET, &vpm->control))
-					writechunk[CMD_BYTE(x, 0, 1)] = 0x0b;
-			} else
-				writechunk[CMD_BYTE(x, 0, 1)] = 0x00 | leds;
-			writechunk[CMD_BYTE(x, 1, 1)] = 0;
-			writechunk[CMD_BYTE(x, 2, 1)] = 0x00;
+				if (test_and_clear_bit(VPM150M_HPIRESET,
+						       &vpm->control)) {
+					eframe[CMD_BYTE(x, 0, 1)] = 0x0b;
+				} else {
+					eframe[CMD_BYTE(x, 0, 1)] = leds;
+				}
+			} else {
+				eframe[CMD_BYTE(x, 0, 1)] = 0x00 | leds;
+			}
+			eframe[CMD_BYTE(x, 1, 1)] = 0;
+			eframe[CMD_BYTE(x, 2, 1)] = 0x00;
 		}
 		return;
 	}
@@ -451,126 +560,107 @@ static void cmd_dequeue_vpmadt032(struct t1 *wc, unsigned char *writechunk, int 
 #endif
 		if (cmd->desc & __VPM150M_RWPAGE) {
 			/* Set CTRL access to page*/
-			writechunk[CMD_BYTE(0, 0, 1)] = (0x8 << 4);
-			writechunk[CMD_BYTE(0, 1, 1)] = 0;
-			writechunk[CMD_BYTE(0, 2, 1)] = 0x20;
+			eframe[CMD_BYTE(0, 0, 1)] = (0x8 << 4);
+			eframe[CMD_BYTE(0, 1, 1)] = 0;
+			eframe[CMD_BYTE(0, 2, 1)] = 0x20;
 
 			/* Do a page write */
 			if (cmd->desc & __VPM150M_WR) {
-				writechunk[CMD_BYTE(1, 0, 1)] = ((0x8 | 0x4) << 4);
+				eframe[CMD_BYTE(1, 0, 1)] = ((0x8 | 0x4) << 4);
 			} else {
-				writechunk[CMD_BYTE(1, 0, 1)] = ((0x8 | 0x4 | 0x1) << 4);
+				eframe[CMD_BYTE(1, 0, 1)] = ((0x8 | 0x4 | 0x1) << 4);
 			}
-			writechunk[CMD_BYTE(1, 1, 1)] = 0;
+			eframe[CMD_BYTE(1, 1, 1)] = 0;
 			if (cmd->desc & __VPM150M_WR) {
-				writechunk[CMD_BYTE(1, 2, 1)] = cmd->data & 0xf;
+				eframe[CMD_BYTE(1, 2, 1)] = cmd->data & 0xf;
 			} else {
-				writechunk[CMD_BYTE(1, 2, 1)] = 0;
+				eframe[CMD_BYTE(1, 2, 1)] = 0;
 			}
 
 			if (cmd->desc & __VPM150M_WR) {
 				/* Fill in buffer to size */
-				writechunk[CMD_BYTE(2, 0, 1)] = 0;
-				writechunk[CMD_BYTE(2, 1, 1)] = 0;
-				writechunk[CMD_BYTE(2, 2, 1)] = 0;
+				eframe[CMD_BYTE(2, 0, 1)] = 0;
+				eframe[CMD_BYTE(2, 1, 1)] = 0;
+				eframe[CMD_BYTE(2, 2, 1)] = 0;
 			} else {
 				/* Do reads twice b/c of vpmadt032 bug */
-				writechunk[CMD_BYTE(2, 0, 1)] = ((0x8 | 0x4 | 0x1) << 4);
-				writechunk[CMD_BYTE(2, 1, 1)] = 0;
-				writechunk[CMD_BYTE(2, 2, 1)] = 0;
+				eframe[CMD_BYTE(2, 0, 1)] = ((0x8 | 0x4 | 0x1) << 4);
+				eframe[CMD_BYTE(2, 1, 1)] = 0;
+				eframe[CMD_BYTE(2, 2, 1)] = 0;
 			}
 
 			/* Clear XADD */
-			writechunk[CMD_BYTE(3, 0, 1)] = (0x8 << 4);
-			writechunk[CMD_BYTE(3, 1, 1)] = 0;
-			writechunk[CMD_BYTE(3, 2, 1)] = 0;
+			eframe[CMD_BYTE(3, 0, 1)] = (0x8 << 4);
+			eframe[CMD_BYTE(3, 1, 1)] = 0;
+			eframe[CMD_BYTE(3, 2, 1)] = 0;
 
 			/* Fill in buffer to size */
-			writechunk[CMD_BYTE(4, 0, 1)] = 0;
-			writechunk[CMD_BYTE(4, 1, 1)] = 0;
-			writechunk[CMD_BYTE(4, 2, 1)] = 0;
+			eframe[CMD_BYTE(4, 0, 1)] = 0;
+			eframe[CMD_BYTE(4, 1, 1)] = 0;
+			eframe[CMD_BYTE(4, 2, 1)] = 0;
 
 		} else {
 			/* Set address */
-			writechunk[CMD_BYTE(0, 0, 1)] = ((0x8 | 0x4) << 4);
-			writechunk[CMD_BYTE(0, 1, 1)] = (cmd->address >> 8) & 0xff;
-			writechunk[CMD_BYTE(0, 2, 1)] = cmd->address & 0xff;
+			eframe[CMD_BYTE(0, 0, 1)] = ((0x8 | 0x4) << 4);
+			eframe[CMD_BYTE(0, 1, 1)] = (cmd->address >> 8) & 0xff;
+			eframe[CMD_BYTE(0, 2, 1)] = cmd->address & 0xff;
 
 			/* Send/Get our data */
 			if (cmd->desc & __VPM150M_WR) {
-				writechunk[CMD_BYTE(1, 0, 1)] = ((0x8 | (0x3 << 1)) << 4);
+				eframe[CMD_BYTE(1, 0, 1)] = ((0x8 | (0x3 << 1)) << 4);
 			} else {
-				writechunk[CMD_BYTE(1, 0, 1)] = ((0x8 | (0x3 << 1) | 0x1) << 4);
+				eframe[CMD_BYTE(1, 0, 1)] = ((0x8 | (0x3 << 1) | 0x1) << 4);
 			}
-			writechunk[CMD_BYTE(1, 1, 1)] = (cmd->data >> 8) & 0xff;
-			writechunk[CMD_BYTE(1, 2, 1)] = cmd->data & 0xff;
+			eframe[CMD_BYTE(1, 1, 1)] = (cmd->data >> 8) & 0xff;
+			eframe[CMD_BYTE(1, 2, 1)] = cmd->data & 0xff;
 
 			if (cmd->desc & __VPM150M_WR) {
 				/* Fill in */
-				writechunk[CMD_BYTE(2, 0, 1)] = 0;
-				writechunk[CMD_BYTE(2, 1, 1)] = 0;
-				writechunk[CMD_BYTE(2, 2, 1)] = 0;
+				eframe[CMD_BYTE(2, 0, 1)] = 0;
+				eframe[CMD_BYTE(2, 1, 1)] = 0;
+				eframe[CMD_BYTE(2, 2, 1)] = 0;
 			} else {
 				/* Do this again for reads b/c of the bug in vpmadt032 */
-				writechunk[CMD_BYTE(2, 0, 1)] = ((0x8 | (0x3 << 1) | 0x1) << 4);
-				writechunk[CMD_BYTE(2, 1, 1)] = (cmd->data >> 8) & 0xff;
-				writechunk[CMD_BYTE(2, 2, 1)] = cmd->data & 0xff;
+				eframe[CMD_BYTE(2, 0, 1)] = ((0x8 | (0x3 << 1) | 0x1) << 4);
+				eframe[CMD_BYTE(2, 1, 1)] = (cmd->data >> 8) & 0xff;
+				eframe[CMD_BYTE(2, 2, 1)] = cmd->data & 0xff;
 			}
 
 			/* Fill in the rest */
-			writechunk[CMD_BYTE(3, 0, 1)] = 0;
-			writechunk[CMD_BYTE(3, 1, 1)] = 0;
-			writechunk[CMD_BYTE(3, 2, 1)] = 0;
+			eframe[CMD_BYTE(3, 0, 1)] = 0;
+			eframe[CMD_BYTE(3, 1, 1)] = 0;
+			eframe[CMD_BYTE(3, 2, 1)] = 0;
 
 			/* Fill in the rest */
-			writechunk[CMD_BYTE(4, 0, 1)] = 0;
-			writechunk[CMD_BYTE(4, 1, 1)] = 0;
-			writechunk[CMD_BYTE(4, 2, 1)] = 0;
+			eframe[CMD_BYTE(4, 0, 1)] = 0;
+			eframe[CMD_BYTE(4, 1, 1)] = 0;
+			eframe[CMD_BYTE(4, 2, 1)] = 0;
 		}
 	} else if (test_and_clear_bit(VPM150M_SWRESET, &vpm->control)) {
 		for (x = 0; x < 7; x++) {
 			if (0 == x)  {
-				writechunk[CMD_BYTE(x, 0, 1)] = (0x8 << 4);
+				eframe[CMD_BYTE(x, 0, 1)] = (0x8 << 4);
 			} else {
-				writechunk[CMD_BYTE(x, 0, 1)] = 0x00;
+				eframe[CMD_BYTE(x, 0, 1)] = 0x00;
 			}
-			writechunk[CMD_BYTE(x, 1, 1)] = 0;
+			eframe[CMD_BYTE(x, 1, 1)] = 0;
 			if (0 == x) {
-				writechunk[CMD_BYTE(x, 2, 1)] = 0x01;
+				eframe[CMD_BYTE(x, 2, 1)] = 0x01;
 			} else {
-				writechunk[CMD_BYTE(x, 2, 1)] = 0x00;
+				eframe[CMD_BYTE(x, 2, 1)] = 0x00;
 			}
 		}
 	} else {
 		for (x = 0; x < 7; x++) {
-			writechunk[CMD_BYTE(x, 0, 1)] = 0x00;
-			writechunk[CMD_BYTE(x, 1, 1)] = 0x00;
-			writechunk[CMD_BYTE(x, 2, 1)] = 0x00;
+			eframe[CMD_BYTE(x, 0, 1)] = 0x00;
+			eframe[CMD_BYTE(x, 1, 1)] = 0x00;
+			eframe[CMD_BYTE(x, 2, 1)] = 0x00;
 		}
 	}
 
 	/* Add our leds in */
 	for (x = 0; x < 7; x++)
-		writechunk[CMD_BYTE(x, 0, 1)] |= leds;
-
-#if 0
-	int y;
-	for (x = 0; x < 7; x++) {
-		for (y = 0; y < 3; y++) {
-			if (writechunk[CMD_BYTE(x, y, 1)] & 0x2) {
-				t1_info(wc,
-					"the test bit is high for byte %d\n",
-					y);
-			}
-		}
-	}
-#endif
-
-#if 0
-	/* This may be needed sometime in the future to troubleshoot ADT related issues. */
-	if (test_bit(VPM150M_ACTIVE, &vpm->control) && !whichframe && !(atomic_read(&wc->txints) % 10000))
-		queue_work(vpm->wq, &vpm->work_debug);
-#endif
+		eframe[CMD_BYTE(x, 0, 1)] |= leds;
 }
 
 static inline int t1_setreg(struct t1 *wc, int addr, int val)
@@ -603,25 +693,28 @@ static int t1_getreg(struct t1 *wc, int addr)
 	cmd->data = 0x00;
 	cmd->flags = __CMD_RD;
 	submit_cmd(wc, cmd);
-	ret = wait_for_completion_timeout(&cmd->complete, HZ*10);
+	ret = wait_for_completion_interruptible_timeout(&cmd->complete, HZ*10);
 	if (unlikely(!ret)) {
-		spin_lock_irqsave(&wc->cmd_list_lock, flags);
+		spin_lock_irqsave(&wc->reglock, flags);
 		if (!list_empty(&cmd->node)) {
 			/* Since we've removed this command from the list, we
 			 * can go ahead and free it right away. */
 			list_del_init(&cmd->node);
-			spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
-			if (printk_ratelimit()) {
-				dev_warn(&wc->vb.pdev->dev,
-					 "Timeout in %s\n", __func__);
-			}
+			spin_unlock_irqrestore(&wc->reglock, flags);
 			free_cmd(wc, cmd);
-			return -EIO;
+			if (-ERESTARTSYS != ret) {
+				if (printk_ratelimit()) {
+					dev_warn(&wc->vb.pdev->dev,
+						 "Timeout in %s\n", __func__);
+				}
+				ret = -EIO;
+			}
+			return ret;
 		} else {
 			/* Looks like this command was removed from the list by
 			 * someone else already. Let's wait for them to complete
 			 * it so that we don't free up the memory. */
-			spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
+			spin_unlock_irqrestore(&wc->reglock, flags);
 			ret = wait_for_completion_timeout(&cmd->complete, HZ*2);
 			WARN_ON(!ret);
 			ret = cmd->data;
@@ -648,11 +741,21 @@ static void t1_setleds(struct t1 *wc, int leds)
 	submit_cmd(wc, cmd);
 }
 
-static inline int t1_getpins(struct t1 *wc, int inisr)
+/**
+ * t1_getpins - Returns the value of the jumpers on the card.
+ * @wc:	The card to read from.
+ * @pins: Pointer to u8 character to hold the pins value.
+ *
+ * Returns 0 on success, otherwise an error code.
+ *
+ */
+static int t1_getpins(struct t1 *wc, u8 *pins)
 {
 	struct command *cmd;
 	unsigned long flags;
 	unsigned long ret;
+
+	*pins = 0;
 
 	cmd = get_free_cmd(wc);
 	BUG_ON(!cmd);
@@ -661,21 +764,24 @@ static inline int t1_getpins(struct t1 *wc, int inisr)
 	cmd->data = 0x00;
 	cmd->flags = __CMD_PINS;
 	submit_cmd(wc, cmd);
-	ret = wait_for_completion_timeout(&cmd->complete, HZ*2);
+	ret = wait_for_completion_interruptible_timeout(&cmd->complete, HZ*2);
 	if (unlikely(!ret)) {
-		spin_lock_irqsave(&wc->cmd_list_lock, flags);
+		spin_lock_irqsave(&wc->reglock, flags);
 		list_del_init(&cmd->node);
-		spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
-		if (printk_ratelimit()) {
-			dev_warn(&wc->vb.pdev->dev,
-				 "Timeout in %s\n", __func__);
-		}
+		spin_unlock_irqrestore(&wc->reglock, flags);
 		free_cmd(wc, cmd);
-		return -EIO;
+		if (-ERESTARTSYS != ret) {
+			if (printk_ratelimit()) {
+				dev_warn(&wc->vb.pdev->dev,
+					 "Timeout in %s\n", __func__);
+			}
+			ret = -EIO;
+		}
+		return ret;
 	}
-	ret = cmd->data;
+	*pins = cmd->data;
 	free_cmd(wc, cmd);
-	return ret;
+	return 0;
 }
 
 static void __t1xxp_set_clear(struct t1 *wc)
@@ -687,7 +793,7 @@ static void __t1xxp_set_clear(struct t1 *wc)
 	/* Calculate all states on all 24 channels using the channel
 	   flags, then write all 3 clear channel registers at once */
 
-	for (i = 0; i < 24; i++) {
+	for (i = 0; i < wc->span.channels; i++) {
 		offset = i/8;
 		if (wc->span.chans[i]->flags & DAHDI_FLAG_CLEAR)
 			reg[offset] |= 1 << (7 - (i % 8));
@@ -708,22 +814,34 @@ static void __t1xxp_set_clear(struct t1 *wc)
 		t1_info(wc, "Unable to set clear/rbs mode!\n");
 }
 
+/**
+ * _t1_free_channels - Free the memory allocated for the channels.
+ *
+ * Must be called with wc->reglock held.
+ *
+ */
+static void _t1_free_channels(struct t1 *wc)
+{
+	int x;
+	for (x = 0; x < ARRAY_SIZE(wc->chans); x++) {
+		kfree(wc->chans[x]);
+		kfree(wc->ec[x]);
+		wc->chans[x] = NULL;
+		wc->ec[x] = NULL;
+	}
+}
+
 static void free_wc(struct t1 *wc)
 {
-	unsigned int x;
 	unsigned long flags;
 	struct command *cmd;
 	_LIST_HEAD(list);
 
-	for (x = 0; x < (wc->spantype == TYPE_E1 ? 31 : 24); x++) {
-		kfree(wc->chans[x]);
-		kfree(wc->ec[x]);
-	}
-
-	spin_lock_irqsave(&wc->cmd_list_lock, flags);
+	spin_lock_irqsave(&wc->reglock, flags);
+	_t1_free_channels(wc);
 	list_splice_init(&wc->active_cmds, &list);
 	list_splice_init(&wc->pending_cmds, &list);
-	spin_unlock_irqrestore(&wc->cmd_list_lock, flags);
+	spin_unlock_irqrestore(&wc->reglock, flags);
 	while (!list_empty(&list)) {
 		cmd = list_entry(list.next, struct command, node);
 		list_del_init(&cmd->node);
@@ -740,27 +858,18 @@ static void free_wc(struct t1 *wc)
 	}
 #endif
 
+	kfree(wc->ddev->location);
+	kfree(wc->ddev->devicetype);
+	dahdi_free_device(wc->ddev);
 #if defined(__FreeBSD__)
 	spin_lock_destroy(&wc->reglock);
-	spin_lock_destroy(&wc->cmd_list_lock);
 #else /* !__FreeBSD__ */
 	kfree(wc);
 #endif /* !__FreeBSD__ */
 }
 
-static void t1_release(struct t1 *wc)
-{
-	dahdi_unregister(&wc->span);
-	t1_info(wc, "Freed a Wildcard TE12xP.\n");
-	free_wc(wc);
-}
-
 static void t4_serial_setup(struct t1 *wc)
 {
-	t1_info(wc, "Setting up global serial parameters for %s\n",
-		wc->spantype == TYPE_E1 ?
-		(unchannelized ? "Unchannelized E1" : "E1") : "T1");
-
 	t1_setreg(wc, 0x85, 0xe0);	/* GPC1: Multiplex mode enabled, FSC is output, active low, RCLK from channel 0 */
 	t1_setreg(wc, 0x08, 0x05);	/* IPC: Interrupt push/pull active low */
 
@@ -879,7 +988,8 @@ static void t1_configure_t1(struct t1 *wc, int lineconfig, int txlevel)
 		break;
 	}
 
-	t1_info(wc, "Span configured for %s/%s\n", framing, line);
+	if (debug)
+		t1_info(wc, "Span configured for %s/%s\n", framing, line);
 }
 
 static void t1_configure_e1(struct t1 *wc, int lineconfig)
@@ -891,8 +1001,7 @@ static void t1_configure_e1(struct t1 *wc, int lineconfig)
 
 	fmr1 = 0x46; /* FMR1: E1 mode, Automatic force resync, PCM30 mode, 8.192 Mhz backplane, no XAIS */
 	fmr2 = 0x03; /* FMR2: Auto transmit remote alarm, auto loss of multiframe recovery, no payload loopback */
-	if (unchannelized)
-		fmr2 |= 0x30;
+
 	if (lineconfig & DAHDI_CONFIG_CRC4) {
 		fmr1 |= 0x08;	/* CRC4 transmit */
 		fmr2 |= 0xc0;	/* CRC4 receive */
@@ -916,9 +1025,6 @@ static void t1_configure_e1(struct t1 *wc, int lineconfig)
 		cas = 0x40;
 	}
 	t1_setreg(wc, 0x1c, fmr0);
-
-	if (unchannelized)
-		t1_setreg(wc, 0x1f, 0x40);
 
 	t1_setreg(wc, 0x37, 0xf0 /*| 0x6 */ );	/* LIM1: Clear data in case of LOS, Set receiver threshold (0.5V), No remote loop, no DRS */
 	t1_setreg(wc, 0x36, 0x08);	/* LIM0: Enable auto long haul mode, no local loop (must be after LIM1) */
@@ -945,10 +1051,8 @@ static void t1_configure_e1(struct t1 *wc, int lineconfig)
 	t1_setreg(wc, 0x39, 0x15);	/* PCR: 22 "ones" clear LOS */
 	
 	t1_setreg(wc, 0x20, 0x9f);	/* XSW: Spare bits all to 1 */
-	if (unchannelized)
-		t1_setreg(wc, 0x21, 0x3c);
-	else
-		t1_setreg(wc, 0x21, 0x1c|cas);	/* XSP: E-bit set when async. AXS auto, XSIF to 1 */
+	t1_setreg(wc, 0x21, 0x1c|cas);	/* XSP: E-bit set when async. AXS
+					   auto, XSIF to 1 */
 	
 	
 	/* Generate pulse mask for E1 */
@@ -959,12 +1063,12 @@ static void t1_configure_e1(struct t1 *wc, int lineconfig)
 	t1_info(wc, "Span configured for %s/%s%s\n", framing, line, crc4);
 }
 
-static void t1xxp_framer_start(struct t1 *wc, struct dahdi_span *span)
+static void t1xxp_framer_start(struct t1 *wc)
 {
-	if (wc->spantype == TYPE_E1) { /* if this is an E1 card */
-		t1_configure_e1(wc, span->lineconfig);
+	if (dahdi_is_e1_span(&wc->span)) {
+		t1_configure_e1(wc, wc->span.lineconfig);
 	} else { /* is a T1 card */
-		t1_configure_t1(wc, span->lineconfig, span->txlevel);
+		t1_configure_t1(wc, wc->span.lineconfig, wc->span.txlevel);
 		__t1xxp_set_clear(wc);
 	}
 
@@ -973,25 +1077,37 @@ static void t1xxp_framer_start(struct t1 *wc, struct dahdi_span *span)
 
 static void set_span_devicetype(struct t1 *wc)
 {
-	strncpy(wc->span.devicetype, wc->variety,
-		sizeof(wc->span.devicetype) - 1);
+	const char *olddevicetype;
+	olddevicetype = wc->ddev->devicetype;
 
 #if defined(VPM_SUPPORT)
 	if (wc->vpmadt032) {
-		strncat(wc->span.devicetype, " (VPMADT032)",
-			sizeof(wc->span.devicetype) - 1);
+		wc->ddev->devicetype = kasprintf(GFP_KERNEL,
+						 "%s (VPMADT032)", wc->variety);
+	} else if (wc->vpmoct) {
+		wc->ddev->devicetype = kasprintf(GFP_KERNEL,
+						 "%s (VPMOCT032)", wc->variety);
+	} else {
+		wc->ddev->devicetype = kasprintf(GFP_KERNEL, "%s", wc->variety);
 	}
+#else
+	wc->ddev->devicetype = kasprintf(GFP_KERNEL, "%s", wc->variety);
 #endif
+
+	/* On the off chance that we were able to allocate it previously. */
+	if (!wc->ddev->devicetype)
+		wc->ddev->devicetype = olddevicetype;
+	else
+		kfree(olddevicetype);
 }
 
-static int t1xxp_startup(struct dahdi_span *span)
+static int t1xxp_startup(struct file *file, struct dahdi_span *span)
 {
 	struct t1 *wc = container_of(span, struct t1, span);
 #ifndef CONFIG_VOICEBUS_ECREFERENCE
 	unsigned int i;
 #endif
 
-	check_and_load_vpm(wc);
 	set_span_devicetype(wc);
 
 #ifndef CONFIG_VOICEBUS_ECREFERENCE
@@ -1003,25 +1119,47 @@ static int t1xxp_startup(struct dahdi_span *span)
 #endif
 
 	/* Reset framer with proper parameters and start */
-	t1xxp_framer_start(wc, span);
+	t1xxp_framer_start(wc);
 	debug_printk(wc, 1, "Calling startup (flags is %lu)\n", span->flags);
 
 	return 0;
 }
 
-static int t1xxp_shutdown(struct dahdi_span *span)
+static inline bool is_initialized(struct t1 *wc)
 {
-	struct t1 *wc = container_of(span, struct t1, span);
-	t1_setreg(wc, 0x46, 0x41);	/* GCR: Interrupt on Activation/Deactivation of AIX, LOS */
-	clear_bit(DAHDI_FLAGBIT_RUNNING, &span->flags);
+	WARN_ON(wc->not_ready < 0);
+	return (wc->not_ready == 0);
+}
+
+/**
+ * t1_wait_for_ready
+ *
+ * Check if the board has finished any setup and is ready to start processing
+ * calls.
+ */
+static int t1_wait_for_ready(struct t1 *wc)
+{
+	while (!is_initialized(wc)) {
+		if (fatal_signal_pending(current))
+			return -EIO;
+		msleep_interruptible(250);
+	}
 	return 0;
 }
 
-static int t1xxp_chanconfig(struct dahdi_chan *chan, int sigtype)
+static int t1xxp_chanconfig(struct file *file,
+			    struct dahdi_chan *chan, int sigtype)
 {
 	struct t1 *wc = chan->pvt;
+
+	if (file->f_flags & O_NONBLOCK && !is_initialized(wc)) {
+			return -EAGAIN;
+	} else {
+		t1_wait_for_ready(wc);
+	}
+
 	if (test_bit(DAHDI_FLAGBIT_RUNNING, &chan->span->flags) &&
-		(wc->spantype != TYPE_E1)) {
+	    dahdi_is_t1_span(&wc->span)) {
 		__t1xxp_set_clear(wc);
 	}
 	return 0;
@@ -1036,7 +1174,7 @@ static int t1xxp_rbsbits(struct dahdi_chan *chan, int bits)
 	
 	debug_printk(wc, 2, "Setting bits to %d on channel %s\n",
 		     bits, chan->name);
-	if (wc->spantype == TYPE_E1) { /* do it E1 way */
+	if (dahdi_is_e1_span(&wc->span)) { /* do it E1 way */
 		if (chan->chanpos == 16)
 			return 0;
 
@@ -1089,7 +1227,7 @@ static inline void t1_check_sigbits(struct t1 *wc)
 
 	if (!(test_bit(DAHDI_FLAGBIT_RUNNING, &wc->span.flags)))
 		return;
-	if (wc->spantype == TYPE_E1) {
+	if (dahdi_is_e1_span(&wc->span)) {
 		for (i = 0; i < 15; i++) {
 			a = t1_getreg(wc, 0x71 + i);
 			if (a > -1) {
@@ -1184,7 +1322,7 @@ static void t1xxp_maint_work(struct work_struct *work)
 	int reg = 0;
 	int cmd = w->cmd;
 
-	if (wc->spantype == TYPE_E1) {
+	if (dahdi_is_e1_span(&wc->span)) {
 		switch (cmd) {
 		case DAHDI_MAINT_NONE:
 			t1_info(wc, "Clearing all maint modes\n");
@@ -1200,7 +1338,6 @@ static void t1xxp_maint_work(struct work_struct *work)
 		case DAHDI_MAINT_REMOTELOOP:
 		case DAHDI_MAINT_LOOPUP:
 		case DAHDI_MAINT_LOOPDOWN:
-		case DAHDI_MAINT_LOOPSTOP:
 			t1_info(wc, "Only local loop supported in E1 mode\n");
 			goto cleanup;
 		default:
@@ -1241,10 +1378,6 @@ static void t1xxp_maint_work(struct work_struct *work)
 			t1xxp_clear_maint(span);
 			t1_setreg(wc, 0x21, 0x60);
 			break;
-		case DAHDI_MAINT_LOOPSTOP:
-			t1xxp_clear_maint(w->span);
-			t1_setreg(w->wc, 0x21, 0x40);
-			break;
 		default:
 			t1_info(wc, "Unknown T1 maint command: %d\n", cmd);
 			return;
@@ -1261,7 +1394,7 @@ static int t1xxp_maint(struct dahdi_span *span, int cmd)
 	struct maint_work_struct *work;
 	struct t1 *wc = container_of(span, struct t1, span);
 
-	if (wc->spantype == TYPE_E1) {
+	if (dahdi_is_e1_span(&wc->span)) {
 		switch (cmd) {
 		case DAHDI_MAINT_NONE:
 		case DAHDI_MAINT_LOCALLOOP:
@@ -1269,7 +1402,6 @@ static int t1xxp_maint(struct dahdi_span *span, int cmd)
 		case DAHDI_MAINT_REMOTELOOP:
 		case DAHDI_MAINT_LOOPUP:
 		case DAHDI_MAINT_LOOPDOWN:
-		case DAHDI_MAINT_LOOPSTOP:
 			t1_info(wc, "Only local loop supported in E1 mode\n");
 			return -ENOSYS;
 		default:
@@ -1284,7 +1416,6 @@ static int t1xxp_maint(struct dahdi_span *span, int cmd)
 		case DAHDI_MAINT_NETWORKPAYLOADLOOP:
 		case DAHDI_MAINT_LOOPUP:
 		case DAHDI_MAINT_LOOPDOWN:
-		case DAHDI_MAINT_LOOPSTOP:
 			break;
 		default:
 			t1_info(wc, "Unknown T1 maint command: %d\n", cmd);
@@ -1294,8 +1425,7 @@ static int t1xxp_maint(struct dahdi_span *span, int cmd)
 
 	work = kmalloc(sizeof(*work), GFP_ATOMIC);
 	if (!work) {
-		t1_info(wc, "Failed to allocate memory for "
-			"DAHDI_MAINT_LOOPSTOP\n");
+		t1_info(wc, "Failed to allocate memory for workqueue\n");
 		return -ENOMEM;
 	}
 
@@ -1328,19 +1458,12 @@ static int t1xxp_clear_maint(struct dahdi_span *span)
 	if (reg < 0)
 		return -EIO;
 	t1_setreg(wc, LIM1, reg & ~(LIM1_RL | LIM1_JATT));
+
+	/* Clear loopup/loopdown signals on the line */
+	t1_setreg(wc, 0x21, 0x40);
 	return 0;
 }
 
-
-static int t1xxp_open(struct dahdi_chan *chan)
-{
-	return 0;
-}
-
-static int t1xxp_close(struct dahdi_chan *chan)
-{
-	return 0;
-}
 
 static int t1xxp_ioctl(struct dahdi_chan *chan, unsigned int cmd, unsigned long data)
 {
@@ -1363,6 +1486,16 @@ static int t1xxp_ioctl(struct dahdi_chan *chan, unsigned int cmd, unsigned long 
 	return 0;
 }
 
+static const char *t1xxp_echocan_name(const struct dahdi_chan *chan)
+{
+	struct t1 *wc = chan->pvt;
+	if (wc->vpmadt032)
+		return vpmadt032_name;
+	else if (wc->vpmoct)
+		return vpmoct_name;
+	return NULL;
+}
+
 static int t1xxp_echocan_create(struct dahdi_chan *chan,
 				struct dahdi_echocanparams *ecp,
 				struct dahdi_echocanparam *p,
@@ -1371,39 +1504,48 @@ static int t1xxp_echocan_create(struct dahdi_chan *chan,
 	struct t1 *wc = chan->pvt;
 	enum adt_companding comp;
 
-	if (!vpmsupport || !wc->vpmadt032 || !test_bit(4, &wc->ctlreg))
+	if (!vpmsupport || !test_bit(VPM150M_ACTIVE, &wc->ctlreg))
 		return -ENODEV;
 
-	*ec = wc->ec[chan->chanpos - 1];
-	(*ec)->ops = &vpm150m_ec_ops;
-	(*ec)->features = vpm150m_ec_features;
+	if (wc->vpmadt032) {
+		*ec = wc->ec[chan->chanpos - 1];
+		(*ec)->ops = &vpm150m_ec_ops;
+		(*ec)->features = vpm150m_ec_features;
 
-	comp = (DAHDI_LAW_ALAW == chan->span->deflaw) ?
-			ADT_COMP_ALAW : ADT_COMP_ULAW;
+		comp = (DAHDI_LAW_ALAW == chan->span->deflaw) ?
+				ADT_COMP_ALAW : ADT_COMP_ULAW;
 
-	return vpmadt032_echocan_create(wc->vpmadt032, chan->chanpos - 1,
-					comp, ecp, p);
+		return vpmadt032_echocan_create(wc->vpmadt032, chan->chanpos-1,
+						comp, ecp, p);
+	} else if (wc->vpmoct) {
+		/* Hookup legacy callbacks */
+		*ec = wc->ec[chan->chanpos - 1];
+		(*ec)->ops = &vpm150m_ec_ops;
+		(*ec)->features = vpm150m_ec_features;
+
+		return vpmoct_echocan_create(wc->vpmoct, chan->chanpos-1,
+				chan->span->deflaw);
+	} else {
+		return -ENODEV;
+	}
 }
 
 static void echocan_free(struct dahdi_chan *chan, struct dahdi_echocan_state *ec)
 {
 	struct t1 *wc = chan->pvt;
-	if (!wc->vpmadt032)
-		return;
-
-	vpmadt032_echocan_free(wc->vpmadt032, chan->chanpos - 1, ec);
+	if (wc->vpmadt032)
+		vpmadt032_echocan_free(wc->vpmadt032, chan->chanpos - 1, ec);
+	else if (wc->vpmoct)
+		vpmoct_echocan_free(wc->vpmoct, chan->chanpos - 1);
 }
 
 static void
 setchanconfig_from_state(struct vpmadt032 *vpm, int channel,
 			 GpakChannelConfig_t *chanconfig)
 {
-	const struct vpmadt032_options *options;
 	GpakEcanParms_t *p;
 
 	BUG_ON(!vpm);
-
-	options = &vpm->options;
 
 	chanconfig->PcmInPortA = 3;
 	chanconfig->PcmInSlotA = (channel + 1) * 2;
@@ -1440,70 +1582,41 @@ setchanconfig_from_state(struct vpmadt032 *vpm, int channel,
 }
 
 #ifdef VPM_SUPPORT
-static int check_and_load_vpm(struct t1 *wc)
+
+struct vpm_load_work {
+	struct work_struct work;
+	struct t1 *wc;
+};
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+static void vpm_load_func(void *data)
 {
+	struct maint_work_struct *w = data;
+#else
+static void vpm_load_func(struct work_struct *work)
+{
+	struct vpm_load_work *w = container_of(work,
+					struct vpm_load_work, work);
+#endif
+	struct t1 *wc = w->wc;
 	int res;
-	unsigned long flags;
-	struct vpmadt032_options options;
 
-	if (!vpmsupport) {
-		t1_info(wc, "VPM Support Disabled\n");
-		vpmadt032_free(wc->vpmadt032);
-		wc->vpmadt032 = NULL;
-		return 0;
-	}
-
-	/* The firmware may already be loaded. */
-	if (wc->vpmadt032) {
-		u16 version;
-		res = gpakPingDsp(wc->vpmadt032->dspid, &version);
-		if (!res)
-			return 0;
-	}
-
-	memset(&options, 0, sizeof(options));
-	options.debug = debug;
-	options.vpmnlptype = vpmnlptype;
-	options.vpmnlpthresh = vpmnlpthresh;
-	options.vpmnlpmaxsupp = vpmnlpmaxsupp;
-	options.channels = (TYPE_T1 == wc->spantype) ? 24 : 32;
-
-	/* We do not want to check that the VPM is alive until after we're
-	 * done setting it up here, an hour should cover it... */
-	wc->vpm_check = jiffies + HZ*3600;
-
-	wc->vpmadt032 = vpmadt032_alloc(&options, wc->name);
-	if (!wc->vpmadt032)
-		return -ENOMEM;
-
-	wc->vpmadt032->setchanconfig_from_state = setchanconfig_from_state;
-
-	res = vpmadt032_init(wc->vpmadt032, &wc->vb);
-	if (-ENODEV == res) {
-		struct vpmadt032 *vpm = wc->vpmadt032;
-		/* There does not appear to be a VPMADT032 installed. */
-		clear_bit(4, &wc->ctlreg);
-		spin_lock_irqsave(&wc->reglock, flags);
-		wc->vpmadt032 = NULL;
-		spin_unlock_irqrestore(&wc->reglock, flags);
-		vpmadt032_free(vpm);
-		return res;
-
-	} else if (res) {
+	res = vpmadt032_init(wc->vpmadt032);
+	if (res) {
 		/* There was some problem during initialization, but it passed
 		 * the address test, let's try again in a bit. */
 		wc->vpm_check = jiffies + HZ/2;
-		return -EAGAIN;
+		return;
 	}
 
 	if (config_vpmadt032(wc->vpmadt032, wc)) {
-		clear_bit(4, &wc->ctlreg);
+		clear_bit(VPM150M_ACTIVE, &wc->ctlreg);
 		wc->vpm_check = jiffies + HZ/2;
-		return -EAGAIN;
+		return;
 	}
 
 	/* turn on vpm (RX audio from vpm module) */
-	set_bit(4, &wc->ctlreg);
+	set_bit(VPM150M_ACTIVE, &wc->ctlreg);
 	wc->vpm_check = jiffies + HZ*5;
 	if (vpmtsisupport) {
 		debug_printk(wc, 1, "enabling VPM TSI pin\n");
@@ -1511,12 +1624,138 @@ static int check_and_load_vpm(struct t1 *wc)
 		set_bit(0, &wc->ctlreg);
 	}
 
+	wc->not_ready--;
+	kfree(w);
+}
+
+static int vpm_start_load(struct t1 *wc)
+{
+	struct vpm_load_work *work;
+
+	work = kzalloc(sizeof(*work), GFP_KERNEL);
+	if (!work)
+		return -ENOMEM;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+	INIT_WORK(&work->work, vpm_load_func, work);
+#else
+	INIT_WORK(&work->work, vpm_load_func);
+#endif
+	work->wc = wc;
+
+	queue_work(wc->wq, &work->work);
+	wc->not_ready++;
 	return 0;
 }
-#else
-static inline int check_and_load_vpm(const struct t1 *wc)
+
+static void t1_vpm_load_complete(struct device *dev, bool operational)
 {
-	return 0;
+	unsigned long flags;
+#if defined(__FreeBSD__)
+	struct t1 *wc = device_get_softc(dev->device);
+#else
+	struct pci_dev *pdev = container_of(dev, struct pci_dev, dev);
+	struct t1 *wc = pci_get_drvdata(pdev);
+#endif
+	struct vpmoct *vpm = NULL;
+
+	if (!wc || is_initialized(wc)) {
+		WARN_ON(!wc);
+		return;
+	}
+
+	spin_lock_irqsave(&wc->reglock, flags);
+	wc->not_ready--;
+	if (operational) {
+		set_bit(VPM150M_ACTIVE, &wc->ctlreg);
+	} else {
+		clear_bit(VPM150M_ACTIVE, &wc->ctlreg);
+		vpm = wc->vpmoct;
+		wc->vpmoct = NULL;
+	}
+	spin_unlock_irqrestore(&wc->reglock, flags);
+
+	if (vpm)
+		vpmoct_free(vpm);
+}
+
+static void check_and_load_vpm(struct t1 *wc)
+{
+	unsigned long flags;
+	struct vpmadt032_options options;
+	struct vpmadt032 *vpmadt = NULL;
+
+	if (!vpmsupport) {
+		t1_info(wc, "VPM Support Disabled via module parameter\n");
+		return;
+	}
+
+	memset(&options, 0, sizeof(options));
+	options.debug = debug;
+	options.vpmnlptype = vpmnlptype;
+	options.vpmnlpthresh = vpmnlpthresh;
+	options.vpmnlpmaxsupp = vpmnlpmaxsupp;
+	options.channels = dahdi_is_t1_span(&wc->span) ? 24 : 32;
+
+	/* We do not want to check that the VPM is alive until after we're
+	 * done setting it up here, an hour should cover it... */
+	wc->vpm_check = jiffies + HZ*3600;
+
+	/* If there was one already allocated, let's free it. */
+	if (wc->vpmadt032) {
+		vpmadt = wc->vpmadt032;
+		clear_bit(VPM150M_ACTIVE, &vpmadt->control);
+		flush_workqueue(vpmadt->wq);
+		spin_lock_irqsave(&wc->reglock, flags);
+		wc->vpmadt032 = NULL;
+		spin_unlock_irqrestore(&wc->reglock, flags);
+		vpmadt032_free(vpmadt);
+	}
+
+	vpmadt = vpmadt032_alloc(&options);
+	if (!vpmadt)
+		return;
+
+	vpmadt->setchanconfig_from_state = setchanconfig_from_state;
+
+	spin_lock_irqsave(&wc->reglock, flags);
+	wc->vpmadt032 = vpmadt;
+	spin_unlock_irqrestore(&wc->reglock, flags);
+
+	/* Probe for and attempt to load a vpmadt032 module */
+	if (vpmadt032_test(vpmadt, &wc->vb) || vpm_start_load(wc)) {
+		/* There does not appear to be a VPMADT032 installed. */
+		clear_bit(VPM150M_ACTIVE, &wc->ctlreg);
+		spin_lock_irqsave(&wc->reglock, flags);
+		wc->vpmadt032 = NULL;
+		spin_unlock_irqrestore(&wc->reglock, flags);
+		vpmadt032_free(vpmadt);
+	}
+
+	/* Probe for and attempt to load a vpmoct032 module */
+	if (NULL == wc->vpmadt032) {
+		struct vpmoct *vpmoct;
+
+		/* Check for vpmoct */
+		vpmoct = vpmoct_alloc();
+		if (!vpmoct)
+			return;
+
+		vpmoct->dev = &wc->vb.pdev->dev;
+
+		spin_lock_irqsave(&wc->reglock, flags);
+		wc->vpmoct = vpmoct;
+		wc->not_ready++;
+		spin_unlock_irqrestore(&wc->reglock, flags);
+
+		vpmoct_init(vpmoct, t1_vpm_load_complete);
+	}
+
+	set_span_devicetype(wc);
+}
+#else
+static inline void check_and_load_vpm(const struct t1 *wc)
+{
+	return;
 }
 #endif
 
@@ -1526,7 +1765,7 @@ static void t1_chan_set_sigcap(struct dahdi_span *span, int x)
 	struct dahdi_chan *chan = wc->chans[x];
 	chan->sigcap = DAHDI_SIG_CLEAR;
 	/* E&M variant supported depends on span type */
-	if (wc->spantype == TYPE_E1) {
+	if (dahdi_is_e1_span(&wc->span)) {
 		/* E1 sigcap setup */
 		if (span->lineconfig & DAHDI_CONFIG_CCS) {
 			/* CCS setup */
@@ -1556,10 +1795,18 @@ static void t1_chan_set_sigcap(struct dahdi_span *span, int x)
 }
 
 static int
-t1xxp_spanconfig(struct dahdi_span *span, struct dahdi_lineconfig *lc)
+t1xxp_spanconfig(struct file *file, struct dahdi_span *span,
+		 struct dahdi_lineconfig *lc)
 {
 	struct t1 *wc = container_of(span, struct t1, span);
 	int i;
+
+	if (file->f_flags & O_NONBLOCK) {
+		if (!is_initialized(wc))
+			return -EAGAIN;
+	} else {
+		t1_wait_for_ready(wc);
+	}
 
 	/* Do we want to SYNC on receive or not */
 	if (lc->sync) {
@@ -1576,65 +1823,72 @@ t1xxp_spanconfig(struct dahdi_span *span, struct dahdi_lineconfig *lc)
 
 	/* If already running, apply changes immediately */
 	if (test_bit(DAHDI_FLAGBIT_RUNNING, &span->flags))
-		return t1xxp_startup(span);
+		return t1xxp_startup(file, span);
 
 	return 0;
 }
 
-static const struct dahdi_span_ops t1_span_ops = {
-	.owner = THIS_MODULE,
-	.spanconfig = t1xxp_spanconfig,
-	.chanconfig = t1xxp_chanconfig,
-	.startup = t1xxp_startup,
-	.shutdown = t1xxp_shutdown,
-	.rbsbits = t1xxp_rbsbits,
-	.maint = t1xxp_maint,
-	.open = t1xxp_open,
-	.close = t1xxp_close,
-	.ioctl = t1xxp_ioctl,
-#ifdef VPM_SUPPORT
-	.echocan_create = t1xxp_echocan_create,
-#endif
-};
+static int t1xxp_enable_hw_preechocan(struct dahdi_chan *chan)
+{
+	struct t1 *wc = chan->pvt;
 
-static int t1_software_init(struct t1 *wc)
+	if (!wc->vpmoct)
+		return 0;
+
+	return vpmoct_preecho_enable(wc->vpmoct, chan->chanpos - 1);
+}
+
+static void t1xxp_disable_hw_preechocan(struct dahdi_chan *chan)
+{
+	struct t1 *wc = chan->pvt;
+
+	if (!wc->vpmoct)
+		return;
+
+	vpmoct_preecho_disable(wc->vpmoct, chan->chanpos - 1);
+}
+
+/**
+ * t1_software_init - Initialize the board for the given type.
+ * @wc:		The board to initialize.
+ * @type:	The type of board we are, T1 / E1
+ *
+ * This function is called at startup and when the type of the span is changed
+ * via the dahdi_device before the span is assigned a number.
+ *
+ */
+static int t1_software_init(struct t1 *wc, enum linemode type)
 {
 	int x;
-	int num;
-	struct pci_dev *pdev = wc->vb.pdev;
+	struct dahdi_chan *chans[32] = {NULL,};
+	struct dahdi_echocan_state *ec[32] = {NULL,};
+	unsigned long flags;
+	int res = 0;
 
-#if !defined(__FreeBSD__)
-	/* Find position */
-	for (x = 0; x < ARRAY_SIZE(ifaces); ++x) {
-		if (ifaces[x] == wc) {
-			debug_printk(wc, 1, "software init for card %d\n", x);
-			break;
-		}
+	/* We may already be setup properly. */
+	if (wc->span.channels == ((E1 == type) ? 31 : 24))
+		return 0;
+
+	for (x = 0; x < ((E1 == type) ? 31 : 24); x++) {
+		chans[x] = kzalloc(sizeof(*chans[x]), GFP_KERNEL);
+		ec[x] = kzalloc(sizeof(*ec[x]), GFP_KERNEL);
+		if (!chans[x] || !ec[x])
+			goto error_exit;
 	}
 
-	if (x == ARRAY_SIZE(ifaces))
-		return -1;
-#endif /* !__FreeBSD__ */
-
-	t4_serial_setup(wc);
-
-	num = x;
-	sprintf(wc->span.name, "WCT1/%d", num);
-	snprintf(wc->span.desc, sizeof(wc->span.desc) - 1, "%s Card %d", wc->variety, num);
-	wc->span.manufacturer = "Digium";
 	set_span_devicetype(wc);
 
-	snprintf(wc->span.location, sizeof(wc->span.location) - 1,
-		"PCI Bus %02d Slot %02d", dahdi_pci_get_bus(pdev),
-		dahdi_pci_get_slot(pdev) + 1);
+	/* Because the interrupt handler is running, we need to atomically
+	 * swap the channel arrays. */
+	spin_lock_irqsave(&wc->reglock, flags);
+	_t1_free_channels(wc);
+	memcpy(wc->chans, chans, sizeof(wc->chans));
+	memcpy(wc->ec, ec, sizeof(wc->ec));
+	memset(chans, 0, sizeof(chans));
+	memset(ec, 0, sizeof(ec));
 
-	wc->span.irq = dahdi_pci_get_irq(pdev);
-
-	if (wc->spantype == TYPE_E1) {
-		if (unchannelized)
-			wc->span.channels = 32;
-		else
-			wc->span.channels = 31;
+	if (type == E1) {
+		wc->span.channels = 31;
 		wc->span.spantype = "E1";
 		wc->span.linecompat = DAHDI_CONFIG_AMI | DAHDI_CONFIG_HDB3 |
 			DAHDI_CONFIG_CCS | DAHDI_CONFIG_CRC4;
@@ -1646,24 +1900,89 @@ static int t1_software_init(struct t1 *wc)
 			DAHDI_CONFIG_D4 | DAHDI_CONFIG_ESF;
 		wc->span.deflaw = DAHDI_LAW_MULAW;
 	}
-	wc->span.chans = wc->chans;
+
+	spin_unlock_irqrestore(&wc->reglock, flags);
+
+	if (!wc->ddev->location)
+		return -ENOMEM;
+
+	t1_info(wc, "Setting up global serial parameters for %s\n",
+		(dahdi_is_e1_span(&wc->span) ? "E1" : "T1"));
+
+	t4_serial_setup(wc);
 	set_bit(DAHDI_FLAGBIT_RBS, &wc->span.flags);
-	init_waitqueue_head(&wc->span.maintq);
 	for (x = 0; x < wc->span.channels; x++) {
-		sprintf(wc->chans[x]->name, "WCT1/%d/%d", num, x + 1);
+		sprintf(wc->chans[x]->name, "%s/%d", wc->span.name, x + 1);
 		t1_chan_set_sigcap(&wc->span, x);
 		wc->chans[x]->pvt = wc;
 		wc->chans[x]->chanpos = x + 1;
 	}
-	wc->span.ops = &t1_span_ops;
-	if (dahdi_register(&wc->span, 0)) {
-		t1_info(wc, "Unable to register span with DAHDI\n");
-		return -1;
-	}
 
-	set_bit(INITIALIZED, &wc->bit_flags);
+	check_and_load_vpm(wc);
+	set_span_devicetype(wc);
 
 	return 0;
+
+error_exit:
+	for (x = 0; x < ARRAY_SIZE(chans); ++x) {
+		kfree(chans[x]);
+		kfree(ec[x]);
+	}
+	return res;
+}
+
+/**
+ * t1xx_set_linemode - Change the type of span before assignment.
+ * @span:		The span to change.
+ * @linemode:		Text string for the line mode.
+ *
+ * This function may be called after the dahdi_device is registered but
+ * before the spans are assigned numbers (and are visible to the rest of
+ * DAHDI).
+ *
+ */
+static int t1xxp_set_linemode(struct dahdi_span *span, const char *linemode)
+{
+	int res;
+	struct t1 *wc = container_of(span, struct t1, span);
+
+	/* We may already be set to the requested type. */
+	if (!strcasecmp(span->spantype, linemode))
+		return 0;
+
+	res = t1_wait_for_ready(wc);
+	if (res)
+		return res;
+
+	/* Stop the processing of the channels since we're going to change
+	 * them. */
+	clear_bit(INITIALIZED, &wc->bit_flags);
+	smp_mb__after_clear_bit();
+	del_timer_sync(&wc->timer);
+	flush_workqueue(wc->wq);
+
+	if (!strcasecmp(linemode, "t1")) {
+		dev_info(&wc->vb.pdev->dev,
+			 "Changing from E1 to T1 line mode.\n");
+		res = t1_software_init(wc, T1);
+	} else if (!strcasecmp(linemode, "e1")) {
+		dev_info(&wc->vb.pdev->dev,
+			 "Changing from T1 to E1 line mode.\n");
+		res = t1_software_init(wc, E1);
+	} else {
+		dev_err(&wc->vb.pdev->dev,
+			"'%s' is an unknown linemode.\n", linemode);
+		res = -EINVAL;
+	}
+
+	/* Since we probably reallocated the channels we need to make
+	 * sure they are configured before setting INITIALIZED again. */
+	if (!res) {
+		dahdi_init_span(span);
+		set_bit(INITIALIZED, &wc->bit_flags);
+		mod_timer(&wc->timer, jiffies + HZ/5);
+	}
+	return res;
 }
 
 #if 0
@@ -1682,36 +2001,53 @@ static inline unsigned char t1_vpm_out(struct t1 *wc, int unit, const unsigned i
 #endif
 #endif
 
-static int t1_hardware_post_init(struct t1 *wc)
+static int t1_hardware_post_init(struct t1 *wc, enum linemode *type)
 {
-	unsigned int reg;
+	int res;
+	int reg;
 	int x;
 
 	/* T1 or E1 */
-	if (t1e1override > -1) {
-		if (t1e1override)
-			wc->spantype = TYPE_E1;
-		else
-			wc->spantype = TYPE_T1;
+	if (-1 != t1e1override) {
+		pr_info("t1e1override is deprecated. Please use 'default_linemode'.\n");
+		*type = (t1e1override) ? E1 : T1;
 	} else {
-		if (t1_getpins(wc,0) & 0x01) /* returns 1 for T1 mode */
-			wc->spantype = TYPE_T1;
-		else	
-			wc->spantype = TYPE_E1;
+		if (!strcasecmp(default_linemode, "e1")) {
+			*type = E1;
+		} else if (!strcasecmp(default_linemode, "t1")) {
+			*type = T1;
+		} else {
+			u8 pins;
+			res = t1_getpins(wc, &pins);
+			if (res)
+				return res;
+			*type = (pins & 0x01) ? T1 : E1;
+		}
 	}
-	debug_printk(wc, 1, "spantype: %s\n", 1 == wc->spantype ? "T1" : "E1");
+	debug_printk(wc, 1, "linemode: %s\n", (*type == T1) ? "T1" : "E1");
 	
 	/* what version of the FALC are we using? */
 	reg = t1_setreg(wc, 0x4a, 0xaa);
 	reg = t1_getreg(wc, 0x4a);
+	if (reg < 0) {
+		t1_info(wc, "Failed to read FALC version (%d)\n", reg);
+		return -EIO;
+	}
 	debug_printk(wc, 1, "FALC version: %08x\n", reg);
 
 	/* make sure reads and writes work */
 	for (x = 0; x < 256; x++) {
 		t1_setreg(wc, 0x14, x);
 		reg = t1_getreg(wc, 0x14);
-		if (reg != x)
-			t1_info(wc, "Wrote '%x' but read '%x'\n", x, reg);
+		if (reg < 0) {
+			t1_info(wc, "Failed register read (%d)\n", reg);
+			return -EIO;
+		}
+		if (reg != x) {
+			t1_info(wc, "Register test failed. "
+				"Wrote '%x' but read '%x'\n", x, reg);
+			return -EIO;
+		}
 	}
 
 	t1_setleds(wc, wc->ledstate);
@@ -1739,7 +2075,7 @@ static inline void t1_check_alarms(struct t1 *wc)
 	/* And consider only carrier alarms */
 	wc->span.alarms &= (DAHDI_ALARM_RED | DAHDI_ALARM_BLUE | DAHDI_ALARM_NOTOPEN);
 
-	if (wc->spantype == TYPE_E1) {
+	if (dahdi_is_e1_span(&wc->span)) {
 		if (c & 0x04) {
 			/* No multiframe found, force RAI high after 400ms only if
 			   we haven't found a multiframe since last loss
@@ -1763,7 +2099,9 @@ static inline void t1_check_alarms(struct t1 *wc)
 		/* Detect loopup code if we're not sending one */
 		if ((!wc->span.mainttimer) && (d & 0x08)) {
 			/* Loop-up code detected */
-			if ((wc->loopupcnt++ > 80)  && (wc->span.maintstat != DAHDI_MAINT_REMOTELOOP)) {
+			if ((wc->span.maintstat != DAHDI_MAINT_REMOTELOOP)) {
+				t1_notice(wc, "Loopup detected,"\
+					" enabling remote loop\n");
 				t1_setreg(wc, 0x36, 0x08);	/* LIM0: Disable any local loop */
 				t1_setreg(wc, 0x37, 0xf6);	/* LIM1: Enable remote loop */
 				wc->span.maintstat = DAHDI_MAINT_REMOTELOOP;
@@ -1773,7 +2111,9 @@ static inline void t1_check_alarms(struct t1 *wc)
 		/* Same for loopdown code */
 		if ((!wc->span.mainttimer) && (d & 0x10)) {
 			/* Loop-down code detected */
-			if ((wc->loopdowncnt++ > 80)  && (wc->span.maintstat == DAHDI_MAINT_REMOTELOOP)) {
+			if ((wc->span.maintstat == DAHDI_MAINT_REMOTELOOP)) {
+				t1_notice(wc, "Loopdown detected,"\
+					" disabling remote loop\n");
 				t1_setreg(wc, 0x36, 0x08);	/* LIM0: Disable any local loop */
 				t1_setreg(wc, 0x37, 0xf0);	/* LIM1: Disable remote loop */
 				wc->span.maintstat = DAHDI_MAINT_NONE;
@@ -1785,7 +2125,7 @@ static inline void t1_check_alarms(struct t1 *wc)
 	if (wc->span.lineconfig & DAHDI_CONFIG_NOTOPEN) {
 		for (x=0,j=0;x < wc->span.channels;x++)
 			if ((wc->span.chans[x]->flags & DAHDI_FLAG_OPEN) ||
-			    (wc->span.chans[x]->flags & DAHDI_FLAG_NETDEV))
+			    dahdi_have_netdev(wc->span.chans[x]))
 				j++;
 		if (!j)
 			alarms |= DAHDI_ALARM_NOTOPEN;
@@ -1854,11 +2194,11 @@ static inline void t1_check_alarms(struct t1 *wc)
 		wc->flags.sendingyellow = 0;
 	}
 	/*
-	if ((c & 0x10) && !unchannelized)
+	if ((c & 0x10))
 		alarms |= DAHDI_ALARM_YELLOW;
 	*/
 
-	if ((c & 0x10) && !unchannelized) { /* receiving yellow (RAI) */
+	if (c & 0x10) { /* receiving yellow (RAI) */
 		if (wc->yelalarmcount >= (yelalarmdebounce/100))
 			alarms |= DAHDI_ALARM_YELLOW;
 		else {
@@ -1931,17 +2271,34 @@ static void t1_do_counters(struct t1 *wc)
 	}
 }
 
-static inline void t1_transmitprep(struct t1 *wc, u8 *writechunk)
+static void insert_tdm_data(const struct t1 *wc, u8 *sframe)
+{
+	int i;
+	register u8 *chanchunk;
+	const int channels = wc->span.channels;
+
+	for (i = 0; i < channels; ++i) {
+		chanchunk = &wc->chans[i]->writechunk[0];
+		sframe[(i+1)*2 + (EFRAME_SIZE + EFRAME_GAP)*0] = chanchunk[0];
+		sframe[(i+1)*2 + (EFRAME_SIZE + EFRAME_GAP)*1] = chanchunk[1];
+		sframe[(i+1)*2 + (EFRAME_SIZE + EFRAME_GAP)*2] = chanchunk[2];
+		sframe[(i+1)*2 + (EFRAME_SIZE + EFRAME_GAP)*3] = chanchunk[3];
+		sframe[(i+1)*2 + (EFRAME_SIZE + EFRAME_GAP)*4] = chanchunk[4];
+		sframe[(i+1)*2 + (EFRAME_SIZE + EFRAME_GAP)*5] = chanchunk[5];
+		sframe[(i+1)*2 + (EFRAME_SIZE + EFRAME_GAP)*6] = chanchunk[6];
+		sframe[(i+1)*2 + (EFRAME_SIZE + EFRAME_GAP)*7] = chanchunk[7];
+	}
+}
+
+static inline void t1_transmitprep(struct t1 *wc, u8 *sframe)
 {
 	int x;
 	int y;
-	int chan;
-	unsigned long flags;
+	u8 *eframe = sframe;
 
 	/* Calculate Transmission */
-	if (likely(test_bit(INITIALIZED, &wc->bit_flags))) {
-		dahdi_transmit(&wc->span);
-	}
+	if (likely(test_bit(INITIALIZED, &wc->bit_flags)))
+		_dahdi_transmit(&wc->span);
 
 #ifdef CONFIG_VOICEBUS_ECREFERENCE
 	for (chan = 0; chan < wc->span.channels; chan++) {
@@ -1950,31 +2307,30 @@ static inline void t1_transmitprep(struct t1 *wc, u8 *writechunk)
 	}
 #endif
 
-	for (x = 0; x < DAHDI_CHUNKSIZE; x++) {
-		if (likely(test_bit(INITIALIZED, &wc->bit_flags))) {
-			for (chan = 0; chan < wc->span.channels; chan++)
-				writechunk[(chan+1)*2] = wc->chans[chan]->writechunk[x];	
-		}
+	if (likely(test_bit(INITIALIZED, &wc->bit_flags)))
+		insert_tdm_data(wc, sframe);
 
+	spin_lock(&wc->reglock);
+	for (x = 0; x < DAHDI_CHUNKSIZE; x++) {
 		/* process the command queue */
 		for (y = 0; y < 7; y++)
-			cmd_dequeue(wc, writechunk, x, y);
+			cmd_dequeue(wc, eframe, x, y);
 
 #ifdef VPM_SUPPORT
-		spin_lock_irqsave(&wc->reglock, flags);
-		if (wc->vpmadt032)
-			cmd_dequeue_vpmadt032(wc, writechunk, x);
-		spin_unlock_irqrestore(&wc->reglock, flags);
+		if (wc->vpmadt032) {
+			cmd_dequeue_vpmadt032(wc, eframe);
+		} else if (wc->vpmoct) {
+			cmd_dequeue_vpmoct(wc, eframe);
+		}
 #endif
 
 		if (x < DAHDI_CHUNKSIZE - 1) {
-			writechunk[EFRAME_SIZE] = wc->ctlreg;
-			writechunk[EFRAME_SIZE + 1] = wc->txident++;
+			eframe[EFRAME_SIZE] = wc->ctlreg;
+			eframe[EFRAME_SIZE + 1] = wc->txident++;
 		}
-		writechunk += (EFRAME_SIZE + EFRAME_GAP);
+		eframe += (EFRAME_SIZE + EFRAME_GAP);
 	}
-
-
+	spin_unlock(&wc->reglock);
 }
 
 /**
@@ -1988,28 +2344,65 @@ static inline bool is_good_frame(const u8 *sframe)
         return a != b;
 }
 
-static inline void t1_receiveprep(struct t1 *wc, const u8* readchunk)
+/**
+ * extract_tdm_data() - Move TDM data from sframe to channels.
+ *
+ */
+static void extract_tdm_data(struct t1 *wc, const u8 *const sframe)
 {
-	int x,chan;
-	unsigned long flags;
-	unsigned char expected;
+	int i;
+	register u8 *chanchunk;
+	const int channels = wc->span.channels;
 
-	if (!is_good_frame(readchunk))
+	for (i = 0; i < channels; ++i) {
+		chanchunk = &wc->chans[i]->readchunk[0];
+		chanchunk[0] = sframe[(i+1)*2 + (EFRAME_SIZE + EFRAME_GAP)*0];
+		chanchunk[1] = sframe[(i+1)*2 + (EFRAME_SIZE + EFRAME_GAP)*1];
+		chanchunk[2] = sframe[(i+1)*2 + (EFRAME_SIZE + EFRAME_GAP)*2];
+		chanchunk[3] = sframe[(i+1)*2 + (EFRAME_SIZE + EFRAME_GAP)*3];
+		chanchunk[4] = sframe[(i+1)*2 + (EFRAME_SIZE + EFRAME_GAP)*4];
+		chanchunk[5] = sframe[(i+1)*2 + (EFRAME_SIZE + EFRAME_GAP)*5];
+		chanchunk[6] = sframe[(i+1)*2 + (EFRAME_SIZE + EFRAME_GAP)*6];
+		chanchunk[7] = sframe[(i+1)*2 + (EFRAME_SIZE + EFRAME_GAP)*7];
+	}
+
+	/* Pre-echo with the vpmoct overwrites the 24th timeslot with the
+	 * specified channel's pre-echo audio stream. This timeslot is unused
+	 * by the te12xp */
+	if (wc->vpmoct && wc->vpmoct->preecho_enabled) {
+		chanchunk = &wc->vpmoct->preecho_buf[0];
+		chanchunk[0] = sframe[23 + (EFRAME_SIZE + EFRAME_GAP)*0];
+		chanchunk[1] = sframe[23 + (EFRAME_SIZE + EFRAME_GAP)*1];
+		chanchunk[2] = sframe[23 + (EFRAME_SIZE + EFRAME_GAP)*2];
+		chanchunk[3] = sframe[23 + (EFRAME_SIZE + EFRAME_GAP)*3];
+		chanchunk[4] = sframe[23 + (EFRAME_SIZE + EFRAME_GAP)*4];
+		chanchunk[5] = sframe[23 + (EFRAME_SIZE + EFRAME_GAP)*5];
+		chanchunk[6] = sframe[23 + (EFRAME_SIZE + EFRAME_GAP)*6];
+		chanchunk[7] = sframe[23 + (EFRAME_SIZE + EFRAME_GAP)*7];
+	}
+}
+
+static inline void t1_receiveprep(struct t1 *wc, const u8* sframe)
+{
+	int x;
+	unsigned char expected;
+	const u8 *eframe = sframe;
+
+	if (!is_good_frame(sframe))
 		return;
 
+	if (likely(test_bit(INITIALIZED, &wc->bit_flags)))
+		extract_tdm_data(wc, sframe);
+
+	spin_lock(&wc->reglock);
 	for (x = 0; x < DAHDI_CHUNKSIZE; x++) {
-		if (likely(test_bit(INITIALIZED, &wc->bit_flags))) {
-			for (chan = 0; chan < wc->span.channels; chan++) {
-				wc->chans[chan]->readchunk[x]= readchunk[(chan+1)*2];
-			}
-		}
 		if (x < DAHDI_CHUNKSIZE - 1) {
 			expected = wc->rxident+1;
-			wc->rxident = readchunk[EFRAME_SIZE + 1];
-			wc->statreg = readchunk[EFRAME_SIZE + 2];
+			wc->rxident = eframe[EFRAME_SIZE + 1];
+			wc->statreg = eframe[EFRAME_SIZE + 2];
 			if (wc->rxident != expected) {
-				wc->span.irqmisses++;
-				resend_cmds(wc);
+				wc->ddev->irqmisses++;
+				_resend_cmds(wc);
 				if (unlikely(debug)) {
 					t1_info(wc, "oops: rxident=%d "
 						"expected=%d x=%d\n",
@@ -2017,36 +2410,46 @@ static inline void t1_receiveprep(struct t1 *wc, const u8* readchunk)
 				}
 			}
 		}
-		cmd_decipher(wc, readchunk);
+		cmd_decipher(wc, eframe);
 #ifdef VPM_SUPPORT
-		spin_lock_irqsave(&wc->reglock, flags);
 		if (wc->vpmadt032)
-			cmd_decipher_vpmadt032(wc, readchunk);
-		spin_unlock_irqrestore(&wc->reglock, flags);
+			cmd_decipher_vpmadt032(wc, eframe);
+		else if (wc->vpmoct)
+			cmd_decipher_vpmoct(wc, eframe);
 #endif
-		readchunk += (EFRAME_SIZE + EFRAME_GAP);
+		eframe += (EFRAME_SIZE + EFRAME_GAP);
 	}
+
+	spin_unlock(&wc->reglock);
 	
 	/* echo cancel */
 	if (likely(test_bit(INITIALIZED, &wc->bit_flags))) {
-#ifdef CONFIG_VOICEBUS_ECREFERENCE
-		unsigned char buffer[DAHDI_CHUNKSIZE];
 		for (x = 0; x < wc->span.channels; x++) {
+			struct dahdi_chan *const c = wc->chans[x];
+#ifdef CONFIG_VOICEBUS_ECREFERENCE
+			unsigned char buffer[DAHDI_CHUNKSIZE];
 			__dahdi_fifo_get(wc->ec_reference[x], buffer,
 				    ARRAY_SIZE(buffer));
-			dahdi_ec_chunk(wc->chans[x], wc->chans[x]->readchunk,
+			_dahdi_ec_chunk(c, c->readchunk,
 				       buffer);
-		}
 #else
-		for (x = 0; x < wc->span.channels; x++) {
-			dahdi_ec_chunk(wc->chans[x], wc->chans[x]->readchunk, wc->ec_chunk2[x]);
-			memcpy(wc->ec_chunk2[x], wc->ec_chunk1[x],
-				DAHDI_CHUNKSIZE);
-			memcpy(wc->ec_chunk1[x], wc->chans[x]->writechunk,
-				DAHDI_CHUNKSIZE);
+			if ((wc->vpmoct) &&
+			   (c->chanpos-1 == wc->vpmoct->preecho_timeslot) &&
+			    (wc->vpmoct->preecho_enabled)) {
+				__dahdi_ec_chunk(c, c->readchunk,
+						 wc->vpmoct->preecho_buf,
+						 c->writechunk);
+			} else {
+				_dahdi_ec_chunk(c, c->readchunk,
+						wc->ec_chunk2[x]);
+				memcpy(wc->ec_chunk2[x], wc->ec_chunk1[x],
+					DAHDI_CHUNKSIZE);
+				memcpy(wc->ec_chunk1[x], c->writechunk,
+					DAHDI_CHUNKSIZE);
+			}
 		}
 #endif
-		dahdi_receive(&wc->span);
+		_dahdi_receive(&wc->span);
 	}
 }
 
@@ -2098,19 +2501,30 @@ static void vpm_check_func(struct work_struct *work)
 #endif
 	int res;
 	u16 version;
+	const int MAX_CHECKS = 5;
+
+	/* If there is a failed VPM module, do not block dahdi_cfg
+	 * indefinitely. */
+	if (++wc->vpm_check_count > MAX_CHECKS) {
+		wc->not_ready--;
+		wc->vpm_check = MAX_JIFFY_OFFSET;
+		t1_info(wc, "Disabling VPMADT032 Checking.\n");
+		return;
+	}
 
 	if (!test_bit(INITIALIZED, &wc->bit_flags))
 		return;
 
-	if (test_bit(4, &wc->ctlreg)) {
+	if (test_bit(VPM150M_ACTIVE, &wc->ctlreg)) {
 		res = gpakPingDsp(wc->vpmadt032->dspid, &version);
 		if (!res) {
-			set_bit(4, &wc->ctlreg);
+			set_bit(VPM150M_ACTIVE, &wc->ctlreg);
 			wc->vpm_check = jiffies + HZ*5;
+			wc->vpm_check_count = 0;
 			return;
 		}
 
-		clear_bit(4, &wc->ctlreg);
+		clear_bit(VPM150M_ACTIVE, &wc->ctlreg);
 		t1_info(wc, "VPMADT032 is non-responsive.  Resetting.\n");
 	}
 
@@ -2144,9 +2558,10 @@ static void vpm_check_func(struct work_struct *work)
 
 	/* Looks like the reset went ok so we can put the VPM module back in
 	 * the TDM path. */
-	set_bit(4, &wc->ctlreg);
+	set_bit(VPM150M_ACTIVE, &wc->ctlreg);
 	t1_info(wc, "VPMADT032 is reenabled.\n");
 	wc->vpm_check = jiffies + HZ*5;
+	wc->not_ready--;
 	return;
 }
 
@@ -2182,7 +2597,7 @@ static void t1_handle_error(struct voicebus *vb)
 	spin_lock_irqsave(&wc->reglock, flags);
 	if (!wc->vpmadt032)
 		goto unlock_exit;
-	clear_bit(4, &wc->ctlreg);
+	clear_bit(VPM150M_ACTIVE, &wc->ctlreg);
 	queue_work(wc->vpmadt032->wq, &wc->vpm_check_work);
 
 unlock_exit:
@@ -2269,6 +2684,22 @@ static inline void remove_sysfs_files(struct t1 *wc) { return; }
 
 #endif /* CONFIG_VOICEBUS_SYSFS */
 
+static const struct dahdi_span_ops t1_span_ops = {
+	.owner = THIS_MODULE,
+	.spanconfig = t1xxp_spanconfig,
+	.chanconfig = t1xxp_chanconfig,
+	.startup = t1xxp_startup,
+	.rbsbits = t1xxp_rbsbits,
+	.maint = t1xxp_maint,
+	.ioctl = t1xxp_ioctl,
+	.set_spantype = t1xxp_set_linemode,
+#ifdef VPM_SUPPORT
+	.enable_hw_preechocan = t1xxp_enable_hw_preechocan,
+	.disable_hw_preechocan = t1xxp_disable_hw_preechocan,
+	.echocan_create = t1xxp_echocan_create,
+	.echocan_name = t1xxp_echocan_name,
+#endif
+};
 
 #if defined(__FreeBSD__)
 static int te12xp_init_one(device_t dev, const struct pci_device_id *ent)
@@ -2277,15 +2708,19 @@ static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_devi
 #endif
 {
 	struct t1 *wc;
-	struct t1_desc *d = (struct t1_desc *) ent->driver_data;
-	unsigned int x;
+	const struct t1_desc *d = (struct t1_desc *) ent->driver_data;
 	int res;
 	unsigned int index = -1;
+	enum linemode type;
 
 #if defined(__FreeBSD__)
 	wc = device_get_softc(dev);
+	wc->vb.pdev = &wc->vb._dev;
+	wc->vb.pdev->dev.device = dev;
 #else /* !__FreeBSD__ */
-	for (x = 0; x < sizeof(ifaces) / sizeof(ifaces[0]); x++) {
+	unsigned int x;
+
+	for (x = 0; x < ARRAY_SIZE(ifaces); x++) {
 		if (!ifaces[x]) {
 			index = x;
 			break;
@@ -2298,29 +2733,29 @@ static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_devi
 		return -EIO;
 	}
 	
-	if (!(wc = kmalloc(sizeof(*wc), GFP_KERNEL))) {
+	wc = kzalloc(sizeof(*wc), GFP_KERNEL);
+	if (!wc)
 		return -ENOMEM;
-	}
-
+	wc->vb.pdev = pdev;
+	pci_set_drvdata(pdev, wc);
 	ifaces[index] = wc;
-	memset(wc, 0, sizeof(*wc));
 #endif /* !__FreeBSD__ */
-	wc->ledstate = -1;
-	spin_lock_init(&wc->reglock);
-	spin_lock_init(&wc->cmd_list_lock);
-	INIT_LIST_HEAD(&wc->active_cmds);
-	INIT_LIST_HEAD(&wc->pending_cmds);
 
+	/* Set the performance counters to -1 since this card currently does
+	 * not support collecting them. */
+	memset(&wc->span.count, -1, sizeof(wc->span.count));
+
+	sprintf(wc->span.name, "WCT1/%d", index);
+	snprintf(wc->span.desc, sizeof(wc->span.desc) - 1, "%s Card %d",
+		 d->name, index);
+	wc->not_ready = 1;
+	wc->ledstate = -1;
 	wc->variety = d->name;
 	wc->txident = 1;
-
-#	if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 18)
-	wc->timer.function = te12xp_timer;
-	wc->timer.data = (unsigned long)wc;
-	init_timer(&wc->timer);
-#	else
+	spin_lock_init(&wc->reglock);
+	INIT_LIST_HEAD(&wc->active_cmds);
+	INIT_LIST_HEAD(&wc->pending_cmds);
 	setup_timer(&wc->timer, te12xp_timer, (unsigned long)wc);
-#	endif
 
 #	if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 	INIT_WORK(&wc->timer_work, timer_work_func, wc);
@@ -2333,6 +2768,22 @@ static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_devi
 #	else
 	INIT_WORK(&wc->vpm_check_work, vpm_check_func);
 #	endif
+
+	wc->ddev = dahdi_create_device(wc->vb.pdev);
+	if (!wc->ddev) {
+		ifaces[index] = NULL;
+		kfree(wc);
+		return -ENOMEM;
+	}
+	wc->ddev->manufacturer = "Digium";
+	wc->ddev->location = kasprintf(GFP_KERNEL, "PCI Bus %02d Slot %02d",
+				      dahdi_pci_get_bus(wc->vb.pdev),
+				      dahdi_pci_get_slot(wc->vb.pdev));
+	if (!wc->ddev->location) {
+		ifaces[index] = NULL;
+		kfree(wc);
+		return -ENOMEM;
+	}
 
 #ifdef CONFIG_VOICEBUS_ECREFERENCE
 	for (x = 0; x < ARRAY_SIZE(wc->ec_reference); ++x) {
@@ -2350,15 +2801,15 @@ static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_devi
 	}
 #endif /* CONFIG_VOICEBUS_ECREFERENCE */
 
+#ifdef CONFIG_VOICEBUS_DISABLE_ASPM
+	if (is_pcie(wc)) {
+		pci_disable_link_state(pdev->bus->self, PCIE_LINK_STATE_L0S |
+			PCIE_LINK_STATE_L1 | PCIE_LINK_STATE_CLKPM);
+	};
+#endif
+
 	snprintf(wc->name, sizeof(wc->name)-1, "wcte12xp%d", index);
 	wc->vb.ops = &voicebus_operations;
-#if defined(__FreeBSD__)
-	wc->vb.pdev = &wc->vb._dev;
-	wc->vb.pdev->dev = dev;
-#else /* !__FreeBSD__ */
-	wc->vb.pdev = pdev;
-	pci_set_drvdata(pdev, wc);
-#endif /* !__FreeBSD__ */
 	wc->vb.debug = &debug;
 	res = voicebus_init(&wc->vb, wc->name);
 	if (res)
@@ -2367,6 +2818,7 @@ static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_devi
 	wc->wq = create_singlethread_workqueue(wc->name);
 	if (!wc->wq) {
 		kfree(wc);
+		ifaces[index] = NULL;
 		return -ENOMEM;
 	}
 
@@ -2378,28 +2830,45 @@ static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_devi
 
 	voicebus_lock_latency(&wc->vb);
 	if (voicebus_start(&wc->vb)) {
-		res = -EIO;
-		goto err;
-	}
-	t1_hardware_post_init(wc);
-
-	for (x = 0; x < (wc->spantype == TYPE_E1 ? 31 : 24); x++) {
-		if (!(wc->chans[x] = kmalloc(sizeof(*wc->chans[x]), GFP_KERNEL))) {
-			res = -ENOMEM;
-			goto err;
-		}
-		memset(wc->chans[x], 0, sizeof(*wc->chans[x]));
-		if (!(wc->ec[x] = kmalloc(sizeof(*wc->ec[x]), GFP_KERNEL))) {
-			res = -ENOMEM;
-			goto err;
-		}
-		memset(wc->ec[x], 0, sizeof(*wc->ec[x]));
+		voicebus_release(&wc->vb);
+		free_wc(wc);
+		ifaces[index] = NULL;
+		return -EIO;
 	}
 
+	res = t1_hardware_post_init(wc, &type);
+	if (res) {
+		voicebus_release(&wc->vb);
+		free_wc(wc);
+		ifaces[index] = NULL;
+		return res;
+	}
+
+	wc->span.chans = wc->chans;
+
+	res = t1_software_init(wc, type);
+	if (res) {
+		voicebus_release(&wc->vb);
+		free_wc(wc);
+		ifaces[index] = NULL;
+		return res;
+	}
+
+	wc->span.ops = &t1_span_ops;
+	list_add_tail(&wc->span.device_node, &wc->ddev->spans);
+	res = dahdi_register_device(wc->ddev, &wc->vb.pdev->dev);
+	if (res) {
+		t1_info(wc, "Unable to register with DAHDI\n");
+		return res;
+	}
+
+	set_bit(INITIALIZED, &wc->bit_flags);
 	mod_timer(&wc->timer, jiffies + HZ/5);
-	t1_software_init(wc);
+
 	t1_info(wc, "Found a %s\n", wc->variety);
 	voicebus_unlock_latency(&wc->vb);
+
+	wc->not_ready--;
 	return 0;
 
 err:
@@ -2423,39 +2892,55 @@ static void __devexit te12xp_remove_one(struct pci_dev *pdev)
 	struct t1 *wc = pci_get_drvdata(pdev);
 #endif
 #ifdef VPM_SUPPORT
-	struct vpmadt032 *vpm = wc->vpmadt032;
+	unsigned long flags;
+	struct vpmadt032 *vpmadt = wc->vpmadt032;
+	struct vpmoct	 *vpmoct = wc->vpmoct;
 #endif
 	if (!wc)
 		return;
 
+	dahdi_unregister_device(wc->ddev);
+
 	remove_sysfs_files(wc);
 
 	clear_bit(INITIALIZED, &wc->bit_flags);
+	smp_mb__after_clear_bit();
 
 	del_timer_sync(&wc->timer);
 #if !defined(__FreeBSD__)
 	flush_workqueue(wc->wq);
 #ifdef VPM_SUPPORT
-	if (vpm)
-		flush_workqueue(vpm->wq);
+	if (vpmadt) {
+		clear_bit(VPM150M_ACTIVE, &vpmadt->control);
+		flush_workqueue(vpmadt->wq);
+	} else if (vpmoct) {
+		while (t1_wait_for_ready(wc))
+			schedule();
+	}
 #endif
 #endif
 
 	voicebus_release(&wc->vb);
 
 #ifdef VPM_SUPPORT
-	if(vpm) {
+	if (vpmadt) {
+		spin_lock_irqsave(&wc->reglock, flags);
 		wc->vpmadt032 = NULL;
-		clear_bit(VPM150M_DTMFDETECT, &vpm->control);
-		clear_bit(VPM150M_ACTIVE, &vpm->control);
-		vpmadt032_free(vpm);
+		spin_unlock_irqrestore(&wc->reglock, flags);
+		vpmadt032_free(vpmadt);
+	} else if (vpmoct) {
+		spin_lock_irqsave(&wc->reglock, flags);
+		wc->vpmoct = NULL;
+		spin_unlock_irqrestore(&wc->reglock, flags);
+		vpmoct_free(vpmoct);
 	}
 #endif
 
-	t1_release(wc);
+	t1_info(wc, "Freed a Wildcard TE12xP.\n");
+	free_wc(wc);
 }
 
-static struct pci_device_id te12xp_pci_tbl[] = {
+static DEFINE_PCI_DEVICE_TABLE(te12xp_pci_tbl) = {
 	{ 0xd161, 0x0120, PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &te120p},
 	{ 0xd161, 0x8000, PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &te121},
 	{ 0xd161, 0x8001, PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long) &te122},
@@ -2470,7 +2955,7 @@ SYSCTL_NODE(_dahdi, OID_AUTO, wcte12xp, CTLFLAG_RW, 0, "DAHDI wcte12xp");
 static int
 te12xp_device_probe(device_t dev)
 {
-	struct pci_device_id *id;
+	const struct pci_device_id *id;
 	struct t1_desc *wd;
 
 	id = dahdi_pci_device_id_lookup(dev, te12xp_pci_tbl);
@@ -2489,7 +2974,7 @@ static int
 te12xp_device_attach(device_t dev)
 {
 	int res;
-        struct pci_device_id *id;
+	const struct pci_device_id *id;
 
 	id = dahdi_pci_device_id_lookup(dev, te12xp_pci_tbl);
 	if (id == NULL)
@@ -2549,13 +3034,16 @@ MODULE_DEPEND(te12xp, dahdi, 1, 1, 1);
 MODULE_DEPEND(te12xp, dahdi_voicebus, 1, 1, 1);
 MODULE_DEPEND(te12xp, firmware, 1, 1, 1);
 #else /* !__FreeBSD__ */
-#if LINUX_KERNEL_VERSION >= KERNEL_VERSION(2, 6, 12)
 static void te12xp_shutdown(struct pci_dev *pdev)
 {
 	struct t1 *wc = pci_get_drvdata(pdev);
-	voicebus_stop(&wc->vb);
+	voicebus_quiesce(&wc->vb);
 }
-#endif
+
+static int te12xp_suspend(struct pci_dev *pdev, pm_message_t state)
+{
+	return -ENOSYS;
+}
 
 MODULE_DEVICE_TABLE(pci, te12xp_pci_tbl);
 
@@ -2563,9 +3051,8 @@ static struct pci_driver te12xp_driver = {
 	.name = "wcte12xp",
 	.probe = te12xp_init_one,
 	.remove = __devexit_p(te12xp_remove_one),
-#if LINUX_KERNEL_VERSION >= KERNEL_VERSION(2, 6, 12)
 	.shutdown = te12xp_shutdown,
-#endif
+	.suspend = te12xp_suspend,
 	.id_table = te12xp_pci_tbl,
 };
 
@@ -2587,6 +3074,16 @@ static int __init te12xp_init(void)
 	if (!cmd_cache)
 		return -ENOMEM;
 
+	if (-1 != t1e1override) {
+		pr_info("'t1e1override' is deprecated. "
+			"Please use 'default_linemode' instead\n");
+	} else if (strcasecmp(default_linemode, "auto") &&
+		   strcasecmp(default_linemode, "t1") &&
+		   strcasecmp(default_linemode, "e1")) {
+		pr_err("'%s' is an unknown span type.", default_linemode);
+		default_linemode = "auto";
+		return -EINVAL;
+	}
 	res = dahdi_pci_module(&te12xp_driver);
 	if (res) {
 		kmem_cache_destroy(cmd_cache);
@@ -2606,6 +3103,9 @@ static void __exit te12xp_cleanup(void)
 
 module_param(debug, int, S_IRUGO | S_IWUSR);
 module_param(t1e1override, int, S_IRUGO | S_IWUSR);
+module_param(default_linemode, charp, S_IRUGO);
+MODULE_PARM_DESC(default_linemode, "\"auto\"(default), \"e1\", or \"t1\". "
+		 "\"auto\" will use the value from the hardware jumpers.");
 module_param(j1mode, int, S_IRUGO | S_IWUSR);
 module_param(alarmdebounce, int, S_IRUGO | S_IWUSR);
 module_param(losalarmdebounce, int, S_IRUGO | S_IWUSR);

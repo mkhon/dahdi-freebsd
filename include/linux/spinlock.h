@@ -6,7 +6,7 @@
 #include <linux/rwlock.h>
 #include <linux/kernel.h>
 
-#define spin_lock_init(lock)	mtx_init(lock, "DAHDI spinlock", NULL, MTX_SPIN)
+#define spin_lock_init(lock)	mtx_init(lock, "Linux spinlock", NULL, MTX_SPIN)
 #define spin_lock_destroy(lock)	mtx_destroy(lock)
 #define spin_lock(lock)		mtx_lock_spin(lock)
 #define spin_unlock(lock)	mtx_unlock_spin(lock)

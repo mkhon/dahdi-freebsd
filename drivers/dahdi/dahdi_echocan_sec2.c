@@ -47,9 +47,6 @@
 
 static int debug;
 
-#define module_printk(level, fmt, args...) printk(level "%s: " fmt, THIS_MODULE->name, ## args)
-#define debug_printk(level, fmt, args...) if (debug >= level) printk(KERN_DEBUG "%s (%s): " fmt, THIS_MODULE->name, __FUNCTION__, ## args)
-
 #include "fir.h"
 
 #ifndef NULL
@@ -81,15 +78,16 @@ static int echo_can_create(struct dahdi_chan *chan, struct dahdi_echocanparams *
 static void echo_can_free(struct dahdi_chan *chan, struct dahdi_echocan_state *ec);
 static void echo_can_process(struct dahdi_echocan_state *ec, short *isig, const short *iref, u32 size);
 static int echo_can_traintap(struct dahdi_echocan_state *ec, int pos, short val);
+static const char *name = "SEC2";
+static const char *ec_name(const struct dahdi_chan *chan) { return name; }
 
 static const struct dahdi_echocan_factory my_factory = {
-	.name = "SEC2",
+	.get_name = ec_name,
 	.owner = THIS_MODULE,
 	.echocan_create = echo_can_create,
 };
 
 static const struct dahdi_echocan_ops my_ops = {
-	.name = "SEC2",
 	.echocan_free = echo_can_free,
 	.echocan_process = echo_can_process,
 	.echocan_traintap = echo_can_traintap,
@@ -331,7 +329,8 @@ static int __init mod_init(void)
 		return -EPERM;
 	}
 
-	module_printk(KERN_NOTICE, "Registered echo canceler '%s'\n", my_factory.name);
+	module_printk(KERN_NOTICE, "Registered echo canceler '%s'\n",
+		      my_factory.get_name(NULL));
 
 	return 0;
 }

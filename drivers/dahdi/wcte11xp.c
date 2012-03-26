@@ -27,7 +27,6 @@
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/errno.h>
 #include <linux/pci.h>
 #include <linux/spinlock.h>
 #include <linux/moduleparam.h>
@@ -142,9 +141,6 @@ static int altab[] = {
 #endif
 
 struct t1 {
-#if defined(__FreeBSD__)
-	struct pci_dev _dev;
-#endif
 	struct pci_dev *dev;
 	spinlock_t lock;
 	int spantype;
@@ -178,6 +174,8 @@ struct t1 {
 	unsigned short canary;
 	/* T1 signalling */
 #if defined(__FreeBSD__)
+	struct pci_dev _dev;
+
 	struct resource *io_res;
 	int io_rid;
 
@@ -198,6 +196,7 @@ struct t1 {
 	unsigned char ec_chunk1[32][DAHDI_CHUNKSIZE];
 	unsigned char ec_chunk2[32][DAHDI_CHUNKSIZE];
 	unsigned char tempo[33];
+	struct dahdi_device *ddev;
 	struct dahdi_span span;						/* Span */
 	struct dahdi_chan *chans[32];					/* Channels */
 };
@@ -397,11 +396,15 @@ static void t1xxp_release(struct t1 *wc)
 {
 	unsigned int x;
 
-	dahdi_unregister(&wc->span);
+	dahdi_unregister_device(wc->ddev);
 	for (x = 0; x < (wc->spantype == TYPE_E1 ? 31 : 24); x++) {
 		kfree(wc->chans[x]);
 	}
+	kfree(wc->ddev->location);
+	dahdi_free_device(wc->ddev);
+#if !defined(__FreeBSD__)
 	kfree(wc);
+#endif
 	printk(KERN_INFO "Freed a Wildcard\n");
 }
 
@@ -524,9 +527,6 @@ static int t1xxp_maint(struct dahdi_span *span, int cmd)
 		case DAHDI_MAINT_LOOPDOWN:
 			printk(KERN_INFO "XXX Send loopdown code E1 XXX\n");
 			break;
-		case DAHDI_MAINT_LOOPSTOP:
-			printk(KERN_INFO "XXX Stop sending loop codes E1 XXX\n");
-			break;
 		default:
 			printk(KERN_NOTICE "TE110P: Unknown E1 maint command: %d\n", cmd);
 			break;
@@ -535,6 +535,7 @@ static int t1xxp_maint(struct dahdi_span *span, int cmd)
 		switch(cmd) {
 	    case DAHDI_MAINT_NONE:
 			printk(KERN_INFO "XXX Turn off local and remote loops T1 XXX\n");
+			t1_framer_out(wc, 0x21, 0x40);
 			break;
 	    case DAHDI_MAINT_LOCALLOOP:
 			printk(KERN_INFO "XXX Turn on local loop and no remote loop XXX\n");
@@ -547,9 +548,6 @@ static int t1xxp_maint(struct dahdi_span *span, int cmd)
 			break;
 	    case DAHDI_MAINT_LOOPDOWN:
 			t1_framer_out(wc, 0x21, 0x60);	/* FMR5: Nothing but RBS mode */
-			break;
-	    case DAHDI_MAINT_LOOPSTOP:
-			t1_framer_out(wc, 0x21, 0x40);	/* FMR5: Nothing but RBS mode */
 			break;
 	    default:
 			printk(KERN_NOTICE "TE110P: Unknown T1 maint command: %d\n", cmd);
@@ -940,7 +938,7 @@ static void t1xxp_framer_start(struct t1 *wc, struct dahdi_span *span)
 }
 
 
-static int t1xxp_startup(struct dahdi_span *span)
+static int t1xxp_startup(struct file *file, struct dahdi_span *span)
 {
 	struct t1 *wc = t1_from_span(span);
 
@@ -974,7 +972,6 @@ static int t1xxp_shutdown(struct dahdi_span *span)
 	unsigned long flags;
 
 	spin_lock_irqsave(&wc->lock, flags);
-	__t1_framer_out(wc, 0x46, 0x41);	/* GCR: Interrupt on Activation/Deactivation of AIX, LOS */
 	__t1xxp_stop_dma(wc);
 	__t1xxp_disable_interrupts(wc);
 	span->flags &= ~DAHDI_FLAG_RUNNING;
@@ -983,7 +980,8 @@ static int t1xxp_shutdown(struct dahdi_span *span)
 }
 
 
-static int t1xxp_chanconfig(struct dahdi_chan *chan, int sigtype)
+static int
+t1xxp_chanconfig(struct file *file, struct dahdi_chan *chan, int sigtype)
 {
 	struct t1 *wc = chan->pvt;
 	unsigned long flags;
@@ -998,7 +996,9 @@ static int t1xxp_chanconfig(struct dahdi_chan *chan, int sigtype)
 	return 0;
 }
 
-static int t1xxp_spanconfig(struct dahdi_span *span, struct dahdi_lineconfig *lc)
+static int
+t1xxp_spanconfig(struct file *file, struct dahdi_span *span,
+		 struct dahdi_lineconfig *lc)
 {
 	struct t1 *wc = t1_from_span(span);
 
@@ -1006,7 +1006,7 @@ static int t1xxp_spanconfig(struct dahdi_span *span, struct dahdi_lineconfig *lc
 	wc->sync = (lc->sync) ? 1 : 0;
 	/* If already running, apply changes immediately */
 	if (span->flags & DAHDI_FLAG_RUNNING)
-		return t1xxp_startup(span);
+		return t1xxp_startup(file, span);
 
 	return 0;
 }
@@ -1036,15 +1036,21 @@ static int t1xxp_software_init(struct t1 *wc)
 	}
 	if (x >= WC_MAX_CARDS)
 		return -1;
+
+	wc->ddev = dahdi_create_device(wc->dev);
+
 	t4_serial_setup(wc);
 	wc->num = x;
 	sprintf(wc->span.name, "WCT1/%d", wc->num);
 	snprintf(wc->span.desc, sizeof(wc->span.desc) - 1, "%s Card %d", wc->variety, wc->num);
-	wc->span.manufacturer = "Digium";
-	dahdi_copy_string(wc->span.devicetype, wc->variety, sizeof(wc->span.devicetype));
-	snprintf(wc->span.location, sizeof(wc->span.location) - 1,
-		 "PCI Bus %02d Slot %02d", dahdi_pci_get_bus(wc->dev), dahdi_pci_get_slot(wc->dev) + 1);
-	wc->span.irq = dahdi_pci_get_irq(wc->dev);
+	wc->ddev->manufacturer = "Digium";
+	wc->ddev->devicetype = wc->variety;
+	wc->ddev->location = kasprintf(GFP_KERNEL, "PCI Bus %02d Slot %02d",
+				       dahdi_pci_get_bus(wc->dev),
+				       dahdi_pci_get_slot(wc->dev));
+	if (!wc->ddev->location)
+		return -ENOMEM;
+
 	if (wc->spantype == TYPE_E1) {
 		if (unchannelized)
 			wc->span.channels = 32;
@@ -1061,7 +1067,6 @@ static int t1xxp_software_init(struct t1 *wc)
 	}
 	wc->span.chans = wc->chans;
 	wc->span.flags = DAHDI_FLAG_RBS;
-	init_waitqueue_head(&wc->span.maintq);
 	for (x=0;x<wc->span.channels;x++) {
 		sprintf(wc->chans[x]->name, "WCT1/%d/%d", wc->num, x + 1);
 		wc->chans[x]->sigcap = DAHDI_SIG_EM | DAHDI_SIG_CLEAR | DAHDI_SIG_EM_E1 | 
@@ -1072,7 +1077,8 @@ static int t1xxp_software_init(struct t1 *wc)
 		wc->chans[x]->chanpos = x + 1;
 	}
 	wc->span.ops = &t1xxp_span_ops;
-	if (dahdi_register(&wc->span, 0)) {
+	list_add_tail(&wc->span.device_node, &wc->ddev->spans);
+	if (dahdi_register_device(wc->ddev, &wc->dev->dev)) {
 		printk(KERN_NOTICE "Unable to register span with DAHDI\n");
 		return -1;
 	}
@@ -1185,10 +1191,10 @@ static void t1xxp_receiveprep(struct t1 *wc, int ints)
 	if (((oldcan & 0xffff0000) >> 16) != CANARY) {
 		/* Check top part */
 		if (debug) printk(KERN_DEBUG "Expecting top %04x, got %04x\n", CANARY, (oldcan & 0xffff0000) >> 16);
-		wc->span.irqmisses++;
+		wc->ddev->irqmisses++;
 	} else if ((oldcan & 0xffff) != ((wc->canary - 1) & 0xffff)) {
 		if (debug) printk(KERN_DEBUG "Expecting bottom %d, got %d\n", wc->canary - 1, oldcan & 0xffff);
-		wc->span.irqmisses++;
+		wc->ddev->irqmisses++;
 	}
 	for (y=0;y<DAHDI_CHUNKSIZE;y++) {
 		for (x=0;x<wc->span.channels;x++) {
@@ -1310,7 +1316,7 @@ static void t1_check_alarms(struct t1 *wc)
 	if (wc->span.lineconfig & DAHDI_CONFIG_NOTOPEN) {
 		for (x=0,j=0;x < wc->span.channels;x++)
 			if ((wc->span.chans[x]->flags & DAHDI_FLAG_OPEN) ||
-			    (wc->span.chans[x]->flags & DAHDI_FLAG_NETDEV))
+			    dahdi_have_netdev(wc->span.chans[x]))
 				j++;
 		if (!j)
 			alarms |= DAHDI_ALARM_NOTOPEN;
@@ -1535,16 +1541,6 @@ static int t1xxp_hardware_init(struct t1 *wc)
 
 }
 
-static void t1xxp_stop_stuff(struct t1 *wc)
-{
-	/* Kill clock */
-	control_set_reg(wc, WC_CLOCK, 0);
-
-	/* Turn off LED's */
-	control_set_reg(wc, WC_LEDTEST, 0);
-
-}
-
 #if !defined(__FreeBSD__)
 static int __devinit t1xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
@@ -1621,7 +1617,19 @@ static int __devinit t1xxp_init_one(struct pci_dev *pdev, const struct pci_devic
 
 	return 0;
 }
+#endif /* !__FreeBSD__ */
 
+static void t1xxp_stop_stuff(struct t1 *wc)
+{
+	/* Kill clock */
+	control_set_reg(wc, WC_CLOCK, 0);
+
+	/* Turn off LED's */
+	control_set_reg(wc, WC_LEDTEST, 0);
+
+}
+
+#if !defined(__FreeBSD__)
 static void __devexit t1xxp_remove_one(struct pci_dev *pdev)
 {
 	struct t1 *wc = pci_get_drvdata(pdev);
@@ -1651,7 +1659,7 @@ static void __devexit t1xxp_remove_one(struct pci_dev *pdev)
 }
 #endif /* !__FreeBSD__ */
 
-static struct pci_device_id t1xxp_pci_tbl[] = {
+static DEFINE_PCI_DEVICE_TABLE(t1xxp_pci_tbl) = {
 	{ 0xe159, 0x0001, 0x71fe, PCI_ANY_ID, 0, 0, (unsigned long) "Digium Wildcard TE110P T1/E1 Board" },
 	{ 0xe159, 0x0001, 0x79fe, PCI_ANY_ID, 0, 0, (unsigned long) "Digium Wildcard TE110P T1/E1 Board" },
 	{ 0xe159, 0x0001, 0x795e, PCI_ANY_ID, 0, 0, (unsigned long) "Digium Wildcard TE110P T1/E1 Board" },
@@ -1670,12 +1678,12 @@ t1xxp_release_resources(struct t1 *wc)
 {
         /* disconnect the interrupt handler */
 	if (wc->irq_handle != NULL) {
-		bus_teardown_intr(wc->dev->dev, wc->irq_res, wc->irq_handle);
+		bus_teardown_intr(wc->dev->dev.device, wc->irq_res, wc->irq_handle);
 		wc->irq_handle = NULL;
 	}
 
 	if (wc->irq_res != NULL) {
-		bus_release_resource(wc->dev->dev, SYS_RES_IRQ, wc->irq_rid, wc->irq_res);
+		bus_release_resource(wc->dev->dev.device, SYS_RES_IRQ, wc->irq_rid, wc->irq_res);
 		wc->irq_res = NULL;
 	}
 
@@ -1685,7 +1693,7 @@ t1xxp_release_resources(struct t1 *wc)
 
 	/* release I/O range */
 	if (wc->io_res != NULL) {
-		bus_release_resource(wc->dev->dev, SYS_RES_IOPORT, wc->io_rid, wc->io_res);
+		bus_release_resource(wc->dev->dev.device, SYS_RES_IOPORT, wc->io_rid, wc->io_res);
 		wc->io_res = NULL;
 	}
 }
@@ -1696,17 +1704,17 @@ t1xxp_setup_intr(struct t1 *wc)
 	int error;
 
 	wc->irq_res = bus_alloc_resource_any(
-	     wc->dev->dev, SYS_RES_IRQ, &wc->irq_rid, RF_SHAREABLE | RF_ACTIVE);
+	     wc->dev->dev.device, SYS_RES_IRQ, &wc->irq_rid, RF_SHAREABLE | RF_ACTIVE);
 	if (wc->irq_res == NULL) {
-		device_printf(wc->dev->dev, "Can't allocate irq resource\n");
+		device_printf(wc->dev->dev.device, "Can't allocate irq resource\n");
 		return (-ENXIO);
 	}
 
 	error = bus_setup_intr(
-	    wc->dev->dev, wc->irq_res, INTR_TYPE_CLK | INTR_MPSAFE,
+	    wc->dev->dev.device, wc->irq_res, INTR_TYPE_CLK | INTR_MPSAFE,
 	    t1xxp_interrupt, NULL, wc, &wc->irq_handle);
 	if (error) {
-		device_printf(wc->dev->dev, "Can't setup interrupt handler (error %d)\n", error);
+		device_printf(wc->dev->dev.device, "Can't setup interrupt handler (error %d)\n", error);
 		return (-ENXIO);
 	}
 
@@ -1716,7 +1724,7 @@ t1xxp_setup_intr(struct t1 *wc)
 static int
 t1xxp_device_probe(device_t dev)
 {
-	struct pci_device_id *id;
+	const struct pci_device_id *id;
 
 	id = dahdi_pci_device_id_lookup(dev, t1xxp_pci_tbl);
 	if (id == NULL)
@@ -1733,7 +1741,7 @@ static int
 t1xxp_device_attach(device_t dev)
 {
 	int res;
-	struct pci_device_id *id;
+	const struct pci_device_id *id;
 	struct t1 *wc;
 	int x;
 	volatile unsigned int *canary;
@@ -1744,7 +1752,7 @@ t1xxp_device_attach(device_t dev)
 
 	wc = device_get_softc(dev);
 	wc->dev = &wc->_dev;
-	wc->dev->dev = dev;
+	wc->dev->dev.device = dev;
 	spin_lock_init(&wc->lock);
 	wc->offset = 28;	/* And you thought 42 was the answer */
 	wc->variety = (const char *) id->driver_data;
@@ -1765,12 +1773,12 @@ t1xxp_device_attach(device_t dev)
 	if (res)
 		goto err;
 
-	res = dahdi_dma_allocate(wc->dev->dev, DAHDI_MAX_CHUNKSIZE * 32 * 2, &wc->write_dma_tag, &wc->write_dma_map,
+	res = dahdi_dma_allocate(wc->dev->dev.device, DAHDI_MAX_CHUNKSIZE * 32 * 2, &wc->write_dma_tag, &wc->write_dma_map,
 	    __DECONST(void **, &wc->writechunk), &wc->writedma);
 	if (res)
 		goto err;
 
-	res = dahdi_dma_allocate(wc->dev->dev, DAHDI_MAX_CHUNKSIZE * 32 * 2, &wc->read_dma_tag, &wc->read_dma_map,
+	res = dahdi_dma_allocate(wc->dev->dev.device, DAHDI_MAX_CHUNKSIZE * 32 * 2, &wc->read_dma_tag, &wc->read_dma_map,
 	    __DECONST(void **, &wc->readchunk), &wc->readdma);
 	if (res)
 		goto err;
@@ -1828,7 +1836,7 @@ t1xxp_device_detach(device_t dev)
 	t1xxp_outb(wc, WC_CNTL, DELAY | 0x0e);
 
 	/* Unregister */
-	dahdi_unregister(&wc->span);
+	t1xxp_release(wc);
 
 	/* Release resources */
 	t1xxp_release_resources(wc);

@@ -27,7 +27,6 @@
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/errno.h>
 #include <linux/pci.h>
 #include <linux/moduleparam.h>
 #if defined(__FreeBSD__)
@@ -140,11 +139,9 @@ static int wecareregs[] =
 };
 
 struct wcfxo {
-#if defined(__FreeBSD__)
-	struct pci_dev _dev;
-#endif
 	struct pci_dev *dev;
 	char *variety;
+	struct dahdi_device *ddev;
 	struct dahdi_span span;
 	struct dahdi_chan _chan;
 	struct dahdi_chan *chan;
@@ -180,6 +177,8 @@ struct wcfxo {
 	/* Up to 32 registers of whatever we most recently read */
 	unsigned char readregs[32];
 #if defined(__FreeBSD__)
+	struct pci_dev _dev;
+
 	struct resource *io_res;
 	int io_rid;
 
@@ -715,29 +714,34 @@ static const struct dahdi_span_ops wcfxo_span_ops = {
 
 static int wcfxo_initialize(struct wcfxo *wc)
 {
+	wc->ddev = dahdi_create_device(wc->dev);
+
 	/* DAHDI stuff */
 	sprintf(wc->span.name, "WCFXO/%d", wc->pos);
 	snprintf(wc->span.desc, sizeof(wc->span.desc) - 1, "%s Board %d", wc->variety, wc->pos + 1);
 	sprintf(wc->chan->name, "WCFXO/%d/%d", wc->pos, 0);
-	snprintf(wc->span.location, sizeof(wc->span.location) - 1,
-		 "PCI Bus %02d Slot %02d", dahdi_pci_get_bus(wc->dev), dahdi_pci_get_slot(wc->dev) + 1);
-	wc->span.manufacturer = "Digium";
-	dahdi_copy_string(wc->span.devicetype, wc->variety, sizeof(wc->span.devicetype));
+	wc->ddev->location = kasprintf(GFP_KERNEL, "PCI Bus %02d Slot %02d",
+				      dahdi_pci_get_bus(wc->dev),
+				      dahdi_pci_get_slot(wc->dev) + 1);
+	if (!wc->ddev->location)
+		return -ENOMEM;
+
+	wc->ddev->manufacturer = "Digium";
+	wc->ddev->devicetype = wc->variety;
 	wc->chan->sigcap = DAHDI_SIG_FXSKS | DAHDI_SIG_FXSLS | DAHDI_SIG_SF;
 	wc->chan->chanpos = 1;
 	wc->span.chans = &wc->chan;
 	wc->span.channels = 1;
-	wc->span.irq = dahdi_pci_get_irq(wc->dev);
 	wc->span.flags = DAHDI_FLAG_RBS;
 	wc->span.deflaw = DAHDI_LAW_MULAW;
 #ifdef ENABLE_TASKLETS
 	tasklet_init(&wc->wcfxo_tlet, wcfxo_tasklet, (unsigned long)wc);
 #endif
-	init_waitqueue_head(&wc->span.maintq);
 
 	wc->chan->pvt = wc;
 	wc->span.ops = &wcfxo_span_ops;
-	if (dahdi_register(&wc->span, 0)) {
+	list_add_tail(&wc->span.device_node, &wc->ddev->spans);
+	if (dahdi_register_device(wc->ddev, &wc->dev->dev)) {
 		printk(KERN_NOTICE "Unable to register span with DAHDI\n");
 		return -1;
 	}
@@ -1046,7 +1050,7 @@ static int __devinit wcfxo_init_one(struct pci_dev *pdev, const struct pci_devic
 		printk(KERN_NOTICE "Failed to initailize DAA, giving up...\n");
 		wcfxo_stop_dma(wc);
 		wcfxo_disable_interrupts(wc);
-		dahdi_unregister(&wc->span);
+		dahdi_unregister_device(wc->ddev);
 		free_irq(pdev->irq, wc);
 
 		/* Reset PCI chip and registers */
@@ -1054,6 +1058,8 @@ static int __devinit wcfxo_init_one(struct pci_dev *pdev, const struct pci_devic
 
 		if (wc->freeregion)
 			release_region(wc->ioaddr, 0xff);
+		kfree(wc->ddev->location);
+		dahdi_free_device(wc->ddev);
 		kfree(wc);
 		return -EIO;
 	}
@@ -1065,9 +1071,11 @@ static int __devinit wcfxo_init_one(struct pci_dev *pdev, const struct pci_devic
 
 static void wcfxo_release(struct wcfxo *wc)
 {
-	dahdi_unregister(&wc->span);
+	dahdi_unregister_device(wc->ddev);
 	if (wc->freeregion)
 		release_region(wc->ioaddr, 0xff);
+	kfree(wc->ddev->location);
+	dahdi_free_device(wc->ddev);
 	kfree(wc);
 	printk(KERN_INFO "Freed a Wildcard\n");
 }
@@ -1115,7 +1123,7 @@ wcfxo_validate_params(void)
 	return 0;
 }
 
-static struct pci_device_id wcfxo_pci_tbl[] = {
+static DEFINE_PCI_DEVICE_TABLE(wcfxo_pci_tbl) = {
 	{ 0xe159, 0x0001, 0x8084, PCI_ANY_ID, 0, 0, (unsigned long) &generic },
 	{ 0xe159, 0x0001, 0x8085, PCI_ANY_ID, 0, 0, (unsigned long) &wcx101p },
 	{ 0xe159, 0x0001, 0x8086, PCI_ANY_ID, 0, 0, (unsigned long) &generic },
@@ -1134,12 +1142,12 @@ wcfxo_release_resources(struct wcfxo *wc)
 {
         /* disconnect the interrupt handler */
 	if (wc->irq_handle != NULL) {
-		bus_teardown_intr(wc->dev->dev, wc->irq_res, wc->irq_handle);
+		bus_teardown_intr(wc->dev->dev.device, wc->irq_res, wc->irq_handle);
 		wc->irq_handle = NULL;
 	}
 
 	if (wc->irq_res != NULL) {
-		bus_release_resource(wc->dev->dev, SYS_RES_IRQ, wc->irq_rid, wc->irq_res);
+		bus_release_resource(wc->dev->dev.device, SYS_RES_IRQ, wc->irq_rid, wc->irq_res);
 		wc->irq_res = NULL;
 	}
 
@@ -1149,7 +1157,7 @@ wcfxo_release_resources(struct wcfxo *wc)
 
 	/* release memory window */
 	if (wc->io_res != NULL) {
-		bus_release_resource(wc->dev->dev, SYS_RES_IOPORT, wc->io_rid, wc->io_res);
+		bus_release_resource(wc->dev->dev.device, SYS_RES_IOPORT, wc->io_rid, wc->io_res);
 		wc->io_res = NULL;
 	}
 }
@@ -1160,17 +1168,17 @@ wcfxo_setup_intr(struct wcfxo *wc)
 	int error;
 
 	wc->irq_res = bus_alloc_resource_any(
-	     wc->dev->dev, SYS_RES_IRQ, &wc->irq_rid, RF_SHAREABLE | RF_ACTIVE);
+	     wc->dev->dev.device, SYS_RES_IRQ, &wc->irq_rid, RF_SHAREABLE | RF_ACTIVE);
 	if (wc->irq_res == NULL) {
-		device_printf(wc->dev->dev, "Can't allocate irq resource\n");
+		device_printf(wc->dev->dev.device, "Can't allocate irq resource\n");
 		return (-ENXIO);
 	}
 
 	error = bus_setup_intr(
-	    wc->dev->dev, wc->irq_res, INTR_TYPE_CLK | INTR_MPSAFE,
+	    wc->dev->dev.device, wc->irq_res, INTR_TYPE_CLK | INTR_MPSAFE,
 	    wcfxo_interrupt, NULL, wc, &wc->irq_handle);
 	if (error) {
-		device_printf(wc->dev->dev, "Can't setup interrupt handler (error %d)\n", error);
+		device_printf(wc->dev->dev.device, "Can't setup interrupt handler (error %d)\n", error);
 		return (-ENXIO);
 	}
 
@@ -1180,7 +1188,7 @@ wcfxo_setup_intr(struct wcfxo *wc)
 static int
 wcfxo_device_probe(device_t dev)
 {
-	struct pci_device_id *id;
+	const struct pci_device_id *id;
 	struct wcfxo_desc *d;
 
 	id = dahdi_pci_device_id_lookup(dev, wcfxo_pci_tbl);
@@ -1202,7 +1210,7 @@ static int
 wcfxo_device_attach(device_t dev)
 {
 	int res;
-	struct pci_device_id *id;
+	const struct pci_device_id *id;
 	struct wcfxo_desc *d;
 	struct wcfxo *wc;
 
@@ -1213,7 +1221,7 @@ wcfxo_device_attach(device_t dev)
 	d = (struct wcfxo_desc *) id->driver_data;
 	wc = device_get_softc(dev);
 	wc->dev = &wc->_dev;
-	wc->dev->dev = dev;
+	wc->dev->dev.device = dev;
 	wc->chan = &wc->_chan;
 	wc->pos = device_get_unit(dev);
 	wc->variety = d->name;
@@ -1229,12 +1237,12 @@ wcfxo_device_attach(device_t dev)
 
 	/* allocate enough memory for two zt chunks.  Each sample uses
 	   32 bits.  Allocate an extra set just for control too */
-	res = dahdi_dma_allocate(wc->dev->dev, DAHDI_MAX_CHUNKSIZE * 2 * 2 * 4, &wc->write_dma_tag, &wc->write_dma_map,
+	res = dahdi_dma_allocate(wc->dev->dev.device, DAHDI_MAX_CHUNKSIZE * 2 * 2 * 4, &wc->write_dma_tag, &wc->write_dma_map,
 	    __DECONST(void **, &wc->writechunk), &wc->writedma);
 	if (res)
 		goto err;
 
-	res = dahdi_dma_allocate(wc->dev->dev, DAHDI_MAX_CHUNKSIZE * 2 * 2 * 4, &wc->read_dma_tag, &wc->read_dma_map,
+	res = dahdi_dma_allocate(wc->dev->dev.device, DAHDI_MAX_CHUNKSIZE * 2 * 2 * 4, &wc->read_dma_tag, &wc->read_dma_map,
 	    __DECONST(void **, &wc->readchunk), &wc->readdma);
 	if (res)
 		goto err;
@@ -1270,8 +1278,11 @@ wcfxo_device_attach(device_t dev)
 	return (0);
 
 err:
-	if (test_bit(DAHDI_FLAGBIT_REGISTERED, &wc->span.flags))
-		dahdi_unregister(&wc->span);
+	if (test_bit(DAHDI_FLAGBIT_REGISTERED, &wc->span.flags)) {
+		dahdi_unregister_device(wc->ddev);
+		kfree(wc->ddev->location);
+		dahdi_free_device(wc->ddev);
+	}
 
 	wcfxo_stop_dma(wc);
 	wcfxo_disable_interrupts(wc);
@@ -1303,7 +1314,9 @@ wcfxo_device_detach(device_t dev)
 	wcfxo_outb(wc, WC_CNTL, 0x0e);
 
 	/* Unregister */
-	dahdi_unregister(&wc->span);
+	dahdi_unregister_device(wc->ddev);
+	kfree(wc->ddev->location);
+	dahdi_free_device(wc->ddev);
 
 	/* Release resources */
 	wcfxo_release_resources(wc);

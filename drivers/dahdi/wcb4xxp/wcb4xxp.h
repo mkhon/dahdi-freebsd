@@ -390,7 +390,6 @@ struct b4xxp_span {
 	unsigned char readchunk[WCB4XXP_CHANNELS_PER_SPAN * DAHDI_CHUNKSIZE];
 
 	int sync;				/* sync priority */
-	int syncpos;				/* sync priority */
 
 	int oldstate;				/* old state machine state */
 	int newalarm;				/* alarm to send to zaptel once alarm timer expires */
@@ -437,7 +436,6 @@ struct b4xxp {
 	struct pci_dev *pdev;			/* Pointer to PCI device */
 #if defined(__FreeBSD__)
 	struct pci_dev _dev;
-	device_t *dev;				/* device */
 
 	struct resource *io_res;		/* resource for I/O range */
 	int io_rid;
@@ -449,7 +447,6 @@ struct b4xxp {
 	int irq_rid;
 	void *irq_handle;
 #else
-	struct device *dev;			/* kernel dev struct (from pdev->dev) */
 	void __iomem *addr;			/* I/O address (memory mapped) */
 	void __iomem *ioaddr;			/* I/O address (index based) */
 	int irq;				/* IRQ used by device */
@@ -493,6 +490,7 @@ struct b4xxp {
 #if !defined(__FreeBSD__)
 	struct tasklet_struct b4xxp_tlet;
 #endif
+	struct dahdi_device *ddev;
 };
 
 /* CPLD access bits */

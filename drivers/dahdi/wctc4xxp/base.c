@@ -1,6 +1,6 @@
 /* Wildcard TC400B Driver
  *
- * Copyright (C) 2006-2010, Digium, Inc.
+ * Copyright (C) 2006-2012, Digium, Inc.
  *
  * All rights reserved.
  *
@@ -52,7 +52,6 @@
 
 #define ETH_P_IP ETHERTYPE_IP
 typedef __u16 __sum16;
-typedef unsigned gfp_t;
 
 struct ethhdr {
 	unsigned char	h_dest[ETH_ALEN];       /* destination eth addr */
@@ -167,11 +166,7 @@ ip_fast_csum(const void *iph, unsigned int ihl)
 	return (__sum16)~do_csum(iph, ihl*4);
 }
 #else /* !__FreeBSD__ */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 18)
-#include <asm/io.h>
-#else
 #include <linux/io.h>
-#endif
 #endif /* !__FreeBSD__ */
 
 /* COMPILE TIME OPTIONS =================================================== */
@@ -195,36 +190,10 @@ ip_fast_csum(const void *iph, unsigned int ihl)
 
 #define WARN_ALWAYS() WARN_ON(1)
 
-#define DTE_PRINTK(_lvl, _fmt, _args...) \
-	printk(KERN_##_lvl "%s: %s: " _fmt, THIS_MODULE->name, \
-		(wc)->board_name, ## _args)
-
 #define DTE_DEBUG(_dbgmask, _fmt, _args...)				\
 	if ((debug & _dbgmask) == (_dbgmask)) {				\
-		printk(KERN_DEBUG "%s: %s: " _fmt, THIS_MODULE->name,	\
-			(wc)->board_name, ## _args);			\
+		dev_info(&(wc)->pdev->dev, _fmt, ## _args);		\
 	}								\
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 18)
-#ifndef WARN_ON_ONCE
-#define WARN_ON_ONCE(__condition) do {         \
-	static int __once = 1;                 \
-	if (unlikely(__condition)) {           \
-		if (__once) {                  \
-			__once = 0;            \
-			WARN_ON(0);            \
-		}                              \
-	}                                      \
-} while (0)
-#endif
-#endif
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,14)
-/* also added in RHEL kernels with the OpenInfiniband backport: */
-#if LINUX_VERSION_CODE != KERNEL_VERSION(2,6,9) || !defined(DEFINE_SPINLOCK)
-typedef	unsigned gfp_t;		/* Added in 2.6.14 */
-#endif
-#endif
 
 
 /* define CONFIG_WCTC4XXP_POLLING to operate in a pure polling mode.  This is
@@ -575,22 +544,16 @@ struct wcdte {
 };
 
 #ifndef WITHOUT_NETDEV
-#ifdef HAVE_NETDEV_PRIV
 struct wcdte_netdev_priv {
 	struct wcdte *wc;
 };
-#endif
 
 static inline struct wcdte *
 wcdte_from_netdev(struct net_device *netdev)
 {
-#ifdef HAVE_NETDEV_PRIV
 	struct wcdte_netdev_priv *priv;
 	priv = netdev_priv(netdev);
 	return priv->wc;
-#else
-	return netdev->priv;
-#endif
 }
 #endif /* !WITHOUT_NETDEV */
 
@@ -667,7 +630,7 @@ wctc4xxp_skb_to_cmd(struct wcdte *wc, const struct sk_buff *skb)
 		cmd->data_len = skb->len;
 		res = skb_copy_bits(skb, 0, cmd->data, cmd->data_len);
 		if (res) {
-			DTE_PRINTK(WARNING,
+			dev_warn(&wc->pdev->dev,
 			   "Failed call to skb_copy_bits.\n");
 			free_cmd(cmd);
 			cmd = NULL;
@@ -676,6 +639,7 @@ wctc4xxp_skb_to_cmd(struct wcdte *wc, const struct sk_buff *skb)
 	return cmd;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 2, 0)
 static void
 wctc4xxp_net_set_multi(struct net_device *netdev)
 {
@@ -683,6 +647,15 @@ wctc4xxp_net_set_multi(struct net_device *netdev)
 	DTE_DEBUG(DTE_DEBUG_GENERAL, "%s promiscuity:%d\n",
 	   __func__, netdev->promiscuity);
 }
+#else
+static void
+wctc4xxp_set_rx_mode(struct net_device *netdev)
+{
+	struct wcdte *wc = wcdte_from_netdev(netdev);
+	DTE_DEBUG(DTE_DEBUG_GENERAL, "%s promiscuity:%d\n",
+	   __func__, netdev->promiscuity);
+}
+#endif
 
 static int
 wctc4xxp_net_up(struct net_device *netdev)
@@ -803,19 +776,19 @@ wctc4xxp_net_waitfor_promiscuous(struct wcdte *wc)
 	unsigned long start = jiffies;
 	struct net_device *netdev = wc->netdev;
 
-	DTE_PRINTK(INFO,
+	dev_info(&wc->pdev->dev,
 	   "Waiting %d seconds for adapter to be placed in " \
 	   "promiscuous mode for early trace.\n", seconds);
 
 	while (!netdev->promiscuity) {
 		if (signal_pending(current)) {
-			DTE_PRINTK(INFO,
+			dev_info(&wc->pdev->dev,
 			   "Aborting wait due to signal.\n");
 			break;
 		}
 		msleep(100);
 		if (time_after(jiffies, start + (seconds * HZ))) {
-			DTE_PRINTK(INFO,
+			dev_info(&wc->pdev->dev,
 			   "Aborting wait due to timeout.\n");
 			break;
 		}
@@ -846,7 +819,11 @@ wctc4xxp_net_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
 
 #ifdef HAVE_NET_DEVICE_OPS
 static const struct net_device_ops wctc4xxp_netdev_ops = {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 2, 0)
 	.ndo_set_multicast_list = &wctc4xxp_net_set_multi,
+#else
+	.ndo_set_rx_mode = &wctc4xxp_set_rx_mode,
+#endif
 	.ndo_open = &wctc4xxp_net_up,
 	.ndo_stop = &wctc4xxp_net_down,
 	.ndo_start_xmit = &wctc4xxp_net_hard_start_xmit,
@@ -868,23 +845,14 @@ wctc4xxp_net_register(struct wcdte *wc)
 {
 	int res;
 	struct net_device *netdev;
-#	ifdef HAVE_NETDEV_PRIV
 	struct wcdte_netdev_priv *priv;
-#	endif
 	const char our_mac[] = { 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff};
 
-#	ifdef HAVE_NETDEV_PRIV
 	netdev = alloc_netdev(sizeof(*priv), wc->board_name, ether_setup);
 	if (!netdev)
 		return -ENOMEM;
 	priv = netdev_priv(netdev);
 	priv->wc = wc;
-#	else
-	netdev = alloc_netdev(0, wc->board_name, ether_setup);
-	if (!netdev)
-		return -ENOMEM;
-	netdev->priv = wc;
-#	endif
 	memcpy(netdev->dev_addr, our_mac, sizeof(our_mac));
 
 #	ifdef HAVE_NET_DEVICE_OPS
@@ -910,7 +878,7 @@ wctc4xxp_net_register(struct wcdte *wc)
 
 	res = register_netdev(netdev);
 	if (res) {
-		DTE_PRINTK(WARNING,
+		dev_warn(&wc->pdev->dev,
 		   "Failed to register network device %s.\n",
 		   wc->board_name);
 		goto error_sw;
@@ -922,7 +890,7 @@ wctc4xxp_net_register(struct wcdte *wc)
 	if (debug & DTE_DEBUG_NETWORK_EARLY)
 		wctc4xxp_net_waitfor_promiscuous(wc);
 
-	DTE_PRINTK(DEBUG,
+	dev_info(&wc->pdev->dev,
 	   "Created network device %s for debug.\n", wc->board_name);
 	return 0;
 
@@ -988,6 +956,7 @@ wctc4xxp_net_capture_cmd(struct wcdte *wc, const struct tcb *cmd)
 	return;
 }
 #endif /* !WITHOUT_NETDEV */
+
 
 /*! In-memory structure shared by the host and the adapter. */
 struct wctc4xxp_descriptor {
@@ -1057,13 +1026,8 @@ wctc4xxp_initialize_descriptor_ring(struct pci_dev *pdev,
 	BUG_ON(!pdev);
 	BUG_ON(!dr);
 
-#if defined(__FreeBSD__)
-	if ((cache_line_size = pci_read_config(pdev->dev, 0x0c, 1)) == 0)
-		return -EIO;
-#else
 	if (pci_read_config_byte(pdev, 0x0c, &cache_line_size))
 		return -EIO;
-#endif
 
 	memset(dr, 0, sizeof(*dr));
 
@@ -1080,12 +1044,12 @@ wctc4xxp_initialize_descriptor_ring(struct pci_dev *pdev,
 		dr->padding = (cache_line_size*sizeof(u32)) - sizeof(*d);
 
 #if defined(__FreeBSD__)
-	res = dahdi_dma_allocate(pdev->dev, (sizeof(*d) + dr->padding) * DRING_SIZE,
+	res = dahdi_dma_allocate(pdev->dev.device, (sizeof(*d) + dr->padding) * DRING_SIZE,
 	    &dr->dma_tag, &dr->dma_map, (void **) &dr->desc, &dr->desc_dma);
 	if (res)
 		return -res;
 
-        res = bus_dma_tag_create(bus_get_dma_tag(pdev->dev), 8, 0,
+        res = bus_dma_tag_create(bus_get_dma_tag(pdev->dev.device), 8, 0,
 	    BUS_SPACE_MAXADDR_32BIT, BUS_SPACE_MAXADDR, NULL, NULL,
 	    SFRAME_SIZE, 1, SFRAME_SIZE, 0, NULL, NULL, &dr->tcb_dma_tag);
 	if (res) {
@@ -1110,8 +1074,10 @@ wctc4xxp_initialize_descriptor_ring(struct pci_dev *pdev,
 #else
 	dr->desc = pci_alloc_consistent(pdev,
 			(sizeof(*d)+dr->padding)*DRING_SIZE, &dr->desc_dma);
+
 	if (!dr->desc)
 		return -ENOMEM;
+
 	memset(dr->desc, 0, (sizeof(*d) + dr->padding) * DRING_SIZE);
 #endif
 
@@ -1170,8 +1136,8 @@ wctc4xxp_submit(struct wctc4xxp_descriptor_ring *dr, struct tcb *c)
 	}
 	bus_dmamap_sync(dr->tcb_dma_tag, dr->tcb_dma_map[dr->tail], BUS_DMASYNC_PREWRITE);
 #else
-	d->buffer1 = pci_map_single(dr->pdev, c->data,
-			SFRAME_SIZE, dr->direction);
+	d->buffer1 = cpu_to_le32(pci_map_single(dr->pdev, c->data,
+			SFRAME_SIZE, dr->direction));
 #endif
 
 	SET_OWNED(d); /* That's it until the hardware is done with it. */
@@ -1201,7 +1167,7 @@ wctc4xxp_retrieve(struct wctc4xxp_descriptor_ring *dr)
 		bus_dmamap_sync(dr->tcb_dma_tag, dr->tcb_dma_map[dr->head], BUS_DMASYNC_POSTREAD);
 		bus_dmamap_unload(dr->tcb_dma_tag, dr->tcb_dma_map[dr->head]);
 #else
-		pci_unmap_single(dr->pdev, d->buffer1,
+		pci_unmap_single(dr->pdev, le32_to_cpu(d->buffer1),
 			SFRAME_SIZE, dr->direction);
 #endif
 		c = dr->pending[dr->head];
@@ -1213,7 +1179,7 @@ wctc4xxp_retrieve(struct wctc4xxp_descriptor_ring *dr)
 #endif
 		--dr->count;
 		WARN_ON(!c);
-		c->data_len = (d->des0 >> 16) & BUFFER1_SIZE_MASK;
+		c->data_len = (le32_to_cpu(d->des0) >> 16) & BUFFER1_SIZE_MASK;
 		WARN_ON(c->data_len > SFRAME_SIZE);
 	} else {
 		c = NULL;
@@ -1401,9 +1367,12 @@ send_create_channel_cmd(struct wcdte *wc, struct tcb *cmd, u16 timeslot,
 		return res;
 
 	if (0x0000 != response_header(cmd)->params[0]) {
-		/* The DTE failed to create the channel. */
-		/* TODO put some debug information here. */
-		WARN_ON(1);
+		if (printk_ratelimit()) {
+			dev_warn(&wc->pdev->dev,
+				 "Failed to create channel in timeslot " \
+				 "%d.  Response from DTE was (%04x).\n",
+				 timeslot, response_header(cmd)->params[0]);
+		}
 		free_cmd(cmd->response);
 		cmd->response = NULL;
 		return -EIO;
@@ -1555,7 +1524,8 @@ send_destroy_channel_cmd(struct wcdte *wc, struct tcb *cmd, u16 channel)
 	/* Let's check the response for any error codes.... */
 	result = le16_to_cpu(response_header(cmd)->params[0]);
 	if (0x0000 != result) {
-		DTE_PRINTK(ERR, "Failed to destroy channel %04d (%04x)\n",
+		dev_err(&wc->pdev->dev,
+			"Failed to destroy channel %04d (%04x)\n",
 			channel, result);
 		return -EIO;
 	}
@@ -1581,7 +1551,7 @@ send_set_ip_hdr_channel_cmd(struct channel_pvt *pvt, struct tcb *cmd)
 	/* Let's check the response for any error codes.... */
 	result = le16_to_cpu(response_header(cmd)->params[0]);
 	if (0x0000 != result) {
-		DTE_PRINTK(ERR, "Failure in %s (%04x)\n",
+		dev_err(&wc->pdev->dev, "Failure in %s (%04x)\n",
 			__func__, result);
 		return -EIO;
 	}
@@ -1603,7 +1573,7 @@ send_voip_vceopt_cmd(struct channel_pvt *pvt, struct tcb *cmd, u16 length)
 	/* Let's check the response for any error codes.... */
 	result = le16_to_cpu(response_header(cmd)->params[0]);
 	if (0x0000 != result) {
-		DTE_PRINTK(ERR, "Failure in %s (%04x)\n",
+		dev_err(&wc->pdev->dev, "Failure in %s (%04x)\n",
 			__func__, result);
 		return -EIO;
 	}
@@ -1625,7 +1595,7 @@ send_voip_tonectl_cmd(struct channel_pvt *pvt, struct tcb *cmd)
 	/* Let's check the response for any error codes.... */
 	result = le16_to_cpu(response_header(cmd)->params[0]);
 	if (0x0000 != result) {
-		DTE_PRINTK(ERR, "Failure in %s (%04x)\n",
+		dev_err(&wc->pdev->dev, "Failure in %s (%04x)\n",
 			__func__, result);
 		return -EIO;
 	}
@@ -1889,6 +1859,20 @@ static void
 wctc4xxp_transmit_cmd(struct wcdte *wc, struct tcb *cmd)
 {
 	int res;
+
+	/* If we're shutdown all commands will timeout. Just complete the
+	 * command here with the timeout flag */
+	if (unlikely(test_bit(DTE_SHUTDOWN, &wc->flags))) {
+		if (cmd->flags & DO_NOT_AUTO_FREE) {
+			cmd->flags |= DTE_CMD_TIMEOUT;
+			list_del_init(&cmd->node);
+			complete(&cmd->complete);
+		} else {
+			list_del(&cmd->node);
+			free_cmd(cmd);
+		}
+		return;
+	}
 
 	if (cmd->data_len < MIN_PACKET_LEN) {
 		memset((u8 *)(cmd->data) + cmd->data_len, 0,
@@ -2190,10 +2174,10 @@ wctc4xxp_operation_release(struct dahdi_transcoder_channel *dtc)
 
 	packets_received = atomic_read(&cpvt->stats.packets_received);
 	packets_sent = atomic_read(&cpvt->stats.packets_sent);
-		
+
 	if ((packets_sent - packets_received) > 5) {
-		DTE_DEBUG(DTE_DEBUG_GENERAL, "%s channel %d sent %d packets " 
-			"and received %d packets.\n", (cpvt->e.encoder) ? 
+		DTE_DEBUG(DTE_DEBUG_GENERAL, "%s channel %d sent %d packets "
+			"and received %d packets.\n", (cpvt->e.encoder) ?
 			"encoder" : "decoder", cpvt->chan_out_num,
 			packets_sent, packets_received);
 	}
@@ -2290,10 +2274,11 @@ wctc4xxp_handle_receive_ring(struct wcdte *wc)
 		spin_unlock(&wc->rx_list_lock);
 		cmd = __alloc_cmd(SFRAME_SIZE, GFP_ATOMIC, 0);
 		if (!cmd) {
-			DTE_PRINTK(ERR, "Out of memory in %s.\n", __func__);
+			dev_err(&wc->pdev->dev,
+				"Out of memory in %s.\n", __func__);
 		} else {
 			if (wctc4xxp_submit(wc->rxd, cmd)) {
-				DTE_PRINTK(ERR, "Failed submit in %s\n",
+				dev_err(&wc->pdev->dev, "Failed submit in %s\n",
 					__func__);
 				free_cmd(cmd);
 			}
@@ -2325,7 +2310,7 @@ static ssize_t
 wctc4xxp_read(FOP_READ_ARGS_DECL)
 {
 	ssize_t ret;
-	struct dahdi_transcoder_channel *dtc = dahdi_get_private_data(file);
+	struct dahdi_transcoder_channel *dtc = file->private_data;
 	struct channel_pvt *cpvt = dtc->pvt;
 	struct wcdte *wc = cpvt->wc;
 	struct tcb *cmd;
@@ -2379,7 +2364,7 @@ wctc4xxp_read(FOP_READ_ARGS_DECL)
 			}
 
 			if (printk_ratelimit()) {
-				DTE_PRINTK(ERR,
+				dev_err(&wc->pdev->dev,
 				  "Cannot copy %zd bytes into %zd byte user " \
 				  "buffer.\n", payload_bytes, count);
 			}
@@ -2396,7 +2381,7 @@ wctc4xxp_read(FOP_READ_ARGS_DECL)
 				   &packet->payload[0], payload_bytes);
 #endif
 		if (unlikely(ret)) {
-			DTE_PRINTK(ERR, "Failed to copy data in %s\n",
+			dev_err(&wc->pdev->dev, "Failed to copy data in %s\n",
 				   __func__);
 			free_cmd(cmd);
 			return -EFAULT;
@@ -2415,7 +2400,7 @@ wctc4xxp_read(FOP_READ_ARGS_DECL)
 static ssize_t
 wctc4xxp_write(FOP_WRITE_ARGS_DECL)
 {
-	struct dahdi_transcoder_channel *dtc = dahdi_get_private_data(file);
+	struct dahdi_transcoder_channel *dtc = file->private_data;
 	struct channel_pvt *cpvt = dtc->pvt;
 	struct wcdte *wc = cpvt->wc;
 	struct tcb *cmd;
@@ -2445,12 +2430,13 @@ wctc4xxp_write(FOP_WRITE_ARGS_DECL)
 	}
 
 	if (DAHDI_FORMAT_G723_1 == dtc->srcfmt) {
-		if ((G723_5K_BYTES != count) && (G723_6K_BYTES != count)) {
+		if ((G723_5K_BYTES != count) && (G723_6K_BYTES != count) &&
+		    (G723_SID_BYTES != count)) {
 			DTE_DEBUG(DTE_DEBUG_GENERAL,
 			   "Trying to transcode packet into G723 format " \
 			   "that is %Zu bytes instead of the expected " \
-			   "%d/%d bytes.\n", count, G723_5K_BYTES,
-			   G723_6K_BYTES);
+			   "%d/%d/%d bytes.\n", count, G723_5K_BYTES,
+			   G723_6K_BYTES, G723_SID_BYTES);
 			return -EINVAL;
 		}
 		cpvt->timestamp += G723_SAMPLES;
@@ -2471,7 +2457,8 @@ wctc4xxp_write(FOP_WRITE_ARGS_DECL)
 	if (copy_from_user(&((struct rtp_packet *)(cmd->data))->payload[0],
 		frame, count)) {
 #endif
-		DTE_PRINTK(ERR, "Failed to copy packet from userspace.\n");
+		dev_err(&wc->pdev->dev,
+			"Failed to copy packet from userspace.\n");
 		free_cmd(cmd);
 		return -EFAULT;
 	}
@@ -2633,7 +2620,7 @@ print_command(struct wcdte *wc, const struct tcb *cmd)
 
 	buffer = kzalloc(BUFFER_SIZE + 1, GFP_ATOMIC);
 	if (!buffer) {
-		DTE_PRINTK(DEBUG, "Failed print_command\n");
+		dev_info(&wc->pdev->dev, "Failed print_command\n");
 		return;
 	}
 	curlength = snprintf(buffer, BUFFER_SIZE,
@@ -2650,7 +2637,7 @@ print_command(struct wcdte *wc, const struct tcb *cmd)
 			BUFFER_SIZE - curlength, " %04x",
 			le16_to_cpu(hdr->params[i]));
 	}
-	DTE_PRINTK(DEBUG, "%s\n", buffer);
+	dev_info(&wc->pdev->dev, "%s\n", buffer);
 	kfree(buffer);
 }
 
@@ -2675,7 +2662,7 @@ receive_csm_encaps_packet(struct wcdte *wc, struct tcb *cmd)
 			}
 
 			if (0x75 == hdr->class) {
-				DTE_PRINTK(WARNING,
+				dev_warn(&wc->pdev->dev,
 				   "Received alert (0x%04x) from dsp\n",
 				   le16_to_cpu(hdr->params[0]));
 			}
@@ -2686,12 +2673,12 @@ receive_csm_encaps_packet(struct wcdte *wc, struct tcb *cmd)
 						  hdr->channel);
 			}
 			if (hdr->params[0] != le16_to_cpu(0xffff)) {
-				DTE_PRINTK(WARNING,
+				dev_warn(&wc->pdev->dev,
 				   "DTE Failed self test (%04x).\n",
 				   le16_to_cpu(hdr->params[0]));
 			} else if ((hdr->params[1] != le16_to_cpu(0x000c)) &&
 				(hdr->params[1] != le16_to_cpu(0x010c))) {
-				DTE_PRINTK(WARNING,
+				dev_warn(&wc->pdev->dev,
 				   "Unexpected ERAM status (%04x).\n",
 				   le16_to_cpu(hdr->params[1]));
 			} else {
@@ -2704,7 +2691,8 @@ receive_csm_encaps_packet(struct wcdte *wc, struct tcb *cmd)
 				wctc4xxp_send_ack(wc, hdr->seq_num,
 						  hdr->channel);
 			}
-			DTE_PRINTK(WARNING, "Received diagnostic message:\n");
+			dev_warn(&wc->pdev->dev,
+				 "Received diagnostic message:\n");
 			print_command(wc, cmd);
 			free_cmd(cmd);
 		} else {
@@ -2712,7 +2700,7 @@ receive_csm_encaps_packet(struct wcdte *wc, struct tcb *cmd)
 				wctc4xxp_send_ack(wc, hdr->seq_num,
 						  hdr->channel);
 			}
-			DTE_PRINTK(WARNING,
+			dev_warn(&wc->pdev->dev,
 			  "Unknown command type received. %02x\n", hdr->type);
 			free_cmd(cmd);
 		}
@@ -2742,7 +2730,7 @@ queue_rtp_packet(struct wcdte *wc, struct tcb *cmd)
 
 	index = (be16_to_cpu(packet->udphdr.dest) - 0x5000) / 2;
 	if (unlikely(!(index < wc->numchannels))) {
-		DTE_PRINTK(ERR,
+		dev_err(&wc->pdev->dev,
 		  "Invalid channel number in response from DTE.\n");
 		free_cmd(cmd);
 		return;
@@ -2758,7 +2746,7 @@ queue_rtp_packet(struct wcdte *wc, struct tcb *cmd)
 		dtc = &(wc->uencode->channels[index]);
 		break;
 	default:
-		DTE_PRINTK(ERR, "Unknown codec in packet (0x%02x).\n",\
+		dev_err(&wc->pdev->dev, "Unknown codec in packet (0x%02x).\n",\
 			packet->rtphdr.type);
 		free_cmd(cmd);
 		return;
@@ -2790,7 +2778,7 @@ wctc4xxp_receiveprep(struct wcdte *wc, struct tcb *cmd)
 	}
 }
 
-static inline void service_tx_ring(struct wcdte *wc)
+static void service_tx_ring(struct wcdte *wc)
 {
 	struct tcb *cmd;
 	unsigned long flags;
@@ -2831,7 +2819,7 @@ static inline void service_tx_ring(struct wcdte *wc)
 	}
 }
 
-static inline void service_rx_ring(struct wcdte *wc)
+static void service_rx_ring(struct wcdte *wc)
 {
 	struct tcb *cmd;
 	unsigned long flags;
@@ -2855,12 +2843,6 @@ static inline void service_rx_ring(struct wcdte *wc)
 	wctc4xxp_receive_demand_poll(wc);
 }
 
-static inline void service_dte(struct wcdte *wc)
-{
-	service_tx_ring(wc);
-	service_rx_ring(wc);
-}
-
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 static void deferred_work_func(void *param)
 {
@@ -2870,7 +2852,8 @@ static void deferred_work_func(struct work_struct *work)
 {
 	struct wcdte *wc = container_of(work, struct wcdte, deferred_work);
 #endif
-	service_dte(wc);
+	service_tx_ring(wc);
+	service_rx_ring(wc);
 }
 
 #if DEFERRED_PROCESSING == ITHREAD
@@ -2878,7 +2861,8 @@ static void
 wctc4xxp_ithread(void *arg)
 {
 	struct wcdte *wc = (struct wcdte *) arg;
-	service_dte(wc);
+	service_tx_ring(wc);
+	service_rx_ring(wc);
 }
 #endif
 
@@ -2924,27 +2908,30 @@ DAHDI_IRQ_HANDLER(wctc4xxp_interrupt)
 		__wctc4xxp_setctl(wc, 0x0028, reg);
 	} else {
 		if ((ints & 0x00008000) && debug)
-			DTE_PRINTK(INFO, "Abnormal Interrupt.\n");
+			dev_info(&wc->pdev->dev, "Abnormal Interrupt.\n");
 
 		if ((ints & 0x00002000) && debug)
-			DTE_PRINTK(INFO, "Fatal Bus Error INT\n");
+			dev_info(&wc->pdev->dev, "Fatal Bus Error INT\n");
 
 		if ((ints & 0x00000100) && debug)
-			DTE_PRINTK(INFO, "Receive Stopped INT\n");
+			dev_info(&wc->pdev->dev, "Receive Stopped INT\n");
 
 		if ((ints & 0x00000080) && debug) {
-			DTE_PRINTK(INFO, "Receive Desciptor Unavailable INT " \
-			    "(%d)\n", wctc4xxp_getcount(wc->rxd));
+			dev_info(&wc->pdev->dev,
+				 "Receive Desciptor Unavailable INT " \
+				 "(%d)\n", wctc4xxp_getcount(wc->rxd));
 		}
 
 		if ((ints & 0x00000020) && debug)
-			DTE_PRINTK(INFO, "Transmit Under-flow INT\n");
+			dev_info(&wc->pdev->dev, "Transmit Under-flow INT\n");
 
 		if ((ints & 0x00000008) && debug)
-			DTE_PRINTK(INFO, "Jabber Timer Time-out INT\n");
+			dev_info(&wc->pdev->dev, "Jabber Timer Time-out INT\n");
 
-		if ((ints & 0x00000002) && debug)
-			DTE_PRINTK(INFO, "Transmit Processor Stopped INT\n");
+		if ((ints & 0x00000002) && debug) {
+			dev_info(&wc->pdev->dev,
+				 "Transmit Processor Stopped INT\n");
+		}
 
 		/* Clear all the pending interrupts. */
 		__wctc4xxp_setctl(wc, 0x0028, ints);
@@ -2963,20 +2950,16 @@ wctc4xxp_hardware_init(struct wcdte *wc)
 
 	/* Enable I/O Access */
 #if defined(__FreeBSD__)
-	pci_enable_busmaster(wc->pdev->dev);
-	pci_enable_io(wc->pdev->dev, SYS_RES_IOPORT);
-	pci_enable_io(wc->pdev->dev, SYS_RES_MEMORY);
+	pci_enable_busmaster(wc->pdev->dev.device);
+	pci_enable_io(wc->pdev->dev.device, SYS_RES_IOPORT);
+	pci_enable_io(wc->pdev->dev.device, SYS_RES_MEMORY);
 #else
 	pci_read_config_dword(wc->pdev, 0x0004, &reg);
 	reg |= 0x00000007;
 	pci_write_config_dword(wc->pdev, 0x0004, reg);
 #endif
 
-#if defined(__FreeBSD__)
-	if ((cache_line_size = pci_read_config(wc->pdev->dev, 0x0c, 1)) == 0)
-#else
 	if (pci_read_config_byte(wc->pdev, 0x0c, &cache_line_size))
-#endif
 		return -EIO;
 
 	switch (cache_line_size) {
@@ -3054,11 +3037,10 @@ wctc4xxp_start_dma(struct wcdte *wc)
 }
 
 static void
-wctc4xxp_stop_dma(struct wcdte *wc)
+_wctc4xxp_stop_dma(struct wcdte *wc)
 {
 	/* Disable interrupts and reset */
 	unsigned int reg;
-	unsigned long newjiffies;
 	/* Disable interrupts */
 	wctc4xxp_setintmask(wc, 0x00000000);
 	wctc4xxp_setctl(wc, 0x0084, 0x00000000);
@@ -3067,14 +3049,20 @@ wctc4xxp_stop_dma(struct wcdte *wc)
 	reg = wctc4xxp_getctl(wc, 0x0000);
 	reg |= 0x00000001;
 	wctc4xxp_setctl(wc, 0x0000, reg);
+}
 
+static void
+wctc4xxp_stop_dma(struct wcdte *wc)
+{
+	unsigned long newjiffies;
+
+	_wctc4xxp_stop_dma(wc);
 	newjiffies = jiffies + HZ; /* One second timeout */
 	/* We'll wait here for the part to come out of reset */
 	while (((wctc4xxp_getctl(wc, 0x0000)) & 0x00000001) &&
 		(newjiffies > jiffies))
 			msleep(1);
 }
-
 
 #define MDIO_SHIFT_CLK		0x10000
 #define MDIO_DATA_WRITE1 	0x20000
@@ -3170,7 +3158,8 @@ wctc4xxp_wait_for_link(struct wcdte *wc)
 		delay_count++;
 
 		if (delay_count >= 5000) {
-			DTE_PRINTK(ERR, "Failed to link to DTE processor!\n");
+			dev_err(&wc->pdev->dev,
+				"Failed to link to DTE processor!\n");
 			return -EIO;
 		}
 	} while ((reg & 0xE0000000) != 0xE0000000);
@@ -3181,7 +3170,6 @@ static int
 wctc4xxp_load_firmware(struct wcdte *wc, const struct firmware *firmware)
 {
 	unsigned int byteloc;
-	unsigned int last_byteloc;
 	unsigned int length;
 	struct tcb *cmd;
 	const u8 *firmware_data = (const u8 *) firmware->data;
@@ -3202,7 +3190,6 @@ wctc4xxp_load_firmware(struct wcdte *wc, const struct firmware *firmware)
 #endif
 
 	while (byteloc < (firmware_size-20)) {
-		last_byteloc = byteloc;
 		length = (firmware_data[byteloc] << 8) |
 				firmware_data[byteloc+1];
 		byteloc += 2;
@@ -3215,7 +3202,7 @@ wctc4xxp_load_firmware(struct wcdte *wc, const struct firmware *firmware)
 		wait_for_completion(&cmd->complete);
 		if (cmd->flags & DTE_CMD_TIMEOUT) {
 			free_cmd(cmd);
-			DTE_PRINTK(ERR, "Failed to load firmware.\n");
+			dev_err(&wc->pdev->dev, "Failed to load firmware.\n");
 #if defined(CONFIG_WCTC4XXP_POLLING)
 			wctc4xxp_disable_polling(wc);
 #endif
@@ -3224,7 +3211,7 @@ wctc4xxp_load_firmware(struct wcdte *wc, const struct firmware *firmware)
 	}
 	free_cmd(cmd);
 	if (!wait_event_timeout(wc->waitq, wctc4xxp_is_ready(wc), 15*HZ)) {
-		DTE_PRINTK(ERR, "Failed to boot firmware.\n");
+		dev_err(&wc->pdev->dev, "Failed to boot firmware.\n");
 #if defined(CONFIG_WCTC4XXP_POLLING)
 		wctc4xxp_disable_polling(wc);
 #endif
@@ -3337,10 +3324,6 @@ wctc4xxp_create_channel_pair(struct wcdte *wc, struct channel_pvt *cpvt,
 		complicated = temp;
 	}
 
-	DTE_DEBUG(DTE_DEBUG_CHANNEL_SETUP,
-	   "DTE is using the following channels encoder_channel: " \
-	   "%d decoder_channel: %d\n", encoder_channel, decoder_channel);
-
 	BUG_ON(encoder_timeslot/2 >= wc->numchannels);
 	BUG_ON(decoder_timeslot/2 >= wc->numchannels);
 	encoder_pvt = wc->uencode->channels[encoder_timeslot/2].pvt;
@@ -3358,6 +3341,10 @@ wctc4xxp_create_channel_pair(struct wcdte *wc, struct channel_pvt *cpvt,
 	if (send_create_channel_cmd(wc, cmd, decoder_timeslot,
 		&decoder_channel))
 		goto error_exit;
+
+	DTE_DEBUG(DTE_DEBUG_CHANNEL_SETUP,
+	   "DTE is using the following channels encoder_channel: " \
+	   "%d decoder_channel: %d\n", encoder_channel, decoder_channel);
 
 	length = (DTE_FORMAT_G729A == complicated) ? G729_LENGTH :
 		(DTE_FORMAT_G723_1 == complicated) ? G723_LENGTH : 0;
@@ -3419,7 +3406,7 @@ wctc4xxp_destroy_channel_pair(struct wcdte *wc, struct channel_pvt *cpvt)
 	}
 
 	if (timeslot1/2 >= wc->numchannels || timeslot2/2 >= wc->numchannels) {
-		DTE_PRINTK(WARNING,
+		dev_warn(&wc->pdev->dev,
 		 "Invalid channel numbers in %s. chan1:%d chan2: %d\n",
 		 __func__, timeslot1/2, timeslot2/2);
 		return 0;
@@ -3644,13 +3631,20 @@ wctc4xxp_watchdog(unsigned long data)
 		if (time_after(jiffies, cmd->timeout)) {
 			if (++cmd->retries > MAX_RETRIES) {
 				if (!(cmd->flags & TX_COMPLETE)) {
+
+					cmd->flags |= DTE_CMD_TIMEOUT;
+					list_del_init(&cmd->node);
+					complete(&cmd->complete);
+
 					set_bit(DTE_SHUTDOWN, &wc->flags);
 					spin_unlock(&wc->cmd_list_lock);
-					wctc4xxp_stop_dma(wc);
-					DTE_PRINTK(ERR,
+					_wctc4xxp_stop_dma(wc);
+					dev_err(&wc->pdev->dev,
 					  "Board malfunctioning.  " \
 					  "Halting operation.\n");
-					return;
+					reschedule_timer = 0;
+					spin_lock(&wc->cmd_list_lock);
+					break;
 				}
 				/* ERROR:  We've retried the command and
 				 * haven't received the ACK or the response.
@@ -3670,7 +3664,7 @@ wctc4xxp_watchdog(unsigned long data)
 				 * off any lists, lets just reset the timeout
 				 * and tell the hardware to look for another
 				 * command . */
-				DTE_PRINTK(WARNING,
+				dev_warn(&wc->pdev->dev,
 				  "Retrying command that was " \
 				  "still on descriptor list.\n");
 				cmd->timeout = jiffies + HZ/4;
@@ -3771,13 +3765,13 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 #if defined(__FreeBSD__)
 	wc = device_get_softc(dev);
 	wc->pdev = &wc->_dev;
-	wc->pdev->dev = dev;
+	wc->pdev->dev.device = dev;
 
         /* allocate memory resource */
 	wc->mem_rid = PCIR_BAR(1);
 	wc->mem_res = bus_alloc_resource_any(dev, SYS_RES_MEMORY, &wc->mem_rid, RF_ACTIVE);
 	if (wc->mem_res == NULL) {
-		device_printf(wc->pdev->dev, "Can't allocate memory resource\n");
+		device_printf(wc->pdev->dev.device, "Can't allocate memory resource\n");
 		return (-ENXIO);
 	}
 #else
@@ -3806,7 +3800,7 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	}
 #endif
 
-	init_MUTEX(&wc->chansem);
+	sema_init(&wc->chansem, 1);
 	spin_lock_init(&wc->reglock);
 	spin_lock_init(&wc->cmd_list_lock);
 	spin_lock_init(&wc->rx_list_lock);
@@ -3819,17 +3813,13 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 #else
 	INIT_WORK(&wc->deferred_work, deferred_work_func);
 #endif
-	init_waitqueue_head(&wc->waitq);
-
 #if !defined(__FreeBSD__)
-	DTE_PRINTK(INFO, "Attached to device at %s.\n", pci_name(wc->pdev));
-
 	if (pci_set_dma_mask(wc->pdev, DMA_BIT_MASK(32))) {
 		release_mem_region(pci_resource_start(wc->pdev, 1),
 			pci_resource_len(wc->pdev, 1));
 		if (wc->iobase)
 			pci_iounmap(wc->pdev, wc->iobase);
-		DTE_PRINTK(WARNING, "No suitable DMA available.\n");
+		dev_warn(&wc->pdev->dev, "No suitable DMA available.\n");
 		return -EIO;
 	}
 #endif
@@ -3859,7 +3849,7 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 #if defined(HOTPLUG_FIRMWARE)
 	res = request_firmware(&firmware, tc400m_firmware, &wc->pdev->dev);
 	if (res || !firmware) {
-		DTE_PRINTK(ERR,
+		dev_err(&wc->pdev->dev,
 		  "Firmware %s not available from userspace. (%d)\n",
 		  tc400m_firmware, res);
 		goto error_exit_swinit;
@@ -3931,14 +3921,14 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	 * --------------------------------------------------------------- */
 #if defined(__FreeBSD__)
 	wc->irq_res = bus_alloc_resource_any(
-	    wc->pdev->dev, SYS_RES_IRQ, &wc->irq_rid, RF_SHAREABLE | RF_ACTIVE);
+	    wc->pdev->dev.device, SYS_RES_IRQ, &wc->irq_rid, RF_SHAREABLE | RF_ACTIVE);
 	if (wc->irq_res == NULL) {
-		device_printf(wc->pdev->dev, "Can't allocate irq resource\n");
+		device_printf(wc->pdev->dev.device, "Can't allocate irq resource\n");
 		res = -ENXIO;
 	}
 
 	res = bus_setup_intr(
-		wc->pdev->dev, wc->irq_res, INTR_TYPE_CLK | INTR_MPSAFE,
+		wc->pdev->dev.device, wc->irq_res, INTR_TYPE_CLK | INTR_MPSAFE,
 		wctc4xxp_interrupt,
 #if DEFERRED_PROCESSING == ITHREAD
 		wctc4xxp_ithread,
@@ -3947,13 +3937,13 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 #endif
 		wc, &wc->irq_handle);
 	if (res) {
-		device_printf(wc->pdev->dev, "Can't setup interrupt handler (error %d)\n", res);
+		device_printf(wc->pdev->dev.device, "Can't setup interrupt handler (error %d)\n", res);
 		return (-ENXIO);
 	}
 #else
 	res = pci_enable_device(pdev);
 	if (res) {
-		DTE_PRINTK(ERR, "Failed to enable device.\n");
+		dev_err(&wc->pdev->dev, "Failed to enable device.\n");
 		goto error_exit_swinit;;
 	}
 	pci_set_master(pdev);
@@ -3961,7 +3951,8 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	res = request_irq(pdev->irq, wctc4xxp_interrupt,
 		DAHDI_IRQ_SHARED, wc->board_name, wc);
 	if (res) {
-		DTE_PRINTK(ERR, "Unable to request IRQ %d\n", pdev->irq);
+		dev_err(&wc->pdev->dev,
+			"Unable to request IRQ %d\n", pdev->irq);
 		if (firmware != &embedded_firmware)
 			release_firmware(firmware);
 		goto error_exit_hwinit;
@@ -3989,7 +3980,7 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		goto error_exit_hwinit;
 
 	/* \todo Read firmware version directly from tc400b.*/
-	DTE_PRINTK(INFO, "(%s) Transcoder support LOADED " \
+	dev_info(&wc->pdev->dev, "(%s) Transcoder support LOADED " \
 	   "(firm ver = %d.%d)\n", wc->complexname, wctc4xxp_firmware_ver,
 	   wctc4xxp_firmware_ver_minor);
 
@@ -3998,7 +3989,7 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	DTE_DEBUG(DTE_DEBUG_GENERAL,
 	   "debug: (post-boot) Reg fc is %08x\n", reg);
 
-	DTE_PRINTK(INFO, "Installed a Wildcard TC: %s \n", wc->variety);
+	dev_info(&wc->pdev->dev, "Installed a Wildcard TC: %s\n", wc->variety);
 	DTE_DEBUG(DTE_DEBUG_GENERAL, "Operating in DEBUG mode.\n");
 	dahdi_transcoder_register(wc->uencode);
 	dahdi_transcoder_register(wc->udecode);
@@ -4014,12 +4005,12 @@ error_exit_hwinit:
 #if defined(__FreeBSD__)
 	/* disconnect the interrupt handler */
 	if (wc->irq_handle != NULL) {
-		bus_teardown_intr(wc->pdev->dev, wc->irq_res, wc->irq_handle);
+		bus_teardown_intr(wc->pdev->dev.device, wc->irq_res, wc->irq_handle);
 		wc->irq_handle = NULL;
 	}
 
 	if (wc->irq_res != NULL) {
-		bus_release_resource(wc->pdev->dev, SYS_RES_IRQ, wc->irq_rid, wc->irq_res);
+		bus_release_resource(wc->pdev->dev.device, SYS_RES_IRQ, wc->irq_rid, wc->irq_res);
 		wc->irq_res = NULL;
 	}
 #else
@@ -4041,7 +4032,7 @@ error_exit_swinit:
 #if defined(__FreeBSD__)
 	/* release I/O region */
 	if (wc->mem_res != NULL) {
-		bus_release_resource(wc->pdev->dev, SYS_RES_MEMORY, wc->mem_rid, wc->mem_res);
+		bus_release_resource(wc->pdev->dev.device, SYS_RES_MEMORY, wc->mem_rid, wc->mem_res);
 		wc->mem_res = NULL;
 	}
 #else
@@ -4110,12 +4101,12 @@ static void __devexit wctc4xxp_remove_one(struct pci_dev *pdev)
 #if defined(__FreeBSD__)
         /* disconnect the interrupt handler */
 	if (wc->irq_handle != NULL) {
-		bus_teardown_intr(wc->pdev->dev, wc->irq_res, wc->irq_handle);
+		bus_teardown_intr(wc->pdev->dev.device, wc->irq_res, wc->irq_handle);
 		wc->irq_handle = NULL;
 	}
 
 	if (wc->irq_res != NULL) {
-		bus_release_resource(wc->pdev->dev, SYS_RES_IRQ, wc->irq_rid, wc->irq_res);
+		bus_release_resource(wc->pdev->dev.device, SYS_RES_IRQ, wc->irq_rid, wc->irq_res);
 		wc->irq_res = NULL;
 	}
 #else
@@ -4132,7 +4123,7 @@ static void __devexit wctc4xxp_remove_one(struct pci_dev *pdev)
 #if defined(__FreeBSD__)
 	/* release memory region */
 	if (wc->mem_res != NULL) {
-		bus_release_resource(wc->pdev->dev, SYS_RES_MEMORY, wc->mem_rid, wc->mem_res);
+		bus_release_resource(wc->pdev->dev.device, SYS_RES_MEMORY, wc->mem_rid, wc->mem_res);
 		wc->mem_res = NULL;
 	}
 #else
@@ -4166,7 +4157,7 @@ static void __devexit wctc4xxp_remove_one(struct pci_dev *pdev)
 #endif
 }
 
-static struct pci_device_id wctc4xxp_pci_tbl[] = {
+static DEFINE_PCI_DEVICE_TABLE(wctc4xxp_pci_tbl) = {
 	{ 0xd161, 0x3400, PCI_ANY_ID, PCI_ANY_ID,
 		0, 0, (unsigned long) &wctc400p }, /* Digium board */
 	{ 0xd161, 0x8004, PCI_ANY_ID, PCI_ANY_ID,
@@ -4182,7 +4173,7 @@ SYSCTL_NODE(_dahdi, OID_AUTO, wctc4xxp, CTLFLAG_RW, 0, "DAHDI wctc4xxp");
 static int
 wctc4xxp_device_probe(device_t dev)
 {
-	struct pci_device_id *id;
+	const struct pci_device_id *id;
 	struct wctc4xxp_desc *d;
 
 	id = dahdi_pci_device_id_lookup(dev, wctc4xxp_pci_tbl);
@@ -4201,7 +4192,7 @@ static int
 wctc4xxp_device_attach(device_t dev)
 {
 	int res;
-	struct pci_device_id *id;
+	const struct pci_device_id *id;
 
 	id = dahdi_pci_device_id_lookup(dev, wctc4xxp_pci_tbl);
 	if (id == NULL)
@@ -4242,11 +4233,17 @@ MODULE_DEPEND(wctc4xxp, dahdi_transcode, 1, 1, 1);
 #else /* !__FreeBSD__ */
 MODULE_DEVICE_TABLE(pci, wctc4xxp_pci_tbl);
 
+static int wctc4xxp_suspend(struct pci_dev *pdev, pm_message_t state)
+{
+	return -ENOSYS;
+}
+
 static struct pci_driver wctc4xxp_driver = {
 	.name = "wctc4xxp",
 	.probe = wctc4xxp_init_one,
 	.remove = __devexit_p(wctc4xxp_remove_one),
 	.id_table = wctc4xxp_pci_tbl,
+	.suspend = wctc4xxp_suspend,
 };
 #endif /* !__FreeBSD__ */
 
@@ -4301,7 +4298,7 @@ static void __exit wctc4xxp_cleanup(void)
 }
 
 module_param(debug, int, S_IRUGO | S_IWUSR);
-module_param(mode, charp, S_IRUGO | S_IWUSR);
+module_param(mode, charp, S_IRUGO);
 
 MODULE_PARM_DESC(mode, "'g729', 'g723.1', or 'any'.  Default 'any'.");
 MODULE_DESCRIPTION("Wildcard TC400P+TC400M Driver");

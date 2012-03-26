@@ -36,6 +36,7 @@
 #ifndef _GPAKCUST_H  /* prevent multiple inclusion */
 #define _GPAKCUST_H
 
+#include <linux/module.h>
 #include <linux/device.h>
 #include <linux/completion.h>
 #include <linux/workqueue.h>
@@ -72,10 +73,8 @@
 #define __VPM150M_TX		(1 << 0)
 
 /* Some Bit ops for different operations */
-#define VPM150M_SPIRESET		0
 #define VPM150M_HPIRESET		1
 #define VPM150M_SWRESET			2
-#define VPM150M_DTMFDETECT		3
 #define VPM150M_ACTIVE			4
 
 #define NLPTYPE_NONE		0
@@ -130,8 +129,6 @@ struct vpmadt032 {
 	struct list_head active_cmds;
 	struct vpmadt032_options options;
 	void (*setchanconfig_from_state)(struct vpmadt032 *vpm, int channel, struct GpakChannelConfig *chanconfig);
-	/* This must be last */
-	char wq_name[0];
 };
 
 struct voicebus;
@@ -141,10 +138,10 @@ struct dahdi_echocanparam;
 struct dahdi_echocan_state;
 
 char vpmadt032tone_to_zaptone(GpakToneCodes_t tone);
-int vpmadt032_init(struct vpmadt032 *vpm, struct voicebus *vb);
+int vpmadt032_test(struct vpmadt032 *vpm, struct voicebus *vb);
+int vpmadt032_init(struct vpmadt032 *vpm);
 int vpmadt032_reset(struct vpmadt032 *vpm);
-struct vpmadt032 *vpmadt032_alloc(struct vpmadt032_options *options,
-					const char *board_name);
+struct vpmadt032 *vpmadt032_alloc(struct vpmadt032_options *options);
 void vpmadt032_free(struct vpmadt032 *vpm);
 int vpmadt032_echocan_create(struct vpmadt032 *vpm, int channo,
 			     enum adt_companding companding,
@@ -156,44 +153,42 @@ void vpmadt032_echocan_free(struct vpmadt032 *vpm, int channo,
 struct GpakEcanParms;
 void vpmadt032_get_default_parameters(struct GpakEcanParms *p);
 
-/* If there is a command ready to go to the VPMADT032, return it, otherwise NULL */
+/* If there is a command ready to go to the VPMADT032, return it, otherwise
+ * NULL. Call with local interrupts disabled.  */
 static inline struct vpmadt032_cmd *vpmadt032_get_ready_cmd(struct vpmadt032 *vpm)
 {
-	unsigned long flags;
 	struct vpmadt032_cmd *cmd;
 
-	spin_lock_irqsave(&vpm->list_lock, flags);
+	spin_lock(&vpm->list_lock);
 	if (list_empty(&vpm->pending_cmds)) {
-		spin_unlock_irqrestore(&vpm->list_lock, flags);
+		spin_unlock(&vpm->list_lock);
 		return NULL;
 	}
 	cmd = list_entry(vpm->pending_cmds.next, struct vpmadt032_cmd, node);
 	list_move_tail(&cmd->node, &vpm->active_cmds);
-	spin_unlock_irqrestore(&vpm->list_lock, flags);
+	spin_unlock(&vpm->list_lock);
 	return cmd;
 }
 
 void vpmadt032_free_cmd(struct vpmadt032_cmd *cmd);
 
+/**
+ * call with local interrupts disabled.
+ */
 static inline void vpmadt032_resend(struct vpmadt032 *vpm)
 {
-	unsigned long flags;
 	struct vpmadt032_cmd *cmd, *temp;
-
-	BUG_ON(!vpm);
 
 	/* By moving the commands back to the pending list, they will be
 	 * transmitted when room is available */
-	spin_lock_irqsave(&vpm->list_lock, flags);
+	spin_lock(&vpm->list_lock);
 	list_for_each_entry_safe(cmd, temp, &vpm->active_cmds, node) {
 		cmd->desc &= ~(__VPM150M_TX);
 		list_move_tail(&cmd->node, &vpm->pending_cmds);
 	}
-	spin_unlock_irqrestore(&vpm->list_lock, flags);
+	spin_unlock(&vpm->list_lock);
 }
 
-
-int vpmadt032_module_init(void);
 
 typedef __u16 DSP_WORD;			/* 16 bit DSP word */
 typedef __u32 DSP_ADDRESS;		/* 32 bit DSP address */

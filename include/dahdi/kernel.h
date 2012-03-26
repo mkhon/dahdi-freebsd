@@ -6,7 +6,7 @@
  * written by Jim Dixon <jim@lambdatel.com>.
  *
  * Copyright (C) 2001 Jim Dixon / Zapata Telephony.
- * Copyright (C) 2001 - 2010 Digium, Inc.
+ * Copyright (C) 2001 - 2012 Digium, Inc.
  *
  * All rights reserved.
  *
@@ -35,13 +35,12 @@
 
 #include <dahdi/user.h>
 #include <dahdi/fasthdlc.h>
-#include <dahdi/dahdi_config.h>
 
+#include <dahdi/dahdi_config.h>
 #include <linux/version.h>
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,18)
-#include <linux/config.h>
-#endif
 #include <linux/fs.h>
+#include <linux/device.h>
+#include <linux/module.h>
 #include <linux/ioctl.h>
 
 #ifdef CONFIG_DAHDI_NET	
@@ -53,16 +52,19 @@
 #include <linux/skbuff.h>
 #include <linux/interrupt.h>
 #endif
+#include <linux/device.h>
+#ifdef CONFIG_DAHDI_SYSFS
+#include <linux/sysfs.h>
+#endif
 
 #include <linux/poll.h>
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,10)
 #define dahdi_pci_module pci_register_driver
-#else
-#define dahdi_pci_module pci_module_init
-#endif
 
 #if defined(__FreeBSD__)
+#define local_irq_save(f)	(f) = 0
+#define local_irq_restore(f)
+
 #define DAHDI_IRQ_HANDLER(a) static int a(void *dev_id)
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
 #define DAHDI_IRQ_HANDLER(a) static irqreturn_t a(int irq, void *dev_id)
@@ -70,27 +72,39 @@
 #define DAHDI_IRQ_HANDLER(a) static irqreturn_t a(int irq, void *dev_id, struct pt_regs *regs)
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,18)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 25)
+#ifdef CONFIG_PCI
+#include <linux/pci-aspm.h>
+#endif
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 29)
+#define HAVE_NET_DEVICE_OPS
+#endif
+
 #define DAHDI_IRQ_SHARED IRQF_SHARED
 #define DAHDI_IRQ_DISABLED IRQF_DISABLED
 #define DAHDI_IRQ_SHARED_DISABLED IRQF_SHARED | IRQF_DISABLED
-#else
-#define DAHDI_IRQ_SHARED SA_SHIRQ
-#define DAHDI_IRQ_DISABLED SA_INTERRUPT
-#define DAHDI_IRQ_SHARED_DISABLED SA_SHIRQ | SA_INTERRUPT
-#endif
 
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,16)
-#ifndef dev_notice
-#define dev_notice(dev, format, arg...)         \
-        dev_printk(KERN_NOTICE , dev , format , ## arg)
-#endif
-#endif
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,26)
-#define dev_name(dev)		(dev)->bus_id
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 26)
+#  ifdef RHEL_RELEASE_VERSION
+#    if RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(5, 6)
+#define dev_name(dev)		((dev)->bus_id)
 #define dev_set_name(dev, format, ...) \
-	snprintf((dev)->bus_id, BUS_ID_SIZE, format, ## __VA_ARGS__);
+	snprintf((dev)->bus_id, BUS_ID_SIZE, format, ## __VA_ARGS__)
+#    else
+#define dev_set_name(dev, format, ...) \
+	do { \
+		kobject_set_name(&(dev)->kobj, format, ## __VA_ARGS__); \
+		snprintf((dev)->bus_id, BUS_ID_SIZE, \
+			kobject_name(&(dev)->kobj));	\
+	} while (0)
+#    endif
+#  else
+#define dev_name(dev)		((dev)->bus_id)
+#define dev_set_name(dev, format, ...) \
+	snprintf((dev)->bus_id, BUS_ID_SIZE, format, ## __VA_ARGS__)
+#  endif
 #endif
 
 #if defined(__FreeBSD__)
@@ -100,11 +114,11 @@
 #include <sys/sysctl.h>
 #include <sys/taskqueue.h>
 
-#define dahdi_pci_get_bus(pci_dev)	pci_get_bus((pci_dev)->dev)
-#define dahdi_pci_get_slot(pci_dev)	pci_get_slot((pci_dev)->dev)
-#define dahdi_pci_get_irq(pci_dev)	pci_get_irq((pci_dev)->dev)
-#define dahdi_pci_get_device(pci_dev)	pci_get_device((pci_dev)->dev)
-#define dahdi_pci_get_vendor(pci_dev)	pci_get_vendor((pci_dev)->dev)
+#define dahdi_pci_get_bus(pci_dev)	pci_get_bus((pci_dev)->dev.device)
+#define dahdi_pci_get_slot(pci_dev)	pci_get_slot((pci_dev)->dev.device)
+#define dahdi_pci_get_irq(pci_dev)	pci_get_irq((pci_dev)->dev.device)
+#define dahdi_pci_get_device(pci_dev)	pci_get_device((pci_dev)->dev.device)
+#define dahdi_pci_get_vendor(pci_dev)	pci_get_vendor((pci_dev)->dev.device)
 
 void
 dahdi_dma_map_addr(void *arg, bus_dma_segment_t *segs, int nseg, int error);
@@ -122,7 +136,7 @@ void
 device_rlprintf(int pps, device_t dev, const char *fmt, ...)
 	__printflike(3, 4);
 
-struct pci_device_id *dahdi_pci_device_id_lookup(device_t dev, struct pci_device_id *tbl);
+const struct pci_device_id *dahdi_pci_device_id_lookup(device_t dev, const struct pci_device_id *tbl);
 
 SYSCTL_DECL(_dahdi);
 SYSCTL_DECL(_dahdi_echocan);
@@ -131,7 +145,7 @@ SYSCTL_DECL(_dahdi_echocan);
 #define _LIST_HEAD(n)	LIST_HEAD(n)
 
 #define dahdi_pci_get_bus(dev)		((dev)->bus->number)
-#define dahdi_pci_get_slot(dev)		(PCI_SLOT((dev)->devfn))
+#define dahdi_pci_get_slot(dev)		(PCI_SLOT((dev)->devfn) + 1)
 #define dahdi_pci_get_irq(dev)		((dev)->irq)
 #define dahdi_pci_get_device(dev)	((dev)->device)
 #define dahdi_pci_get_vendor(dev)	((dev)->vendor)
@@ -145,6 +159,11 @@ SYSCTL_DECL(_dahdi_echocan);
 #define DAHDI_DEFAULT_CHUNKSIZE	 DAHDI_CHUNKSIZE
 #define DAHDI_MAX_CHUNKSIZE 	 DAHDI_CHUNKSIZE
 #define DAHDI_CB_SIZE		 2
+
+/* DAHDI operates at 8Khz by default */
+#define DAHDI_MS_TO_SAMPLES(ms) ((ms) * 8)
+
+#define DAHDI_MSECS_PER_CHUNK	(DAHDI_CHUNKSIZE/DAHDI_MS_TO_SAMPLES(1))
 
 #define RING_DEBOUNCE_TIME	2000	/*!< 2000 ms ring debounce time */
 
@@ -249,9 +268,6 @@ struct dahdi_echocan_features {
  */
 struct dahdi_echocan_ops {
 
-	/*! The name of the echocan that created this structure. */
-	const char *name;
-
 	/*! \brief Free an echocan state structure.
 	 * \param[in,out] ec Pointer to the state structure to free.
 	 *
@@ -301,13 +317,22 @@ struct dahdi_echocan_ops {
 	 * \return Nothing.
 	 */
 	void (*echocan_NLP_toggle)(struct dahdi_echocan_state *ec, unsigned int enable);
+
+#ifdef CONFIG_DAHDI_ECHOCAN_PROCESS_TX
+	/*! \brief Process an array of TX audio samples.
+	 *
+	 * \return Nothing.
+	 */
+	void (*echocan_process_tx)(struct dahdi_echocan_state *ec,
+				   short *tx, u32 size);
+#endif
 };
 
 /*! A factory for creating instances of software echo cancelers to be used on DAHDI channels. */
 struct dahdi_echocan_factory {
 
-	/*! The name of the factory. */
-	const char *name;
+	/*! Get the name of the factory. */
+	const char *(*get_name)(const struct dahdi_chan *chan);
 
 	/*! Pointer to the module that owns this factory; the module's reference count will be
 	 * incremented/decremented by the DAHDI core as needed.
@@ -425,15 +450,6 @@ struct dahdi_echocan_state {
 	} events;
 };
 
-struct pollinfo {
-#if defined(__FreeBSD__)
-	struct selinfo selinfo;
-	struct task task;
-#else
-	wait_queue_head_t wait_queue;
-#endif
-};
-
 struct dahdi_chan {
 #ifdef CONFIG_DAHDI_NET
 	/*! \note Must be first */
@@ -471,7 +487,7 @@ struct dahdi_chan {
 
 	struct dahdi_chan *master;	/*!< Our Master channel (could be us) */
 	/*! \brief Next slave (if appropriate) */
-	int nextslave;
+	struct dahdi_chan *nextslave;
 
 	u_char *writechunk;						/*!< Actual place to write to */
 	u_char swritechunk[DAHDI_MAX_CHUNKSIZE];	/*!< Buffer to be written */
@@ -479,50 +495,49 @@ struct dahdi_chan {
 	u_char sreadchunk[DAHDI_MAX_CHUNKSIZE];	/*!< Preallocated static area */
 	short *readchunkpreec;
 
-	/*! Pointer to tx and rx gain tables */
-	u_char *rxgain;
-	u_char *txgain;
-	
-	/*! Whether or not we have allocated gains or are using the default */
-	int gainalloc;
+	/* Channel from which to read when DACSed. */
+	struct dahdi_chan *dacs_chan;
 
+	/*! Pointer to tx and rx gain tables */
+	const u_char *rxgain;
+	const u_char *txgain;
+	
 	/* Specified by driver, readable by DAHDI */
 	void *pvt;			/*!< Private channel data */
 #if defined(__FreeBSD__)
-	struct cdev *dev;	/*!< Device structure */
-	struct cdev *file;	/*!< File structure */
-	int file_flags;
+	struct cdev *dev;
 	struct dahdi_iface *iface;
-#else
-	struct file *file;	/*!< File structure */
 #endif
+	struct file *file;	/*!< File structure */
 	
 	
+#ifdef CONFIG_DAHDI_MIRROR
+	struct dahdi_chan	*rxmirror;  /*!< channel we mirror reads to */
+	struct dahdi_chan	*txmirror;  /*!< channel we mirror writes to */
+	struct dahdi_chan	*srcmirror; /*!< channel we mirror from */
+#endif /* CONFIG_DAHDI_MIRROR */
 	struct dahdi_span	*span;			/*!< Span we're a member of */
 	int		sig;			/*!< Signalling */
 	int		sigcap;			/*!< Capability for signalling */
 	__u32		chan_alarms;		/*!< alarms status */
+
+	wait_queue_head_t waitq;
 
 	/* Used only by DAHDI -- NO DRIVER SERVICEABLE PARTS BELOW */
 	/* Buffer declarations */
 	u_char		*readbuf[DAHDI_MAX_NUM_BUFS];	/*!< read buffer */
 	int		inreadbuf;
 	int		outreadbuf;
-	wait_queue_head_t readbufq; /*!< read wait queue */
 
 	u_char		*writebuf[DAHDI_MAX_NUM_BUFS]; /*!< write buffers */
 	int		inwritebuf;
 	int		outwritebuf;
-	wait_queue_head_t writebufq; /*!< write wait queue */
 	
 	int		blocksize;	/*!< Block size */
 
 	int		eventinidx;  /*!< out index in event buf (circular) */
 	int		eventoutidx;  /*!< in index in event buf (circular) */
 	unsigned int	eventbuf[DAHDI_MAX_EVENTSIZE];  /*!< event circ. buffer */
-	wait_queue_head_t eventbufq; /*!< event wait queue */
-	
-	wait_queue_head_t txstateq;	/*!< waiting on the tx state to change */
 	
 	int		readn[DAHDI_MAX_NUM_BUFS];  /*!< # of bytes ready in read buf */
 	int		readidx[DAHDI_MAX_NUM_BUFS];  /*!< current read pointer */
@@ -538,7 +553,6 @@ struct dahdi_chan {
 	
 	/* Tone zone stuff */
 	struct dahdi_zone *curzone;		/*!< Zone for selecting tones */
-	int 	tonezone;				/*!< Tone zone for this channel */
 	struct dahdi_tone *curtone;		/*!< Current tone we're playing (if any) */
 	int		tonep;					/*!< Current position in tone */
 	struct dahdi_tone_state ts;		/*!< Tone state */
@@ -558,8 +572,7 @@ struct dahdi_chan {
 	int		cadencepos;				/*!< Where in the cadence we are */
 
 	/* I/O Mask */	
-	int		iomask;  /*! I/O Mux signal mask */
-	struct pollinfo	sel;	/*! thingy for select stuff */
+	unsigned int iomask;  /*! I/O Mux signal mask */
 	
 	/* HDLC state machines */
 	struct fasthdlc_state txhdlc;
@@ -571,6 +584,7 @@ struct dahdi_chan {
 	int		_confn;	/*! Actual conference number */
 	int		confmode;  /*! conference mode */
 	int		confmute; /*! conference mute mode */
+	struct dahdi_chan *conf_chan;
 
 	/* Incoming and outgoing conference chunk queues for
 	   communicating between DAHDI master time and
@@ -586,7 +600,7 @@ struct dahdi_chan {
 	short	conflast[DAHDI_MAX_CHUNKSIZE];			/*!< Last conference sample -- base part of channel */
 	short	conflast1[DAHDI_MAX_CHUNKSIZE];		/*!< Last conference sample  -- pseudo part of channel */
 	short	conflast2[DAHDI_MAX_CHUNKSIZE];		/*!< Previous last conference sample -- pseudo part of channel */
-	
+
 
 	/*! The echo canceler module that should be used to create an
 	   instance when this channel needs one */
@@ -717,9 +731,6 @@ struct dahdi_chardev {
 #endif
 };
 
-int dahdi_register_chardev(struct dahdi_chardev *dev);
-int dahdi_unregister_chardev(struct dahdi_chardev *dev);
-
 /*! \brief defines for transmit signalling */
 enum dahdi_txsig {
 	DAHDI_TXSIG_ONHOOK,  /*!< On hook */
@@ -749,8 +760,9 @@ enum {
 	DAHDI_FLAGBIT_MFDECODE	= 3,	/*!< Channel supports native MFr2 decode */
 	DAHDI_FLAGBIT_ECHOCANCEL= 4,	/*!< Channel supports native echo cancellation */
 	DAHDI_FLAGBIT_HDLC	= 5,	/*!< Perform HDLC */
+#if defined(CONFIG_DAHDI_NET) || defined(__FreeBSD__)
 	DAHDI_FLAGBIT_NETDEV	= 6,	/*!< Send to network */
-	DAHDI_FLAGBIT_PSEUDO	= 7,	/*!< Pseudo channel */
+#endif
 	DAHDI_FLAGBIT_CLEAR	= 8,	/*!< Clear channel */
 	DAHDI_FLAGBIT_AUDIO	= 9,	/*!< Audio mode channel */
 	DAHDI_FLAGBIT_OPEN	= 10,	/*!< Channel is open */
@@ -764,7 +776,25 @@ enum {
 	DAHDI_FLAGBIT_LOOPED	= 18,	/*!< Loopback the receive data from the channel to the transmit */
 	DAHDI_FLAGBIT_MTP2	= 19,	/*!< Repeats last message in buffer and also discards repeating messages sent to us */
 	DAHDI_FLAGBIT_HDLC56	= 20,	/*!< Sets the given channel (if in HDLC mode) to use 56K HDLC instead of 64K  */
+	DAHDI_FLAGBIT_BUFEVENTS	= 21,	/*!< Report buffer events */
+	DAHDI_FLAGBIT_TXUNDERRUN = 22,	/*!< Transmit underrun condition */
+	DAHDI_FLAGBIT_RXOVERRUN = 23,	/*!< Receive overrun condition */
+	DAHDI_FLAGBIT_DEVFILE	= 25,	/*!< Channel has a sysfs dev file */
 };
+
+#if defined(CONFIG_DAHDI_NET) || defined(__FreeBSD__)
+/**
+ * have_netdev() - Return true if a channel has an associated network device.
+ * @chan:	   Then channel to check.
+ *
+ */
+static inline int dahdi_have_netdev(const struct dahdi_chan *chan)
+{
+	return test_bit(DAHDI_FLAGBIT_NETDEV, &chan->flags);
+}
+#else
+static inline int dahdi_have_netdev(const struct dahdi_chan *chan) { return 0; }
+#endif
 
 struct dahdi_count {
 	__u32 fe;		/*!< Framing error counter */
@@ -798,8 +828,7 @@ struct dahdi_count {
 #define DAHDI_FLAG_ECHOCANCEL	DAHDI_FLAG(ECHOCANCEL)
 
 #define DAHDI_FLAG_HDLC		DAHDI_FLAG(HDLC)
-#define DAHDI_FLAG_NETDEV	DAHDI_FLAG(NETDEV)
-#define DAHDI_FLAG_PSEUDO	DAHDI_FLAG(PSEUDO)
+/* #define DAHDI_FLAG_NETDEV	DAHDI_FLAG(NETDEV) */
 #define DAHDI_FLAG_CLEAR	DAHDI_FLAG(CLEAR)
 #define DAHDI_FLAG_AUDIO	DAHDI_FLAG(AUDIO)
 
@@ -814,6 +843,11 @@ struct dahdi_count {
 #define DAHDI_FLAG_LOOPED	DAHDI_FLAG(LOOPED)
 #define DAHDI_FLAG_MTP2		DAHDI_FLAG(MTP2)
 #define DAHDI_FLAG_HDLC56	DAHDI_FLAG(HDLC56)
+#define DAHDI_FLAG_BUFEVENTS	DAHDI_FLAG(BUFEVENTS)
+#define DAHDI_FLAG_TXUNDERRUN	DAHDI_FLAG(TXUNDERRUN)
+#define DAHDI_FLAG_RXOVERRUN	DAHDI_FLAG(RXOVERRUN)
+
+struct file;
 
 struct dahdi_span_ops {
 	struct module *owner;		/*!< Which module is exporting this span. */
@@ -824,10 +858,11 @@ struct dahdi_span_ops {
 	int (*setchunksize)(struct dahdi_span *span, int chunksize);
 
 	/*! Opt: Configure the span (if appropriate) */
-	int (*spanconfig)(struct dahdi_span *span, struct dahdi_lineconfig *lc);
+	int (*spanconfig)(struct file *file, struct dahdi_span *span,
+			  struct dahdi_lineconfig *lc);
 	
 	/*! Opt: Start the span */
-	int (*startup)(struct dahdi_span *span);
+	int (*startup)(struct file *file, struct dahdi_span *span);
 	
 	/*! Opt: Shutdown the span */
 	int (*shutdown)(struct dahdi_span *span);
@@ -836,12 +871,14 @@ struct dahdi_span_ops {
 	int (*maint)(struct dahdi_span *span, int mode);
 
 #ifdef	DAHDI_SYNC_TICK
-	/*! Opt: send sync to spans */
-	int (*sync_tick)(struct dahdi_span *span, int is_master);
+	/*! Opt: send sync to spans. Called in hard_irq context with chan_lock
+	 *       held.*/
+	void (*sync_tick)(struct dahdi_span *span, int is_master);
 #endif
 	/* ====  Channel Callback Operations ==== */
 	/*! Opt: Set signalling type (if appropriate) */
-	int (*chanconfig)(struct dahdi_chan *chan, int sigtype);
+	int (*chanconfig)(struct file *file, struct dahdi_chan *chan,
+			  int sigtype);
 
 	/*! Opt: Prepare a channel for I/O */
 	int (*open)(struct dahdi_chan *chan);
@@ -884,6 +921,12 @@ struct dahdi_span_ops {
 	int (*audio_notify)(struct dahdi_chan *chan, int yes);
 #endif
 
+	/*! Opt: Enable preechocan stream from inline HW echocanceler. */
+	int (*enable_hw_preechocan)(struct dahdi_chan *chan);
+
+	/*! Opt: Disable preechocan stream from inline HW echocanceler. */
+	void (*disable_hw_preechocan)(struct dahdi_chan *chan);
+
 	/*! Opt: Dacs the contents of chan2 into chan1 if possible */
 	int (*dacs)(struct dahdi_chan *chan1, struct dahdi_chan *chan2);
 
@@ -892,6 +935,41 @@ struct dahdi_span_ops {
 			      struct dahdi_echocanparams *ecp,
 			      struct dahdi_echocanparam *p,
 			      struct dahdi_echocan_state **ec);
+
+	/*! Opt: Provide the name of the echo canceller on a channel */
+	const char *(*echocan_name)(const struct dahdi_chan *chan);
+
+	/*! When using "pinned_spans", this function is called back when this
+	 * span has been assigned with the system. */
+	void (*assigned)(struct dahdi_span *span);
+
+	/*! Called when the spantype / linemode is changed before the span is
+	 * assigned a number. */
+	int (*set_spantype)(struct dahdi_span *span, const char *spantype);
+};
+
+/**
+ * dahdi_device - Represents a device that can contain one or more spans.
+ *
+ * @spans:        List of child spans.
+ * @manufacturer: Device manufacturer.
+ * @location:     The location of this device. This should not change if
+ *                the device is replaced (e.g: in the same PCI slot)
+ * @hardware_id:  The hardware_id of this device (NULL for devices without
+ *                a hardware_id). This should not change if the device is
+ *                relocated to a different location (e.g: different PCI slot)
+ * @devicetype:   What type of device this is.
+ * @irqmisses:    Count of "interrupt misses" for this device.
+ *
+ */
+struct dahdi_device {
+	struct list_head spans;
+	const char *manufacturer;
+	const char *location;
+	const char *hardware_id;
+	const char *devicetype;
+	struct device dev;
+	unsigned int irqmisses;
 };
 
 struct dahdi_span {
@@ -899,13 +977,10 @@ struct dahdi_span {
 	char name[40];			/*!< Span name */
 	char desc[80];			/*!< Span description */
 	const char *spantype;		/*!< span type in text form */
-	const char *manufacturer;	/*!< span's device manufacturer */
-	char devicetype[80];		/*!< span's device type */
-	char location[40];		/*!< span device's location in system */
 	int deflaw;			/*!< Default law (DAHDI_MULAW or DAHDI_ALAW) */
 	int alarms;			/*!< Pending alarms on span */
 	unsigned long flags;
-	int irq;			/*!< IRQ for this span's hardware */
+	u8 cannot_provide_timing:1;
 	int lbo;			/*!< Span Line-Buildout */
 	int lineconfig;			/*!< Span line configuration */
 	int linecompat;			/*!< Span line compatibility (0 for
@@ -917,10 +992,8 @@ struct dahdi_span {
 	struct dahdi_count count;	/*!< Performance and Error counters */
 
 	int maintstat;			/*!< Maintenance state */
-	wait_queue_head_t maintq;	/*!< Maintenance queue */
 	int mainttimer;			/*!< Maintenance timer */
 
-	int irqmisses;			/*!< Interrupt misses */
 	int timingslips;		/*!< Clock slips */
 
 	struct dahdi_chan **chans;	/*!< Member channel structures */
@@ -936,12 +1009,23 @@ struct dahdi_span {
 	int watchcounter;
 	int watchstate;
 #endif	
+
+#ifdef CONFIG_PROC_FS
+	struct proc_dir_entry *proc_entry;
+#endif
+	struct list_head spans_node;
+
+	struct dahdi_device *parent;
+	struct list_head device_node;
+#ifdef CONFIG_DAHDI_SYSFS
+	struct device *span_device;
+#endif
 };
 
 struct dahdi_transcoder_channel {
 	void *pvt;
 	struct dahdi_transcoder *parent;
-	struct pollinfo ready;
+	wait_queue_head_t ready;
 	__u32 built_fmts;
 #define DAHDI_TC_FLAG_BUSY		1
 #define DAHDI_TC_FLAG_CHAN_BUILT	2
@@ -951,6 +1035,8 @@ struct dahdi_transcoder_channel {
 	u32 dstfmt;
 	u32 srcfmt;
 };
+
+int dahdi_is_sync_master(const struct dahdi_span *span);
 
 static inline int 
 dahdi_tc_is_built(struct dahdi_transcoder_channel *dtc) {
@@ -1025,43 +1111,104 @@ struct dahdi_transcoder {
 #define DAHDI_WATCHSTATE_FAILED		3
 
 
-struct dahdi_dynamic_driver {
-	/*! Driver name (e.g. Eth) */
-	char name[20];
-
-	/*! Driver description */
-	char desc[80];
-
-	/*! Create a new transmission pipe */
-	void *(*create)(struct dahdi_span *span, char *address);
-
-	/*! Destroy a created transmission pipe */
-	void (*destroy)(void *tpipe);
-
-	/*! Transmit a given message */
-	int (*transmit)(void *tpipe, unsigned char *msg, int msglen);
-
-	/*! Flush any pending messages */
-	int (*dynamic_flush)(void);
+struct dahdi_dynamic {
+	char addr[40];
+	char dname[20];
+	int err;
+	struct kref kref;
+	long rxjif;
+	unsigned short txcnt;
+	unsigned short rxcnt;
+	struct dahdi_device *ddev;
+	struct dahdi_span span;
+	struct dahdi_chan *chans[256];
+	struct dahdi_dynamic_driver *driver;
+	void *pvt;
+	int timing;
+	int master;
+	unsigned char *msgbuf;
+	struct device *dev;
 
 	struct list_head list;
+};
+
+struct dahdi_dynamic_driver {
+	/*! Driver name (e.g. Eth) */
+	const char *name;
+
+	/*! Driver description */
+	const char *desc;
+
+	/*! Create a new transmission pipe */
+	int (*create)(struct dahdi_dynamic *d, const char *address);
+
+	/*! Destroy a created transmission pipe */
+	void (*destroy)(struct dahdi_dynamic *d);
+
+	/*! Transmit a given message */
+	void (*transmit)(struct dahdi_dynamic *d, u8 *msg, size_t msglen);
+
+	/*! Flush any pending messages */
+	int (*flush)(void);
+
+	struct list_head list;
+	struct module *owner;
+
+	/*! Numberic id of next device created by this driver. */
+	unsigned int id;
 };
 
 /*! \brief Receive a dynamic span message */
 void dahdi_dynamic_receive(struct dahdi_span *span, unsigned char *msg, int msglen);
 
 /*! \brief Register a dynamic driver */
-int dahdi_dynamic_register(struct dahdi_dynamic_driver *driver);
+int dahdi_dynamic_register_driver(struct dahdi_dynamic_driver *driver);
 
 /*! \brief Unregister a dynamic driver */
-void dahdi_dynamic_unregister(struct dahdi_dynamic_driver *driver);
+void dahdi_dynamic_unregister_driver(struct dahdi_dynamic_driver *driver);
+
+int _dahdi_receive(struct dahdi_span *span);
 
 /*! Receive on a span.  The DAHDI interface will handle all the calculations for
    all member channels of the span, pulling the data from the readchunk buffer */
-int dahdi_receive(struct dahdi_span *span);
+static inline int dahdi_receive(struct dahdi_span *span)
+{
+	unsigned long flags;
+	int ret;
+	local_irq_save(flags);
+	ret = _dahdi_receive(span);
+	local_irq_restore(flags);
+	return ret;
+}
+
+int _dahdi_transmit(struct dahdi_span *span);
 
 /*! Prepare writechunk buffers on all channels for this span */
-int dahdi_transmit(struct dahdi_span *span);
+static inline int dahdi_transmit(struct dahdi_span *span)
+{
+	unsigned long flags;
+	int ret;
+	local_irq_save(flags);
+	ret = _dahdi_transmit(span);
+	local_irq_restore(flags);
+	return ret;
+}
+
+static inline int dahdi_is_digital_span(const struct dahdi_span *s)
+{
+	return (s->linecompat > 0);
+}
+
+static inline int dahdi_is_t1_span(const struct dahdi_span *s)
+{
+	return (s->linecompat & (DAHDI_CONFIG_D4 | DAHDI_CONFIG_ESF |
+				 DAHDI_CONFIG_B8ZS)) > 0;
+}
+
+static inline int dahdi_is_e1_span(const struct dahdi_span *s)
+{
+	return dahdi_is_digital_span(s) && !dahdi_is_t1_span(s);
+}
 
 /*! Abort the buffer currently being receive with event "event" */
 void dahdi_hdlc_abort(struct dahdi_chan *ss, int event);
@@ -1077,10 +1224,14 @@ void dahdi_hdlc_putbuf(struct dahdi_chan *ss, unsigned char *rxb, int bytes);
  * and 1 if the currently transmitted message is now done */
 int dahdi_hdlc_getbuf(struct dahdi_chan *ss, unsigned char *bufptr, unsigned int *size);
 
+struct pci_dev;
 
-/*! Register a span.  Returns 0 on success, -1 on failure.  Pref-master is non-zero if
-   we should have preference in being the master device */
-int dahdi_register(struct dahdi_span *span, int prefmaster);
+/*! Register a device.  Returns 0 on success, -1 on failure. */
+struct dahdi_device *dahdi_create_device(struct pci_dev *pdev);
+int dahdi_register_device(struct dahdi_device *ddev, struct device *parent);
+void dahdi_unregister_device(struct dahdi_device *ddev);
+void dahdi_free_device(struct dahdi_device *ddev);
+void dahdi_init_span(struct dahdi_span *span);
 
 /*! Allocate / free memory for a transcoder */
 struct dahdi_transcoder *dahdi_transcoder_alloc(int numchans);
@@ -1095,14 +1246,8 @@ int dahdi_transcoder_unregister(struct dahdi_transcoder *tc);
 /*! \brief Alert a transcoder */
 int dahdi_transcoder_alert(struct dahdi_transcoder_channel *ztc);
 
-/*! \brief Unregister a span */
-int dahdi_unregister(struct dahdi_span *span);
-
-/*! \brief Sleep in user space until woken up. Equivilant of tsleep() in BSD */
-int dahdi_schluffen(wait_queue_head_t *q);
-
 /*! \brief Gives a name to an LBO */
-char *dahdi_lboname(int lbo);
+const char *dahdi_lboname(int lbo);
 
 /*! \brief Tell DAHDI about changes in received rbs bits */
 void dahdi_rbsbits(struct dahdi_chan *chan, int bits);
@@ -1133,9 +1278,32 @@ struct dahdi_tone *dahdi_mf_tone(const struct dahdi_chan *chan, char digit, int 
    as possible.  ECHO CANCELLATION IS NO LONGER AUTOMATICALLY DONE
    AT THE DAHDI LEVEL.  dahdi_ec_chunk will not echo cancel if it should
    not be doing so.  rxchunk is modified in-place */
+void __dahdi_ec_chunk(struct dahdi_chan *ss, u8 *rxchunk,
+		      const u8 *preecchunk, const u8 *txchunk);
 
-void dahdi_ec_chunk(struct dahdi_chan *chan, unsigned char *rxchunk, const unsigned char *txchunk);
-void dahdi_ec_span(struct dahdi_span *span);
+static inline void _dahdi_ec_chunk(struct dahdi_chan *chan,
+				   u8 *rxchunk, const u8 *txchunk)
+{
+	__dahdi_ec_chunk(chan, rxchunk, rxchunk, txchunk);
+}
+
+static inline void dahdi_ec_chunk(struct dahdi_chan *ss, unsigned char *rxchunk,
+				  const unsigned char *txchunk)
+{
+	unsigned long flags;
+	local_irq_save(flags);
+	_dahdi_ec_chunk(ss, rxchunk, txchunk);
+	local_irq_restore(flags);
+}
+
+void _dahdi_ec_span(struct dahdi_span *span);
+static inline void dahdi_ec_span(struct dahdi_span *span)
+{
+	unsigned long flags;
+	local_irq_save(flags);
+	_dahdi_ec_span(span);
+	local_irq_restore(flags);
+}
 
 extern struct file_operations *dahdi_transcode_fops;
 
@@ -1271,7 +1439,22 @@ static inline short dahdi_txtone_nextsample(struct dahdi_chan *ss)
 #define fatal_signal_pending(p) \
 	(signal_pending((p)) && sigismember(&(p)->pending.signal, SIGKILL))
 
+#ifdef CONFIG_PCI
+#ifndef PCIE_LINK_STATE_L0S
+#define PCIE_LINK_STATE_L0S	1
+#define PCIE_LINK_STATE_L1	2
+#define PCIE_LINK_STATE_CLKPM	4
+#endif
+#define pci_disable_link_state dahdi_pci_disable_link_state
+void dahdi_pci_disable_link_state(struct pci_dev *pdev, int state);
+#endif /* CONFIG_PCI */
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 22)
+
+#ifndef __packed                                                                                         
+#define __packed  __attribute__((packed))                                                                
+#endif 
+
 #include <linux/ctype.h>
 /* A define of 'clamp_val' happened to be added in the patch
  * linux-2.6-sata-prep-work-for-rhel5-3.patch kernel-2.6.spec that also
@@ -1293,47 +1476,64 @@ static inline int strcasecmp(const char *s1, const char *s2)
 	return c1 - c2;
 }
 #endif /* clamp_val */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 18)
-static inline void list_replace(struct list_head *old, struct list_head *new)
-{
-        new->next = old->next;
-        new->next->prev = new;
-        new->prev = old->prev;
-        new->prev->next = new;
-}
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 14)
-#define kzalloc(a, b) kcalloc(1, a, b)
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 12)
-#define synchronize_rcu() synchronize_kernel()
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 11)
-#if !defined(HAVE_WAIT_FOR_COMPLETION_TIMEOUT)
-static inline unsigned long
-wait_for_completion_timeout(struct completion *x, unsigned long timeout)
-{
-	/* There is a race condition here.  If x->done is reset to 0
-	 * before the call to wait_for_completion after this thread wakes.
-	 */
-	timeout = wait_event_timeout(x->wait, x->done, timeout);
-	if (timeout)
-		wait_for_completion(x);
 
-	return timeout;
-}
-#endif
-#endif /* 2.6.11 */
-#endif /* 2.6.12 */
-#endif /* 2.6.14 */
-#endif /* 2.6.18 */
 #endif /* 2.6.22 */
 #endif /* 2.6.25 */
 #endif /* 2.6.26 */
 #endif /* 2.6.31 */
 
+#ifndef CONFIG_TRACING
+#define trace_printk printk
+#endif
+
+#ifndef DEFINE_SPINLOCK
+#define DEFINE_SPINLOCK(x)      spinlock_t x = SPIN_LOCK_UNLOCKED
+#endif
+
+#ifndef DEFINE_SEMAPHORE
+#define DEFINE_SEMAPHORE(name) \
+	struct semaphore name = __SEMAPHORE_INITIALIZER(name, 1)
+#endif
+
+#ifndef DEFINE_MUTEX
+struct mutex {
+	struct semaphore sem;
+};
+#define DEFINE_MUTEX(name)					\
+	struct mutex name = {					\
+		.sem = __SEMAPHORE_INITIALIZER((name).sem, 1),	\
+	}
+#define mutex_lock(_x) down(&(_x)->sem)
+#define mutex_unlock(_x) up(&(_x)->sem)
+#define mutex_init(_x) sema_init(&(_x)->sem, 1)
+#endif
+
+#ifndef DEFINE_PCI_DEVICE_TABLE
+#define DEFINE_PCI_DEVICE_TABLE(_x) \
+	const struct pci_device_id _x[] __devinitdata
+#endif
+
 #ifndef DMA_BIT_MASK
 #define DMA_BIT_MASK(n)	(((n) == 64) ? ~0ULL : ((1ULL<<(n))-1))
 #endif
 
+/* WARN_ONCE first showed up in the kernel in 2.6.27 but it may have been
+ * backported. */
+#ifndef WARN_ONCE
+#define WARN_ONCE(condition, format...) WARN_ON_ONCE(condition)
+#endif
+
+#define	DAHDI_CTL	0
+#define	DAHDI_TRANSCODE	250
+#define	DAHDI_TIMER	253
+#define	DAHDI_CHANNEL	254
+#define	DAHDI_PSEUDO	255
+
 /* prink-wrapper macros */
+
+#define module_printk(level, fmt, args...) \
+		printk(level "%s: " fmt, THIS_MODULE->name, ## args)
+
 #define	DAHDI_PRINTK(level, category, fmt, ...)	\
 	printk(KERN_ ## level "%s%s-%s: " fmt, #level, category, \
 			THIS_MODULE->name, ## __VA_ARGS__)
@@ -1341,7 +1541,7 @@ wait_for_completion_timeout(struct completion *x, unsigned long timeout)
 	printk(KERN_ ## level "%s%s-%s: span-%d: " fmt, #level,	\
 		category, THIS_MODULE->name, (span)->spanno, ## __VA_ARGS__)
 #define	chan_printk(level, category, chan, fmt, ...)	\
-	printk(KERN_ ## level "%s%s-%s: %d: " fmt, #level,	\
+	printk(KERN_ ## level "%s%s-%s: chan-%d: " fmt, #level,	\
 		category, THIS_MODULE->name, (chan)->channo, ## __VA_ARGS__)
 #define	dahdi_err(fmt, ...)	DAHDI_PRINTK(ERR, "", fmt, ## __VA_ARGS__)
 #define	span_info(span, fmt, ...)	span_printk(INFO, "", span, fmt, \
@@ -1355,6 +1555,26 @@ wait_for_completion_timeout(struct completion *x, unsigned long timeout)
 #define	chan_err(chan, fmt, ...)	chan_printk(ERR, "", chan, fmt, \
 						## __VA_ARGS__)
 
+#ifndef pr_err
+#define pr_err(fmt, ...) \
+	printk(KERN_ERR pr_fmt(fmt), ##__VA_ARGS__)
+#endif
+#ifndef pr_warning
+#define pr_warning(fmt, ...) \
+	printk(KERN_WARNING pr_fmt(fmt), ##__VA_ARGS__)
+#endif
+#ifndef pr_warn
+#define pr_warn pr_warning
+#endif
+#ifndef pr_notice
+#define pr_notice(fmt, ...) \
+	printk(KERN_NOTICE pr_fmt(fmt), ##__VA_ARGS__)
+#endif
+#ifndef pr_info
+#define pr_info(fmt, ...) \
+	printk(KERN_INFO pr_fmt(fmt), ##__VA_ARGS__)
+#endif
+
 /* The dbg_* ones use a magical variable 'debug' and the user should be
  * aware of that.
 */
@@ -1366,6 +1586,7 @@ wait_for_completion_timeout(struct completion *x, unsigned long timeout)
  * be of the form DAHDI_DBG_*
  */
 #define	DAHDI_DBG_GENERAL	BIT(0)
+#define	DAHDI_DBG_ASSIGN	BIT(1)
 #define	DAHDI_DBG_DEVICES	BIT(7)	/* instantiation/destruction etc. */
 #define	dahdi_dbg(bits, fmt, ...)	\
 	((void)((debug & (DAHDI_DBG_ ## bits)) && DAHDI_PRINTK(DEBUG, \
@@ -1378,13 +1599,11 @@ wait_for_completion_timeout(struct completion *x, unsigned long timeout)
 			((void)((debug & (DAHDI_DBG_ ## bits)) && \
 				chan_printk(DEBUG, "-" #bits, chan, \
 					"%s: " fmt, __func__, ## __VA_ARGS__)))
+#define dahdi_dev_dbg(bits, dev, fmt, ...)         \
+			((void)((debug & (DAHDI_DBG_ ## bits)) && \
+			dev_printk(KERN_DEBUG, dev, \
+			"DBG-%s(%s): " fmt, #bits, __func__, ## __VA_ARGS__)))
 #endif /* DAHDI_PRINK_MACROS_USE_debug */
-
-void *dahdi_get_private_data(struct file *file);
-
-void dahdi_set_private_data(struct file *file, void *private_data);
-
-void dahdi_poll_wait(struct file *file, struct pollinfo *sel, struct poll_table_struct *wait_table);
 
 int dahdi_net_chan_init(struct dahdi_chan *chan, int numbufs);
 void dahdi_net_chan_destroy(struct dahdi_chan *chan);

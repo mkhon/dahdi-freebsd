@@ -97,6 +97,7 @@ struct tor2 {
 	unsigned long xilinx8_region;	/* 8 bit Region allocated to Xilinx */
 	unsigned long xilinx8_len;	/* Length of 8 bit Xilinx region */
 	__iomem volatile unsigned char *mem8;	/* Virtual representation of 8 bit Xilinx memory area */
+	struct dahdi_device *ddev;
 	struct tor2_span tspans[SPANS_PER_CARD];	/* Span data */
 	struct dahdi_chan **chans[SPANS_PER_CARD]; /* Pointers to card channels */
 	struct tor2_chan tchans[32 * SPANS_PER_CARD];	/* Channel user data */
@@ -177,7 +178,7 @@ static int highestorder;
 static int timingcable;
 
 static void set_clear(struct tor2 *tor);
-static int tor2_startup(struct dahdi_span *span);
+static int tor2_startup(struct file *file, struct dahdi_span *span);
 static int tor2_shutdown(struct dahdi_span *span);
 static int tor2_rbsbits(struct dahdi_chan *chan, int bits);
 static int tor2_maint(struct dahdi_span *span, int cmd);
@@ -193,7 +194,8 @@ static unsigned datxlt_e1[] = {
     1 ,2 ,3 ,4 ,5 ,6 ,7 ,8 ,9 ,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,
 	25,26,27,28,29,30,31 };
 
-static int tor2_spanconfig(struct dahdi_span *span, struct dahdi_lineconfig *lc)
+static int tor2_spanconfig(struct file *file, struct dahdi_span *span,
+			   struct dahdi_lineconfig *lc)
 {
 	int i;
 	struct tor2_span *p = container_of(span, struct tor2_span, dahdi_span);
@@ -223,12 +225,13 @@ static int tor2_spanconfig(struct dahdi_span *span, struct dahdi_lineconfig *lc)
 	}
 	/* If we're already running, then go ahead and apply the changes */
 	if (span->flags & DAHDI_FLAG_RUNNING)
-		return tor2_startup(span);
+		return tor2_startup(file, span);
 
 	return 0;
 }
 
-static int tor2_chanconfig(struct dahdi_chan *chan, int sigtype)
+static int tor2_chanconfig(struct file *file,
+			   struct dahdi_chan *chan, int sigtype)
 {
 	int alreadyrunning;
 	unsigned long flags;
@@ -283,10 +286,6 @@ static void init_spans(struct tor2 *tor)
 		snprintf(s->desc, sizeof(s->desc) - 1,
 			 "Tormenta 2 (PCI) Quad %s Card %d Span %d",
 			 (tor->cardtype == TYPE_T1)  ?  "T1"  :  "E1", tor->num, x + 1);
-		s->manufacturer = "Digium";
-		dahdi_copy_string(s->devicetype, tor->type, sizeof(s->devicetype));
-		snprintf(s->location, sizeof(s->location) - 1,
-			 "PCI Bus %02d Slot %02d", tor->pci->bus->number, PCI_SLOT(tor->pci->devfn) + 1);
 		if (tor->cardtype == TYPE_T1) {
 			s->channels = 24;
 			s->deflaw = DAHDI_LAW_MULAW;
@@ -304,7 +303,6 @@ static void init_spans(struct tor2 *tor)
 
 		tor->tspans[x].tor = tor;
 		tor->tspans[x].span = x;
-		init_waitqueue_head(&s->maintq);
 		for (y = 0; y < s->channels; y++) {
 			struct dahdi_chan *mychans = tor->chans[x][y];
 			sprintf(mychans->name, "Tor2/%d/%d/%d", tor->num, x + 1, y + 1);
@@ -321,19 +319,31 @@ static void init_spans(struct tor2 *tor)
 
 static int __devinit tor2_launch(struct tor2 *tor)
 {
+	int res;
 	struct dahdi_span *s;
 	int i;
 
 	if (test_bit(DAHDI_FLAGBIT_REGISTERED, &tor->tspans[0].dahdi_span.flags))
 		return 0;
 
+	tor->ddev = dahdi_create_device(tor->pci);
+	tor->ddev->location = kasprintf(GFP_KERNEL, "PCI Bus %02d Slot %02d",
+				       tor->pci->bus->number,
+				       PCI_SLOT(tor->pci->devfn) + 1);
+
+	if (!tor->ddev->location)
+		return -ENOMEM;
+
 	printk(KERN_INFO "Tor2: Launching card: %d\n", tor->order);
 	for (i = 0; i < SPANS_PER_CARD; ++i) {
 		s = &tor->tspans[i].dahdi_span;
-		if (dahdi_register(s, 0)) {
-			printk(KERN_ERR "Unable to register span %s\n", s->name);
-			goto error_exit;
-		}
+		list_add_tail(&s->device_node, &tor->ddev->spans);
+	}
+
+	res = dahdi_register_device(tor->ddev, &tor->pci->dev);
+	if (res) {
+		dev_err(&tor->pci->dev, "Unable to register with DAHDI.\n");
+		return res;
 	}
 	writew(PLX_INTENA, &tor->plx[INTCSR]); /* enable PLX interrupt */
 
@@ -341,14 +351,6 @@ static int __devinit tor2_launch(struct tor2 *tor)
 	tasklet_init(&tor->tor2_tlet, tor2_tasklet, (unsigned long)tor);
 #endif
 	return 0;
-
-error_exit:
-	for (i = 0; i < SPANS_PER_CARD; ++i) {
-		s = &tor->tspans[i].dahdi_span;
-		if (test_bit(DAHDI_FLAGBIT_REGISTERED, &s->flags))
-			dahdi_unregister(s);
-	}
-	return -1;
 }
 
 static void free_tor(struct tor2 *tor)
@@ -364,6 +366,8 @@ static void free_tor(struct tor2 *tor)
 		if (tor->chans[x])
 			kfree(tor->chans[x]);
 	}
+	kfree(tor->ddev->location);
+	dahdi_free_device(tor->ddev);
 	kfree(tor);
 }
 
@@ -622,7 +626,7 @@ err_out_free_tor:
 	if (tor) {
 		free_tor(tor);
 	}
-	return -ENODEV;
+	return ret;
 }
 
 static struct pci_driver tor2_driver;
@@ -630,7 +634,6 @@ static struct pci_driver tor2_driver;
 static void __devexit tor2_remove(struct pci_dev *pdev)
 {
 	struct tor2 *tor;
-	int i;
 
 	tor = pci_get_drvdata(pdev);
 	if (!tor)
@@ -640,11 +643,7 @@ static void __devexit tor2_remove(struct pci_dev *pdev)
 	writeb(0, &tor->mem8[LEDREG]);
 	writew(0, &tor->plx[INTCSR]);
 	free_irq(tor->irq, tor);
-	for (i = 0; i < SPANS_PER_CARD; ++i) {
-		struct dahdi_span *s = &tor->tspans[i].dahdi_span;
-		if (test_bit(DAHDI_FLAGBIT_REGISTERED, &s->flags))
-			dahdi_unregister(s);
-	}
+	dahdi_unregister_device(tor->ddev);
 	release_mem_region(tor->plx_region, tor->plx_len);
 	release_mem_region(tor->xilinx32_region, tor->xilinx32_len);
 	release_mem_region(tor->xilinx8_region, tor->xilinx8_len);
@@ -812,7 +811,7 @@ static int tor2_shutdown(struct dahdi_span *span)
 }
 
 
-static int tor2_startup(struct dahdi_span *span)
+static int tor2_startup(struct file *file, struct dahdi_span *span)
 {
 	unsigned long endjif;
 	int i;
@@ -1043,7 +1042,6 @@ static int tor2_maint(struct dahdi_span *span, int cmd)
 			break;
 		    case DAHDI_MAINT_LOOPUP:
 		    case DAHDI_MAINT_LOOPDOWN:
-		    case DAHDI_MAINT_LOOPSTOP:
 			return -ENOSYS;
 		    default:
 			printk(KERN_NOTICE "Tor2: Unknown maint command: %d\n", cmd);
@@ -1055,6 +1053,7 @@ static int tor2_maint(struct dahdi_span *span, int cmd)
     case DAHDI_MAINT_NONE:
 	t1out(p->tor,tspan,0x19,(japan ? 0x80 : 0x00)); /* no local loop */
 	t1out(p->tor,tspan,0x0a,0); /* no remote loop */
+	t1out(p->tor, tspan, 0x30, 0);	/* stop sending loopup code */
 	break;
     case DAHDI_MAINT_LOCALLOOP:
 	t1out(p->tor,tspan,0x19,0x40 | (japan ? 0x80 : 0x00)); /* local loop */
@@ -1073,9 +1072,6 @@ static int tor2_maint(struct dahdi_span *span, int cmd)
 	t1out(p->tor,tspan,0x30,2); /* send loopdown code */
 	t1out(p->tor,tspan,0x12,0x62); /* send loopdown code */
 	t1out(p->tor,tspan,0x13,0x90); /* send loopdown code */
-	break;
-    case DAHDI_MAINT_LOOPSTOP:
-	t1out(p->tor,tspan,0x30,0);	/* stop sending loopup code */
 	break;
     default:
 	printk(KERN_NOTICE "Tor2: Unknown maint command: %d\n", cmd);
@@ -1129,11 +1125,7 @@ static void tor2_tasklet(unsigned long data)
 static int syncsrc = 0;
 static int syncnum = 0 /* -1 */;
 static int syncspan = 0;
-#ifdef DEFINE_SPINLOCK
 static DEFINE_SPINLOCK(synclock);
-#else
-static spinlock_t synclock = SPIN_LOCK_UNLOCKED;
-#endif
 
 static int tor2_findsync(struct tor2 *tor)
 {
@@ -1401,7 +1393,7 @@ DAHDI_IRQ_HANDLER(tor2_intr)
 			/* go thru all chans, and count # open */
 			for (n = 0, k = 0; k < tor->tspans[i].dahdi_span.channels; k++) {
 				if (((tor->chans[i][k])->flags & DAHDI_FLAG_OPEN) ||
-				    ((tor->chans[i][k])->flags & DAHDI_FLAG_NETDEV))
+				    dahdi_have_netdev(tor->chans[i][k]))
 					n++;
 			}
 			/* if none open, set alarm condition */

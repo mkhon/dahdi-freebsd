@@ -1,7 +1,7 @@
 #
 # Makefile for DAHDI Linux kernel modules
 #
-# Copyright (C) 2001-2009 Digium, Inc.
+# Copyright (C) 2001-2010 Digium, Inc.
 #
 #
 
@@ -55,7 +55,7 @@ INST_HEADERS:=kernel.h user.h fasthdlc.h wctdm_user.h dahdi_config.h
 
 DAHDI_BUILD_ALL:=m
 
-KMAKE=$(MAKE) -C $(KSRC) SUBDIRS=$(PWD)/drivers/dahdi DAHDI_INCLUDE=$(PWD)/include DAHDI_MODULES_EXTRA="$(DAHDI_MODULES_EXTRA)" HOTPLUG_FIRMWARE=$(HOTPLUG_FIRMWARE)
+KMAKE=+$(MAKE) -C $(KSRC) SUBDIRS=$(PWD)/drivers/dahdi DAHDI_INCLUDE=$(PWD)/include DAHDI_MODULES_EXTRA="$(DAHDI_MODULES_EXTRA)" HOTPLUG_FIRMWARE=$(HOTPLUG_FIRMWARE)
 
 ROOT_PREFIX:=
 
@@ -69,6 +69,10 @@ ifneq ($(wildcard .version),)
 else
 ifneq ($(wildcard .svn),)
   DAHDIVERSION:=$(shell build_tools/make_version . dahdi/linux)
+else
+ifneq ($(wildcard .git),)
+  DAHDIVERSION:=$(shell build_tools/make_version . dahdi/linux)
+endif
 endif
 endif
 

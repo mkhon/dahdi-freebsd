@@ -74,8 +74,10 @@
 #define CMD_BYTE(slot, a, is_vpm) (slot*6)+(a*2)+is_vpm /* only even slots */
 //TODO: make a separate macro
 
-#define TYPE_T1	1
-#define TYPE_E1	2
+enum linemode {
+	T1 = 1,
+	E1,
+};
 
 struct command {
 	struct list_head node;
@@ -94,7 +96,6 @@ struct t1 {
 	unsigned char txident;
 	unsigned char rxident;
 	unsigned char statreg; /* bit 0 = vpmadt032 int */
-	int spantype;
 	struct {
 		unsigned int nmf:1;
 		unsigned int sendingyellow:1;
@@ -111,9 +112,12 @@ struct t1 {
 	int loopdowncnt;
 #define INITIALIZED 1
 #define SHUTDOWN    2
+#define READY	    3
 	unsigned long bit_flags;
 	unsigned long alarmtimer;
 	unsigned char ledstate;
+	unsigned char vpm_check_count;
+	struct dahdi_device *ddev;
 	struct dahdi_span span;						/* Span */
 	struct dahdi_chan *chans[32];					/* Channels */
 	struct dahdi_echocan_state *ec[32];				/* Echocan state for channels */
@@ -126,24 +130,25 @@ struct t1 {
 	unsigned long ctlreg;
 	struct voicebus vb;
 	atomic_t txints;
-	int vpm100;
 	struct vpmadt032 *vpmadt032;
+	struct vpmoct *vpmoct;
 	unsigned long vpm_check;
 	struct work_struct vpm_check_work;
-	unsigned long dtmfactive;
-	unsigned long dtmfmask;
-	unsigned long dtmfmutemask;
 
-	spinlock_t cmd_list_lock;
+	/* protected by t1.reglock */
 	struct list_head pending_cmds;
 	struct list_head active_cmds;
 	struct timer_list timer;
 	struct work_struct timer_work;
 	struct workqueue_struct *wq;
+	unsigned int not_ready;	/* 0 when entire card is ready to go */
 };
 
 #define t1_info(t1, format, arg...)         \
 	dev_info(&t1->vb.pdev->dev , format , ## arg)
+
+#define t1_notice(t1, format, arg...)         \
+	dev_notice(&t1->vb.pdev->dev , format , ## arg)
 
 /* Maintenance Mode Registers */
 #define LIM0		0x36

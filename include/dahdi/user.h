@@ -37,6 +37,7 @@
 
 #include <linux/types.h>
 #include <linux/ioctl.h>
+#include <dahdi/dahdi_config.h>
 
 #if !defined(__FreeBSD__) && !defined(ELAST)
 #define ELAST 500
@@ -333,7 +334,6 @@ enum {
 #define DAHDI_MAINT_NETWORKLINELOOP	2	/* Remote Loopback */
 #define DAHDI_MAINT_LOOPUP		3	/* send loopup code */
 #define DAHDI_MAINT_LOOPDOWN		4	/* send loopdown code */
-#define DAHDI_MAINT_LOOPSTOP		5	/* stop sending loop codes */
 #define DAHDI_MAINT_FAS_DEFECT		6	/* insert a FAS defect */
 #define DAHDI_MAINT_MULTI_DEFECT	7	/* insert a Multiframe defect */
 #define DAHDI_MAINT_CRC_DEFECT		8	/* insert a FAS defect */
@@ -446,6 +446,12 @@ enum {
 
 /* The echo canceler's NLP (only) was enabled */
 #define DAHDI_EVENT_EC_NLP_ENABLED	28
+
+/* The channel's read buffer encountered an overrun condition */
+#define DAHDI_EVENT_READ_OVERRUN	29
+
+/* The channel's write buffer encountered an underrun condition */
+#define DAHDI_EVENT_WRITE_UNDERRUN	30
 
 #define DAHDI_EVENT_PULSEDIGIT		(1 << 16)	/* This is OR'd with the digit received */
 #define DAHDI_EVENT_DTMFDOWN		(1 << 17)	/* Ditto for DTMF key down event */
@@ -629,11 +635,6 @@ struct dahdi_confinfo {
 
 #define DAHDI_SETCONF_V1		_IOW(DAHDI_CODE,  12, struct dahdi_confinfo)
 #define DAHDI_SETCONF			_IOWR(DAHDI_CODE, 13, struct dahdi_confinfo)
-
-/*
- * Setup or Remove Conference Link
- */
-#define DAHDI_CONFLINK			_IOW(DAHDI_CODE, 14, struct dahdi_confinfo)
 
 /*
  * Display Conference Diagnostic Information on Console
@@ -941,7 +942,7 @@ struct dahdi_sfconfig {
 #define DAHDI_ECHOTRAIN			_IOW(DAHDI_CODE, 50, int)
 
 /*
- * Set on hook transfer for n number of ms -- implemnted by low level driver
+ * Set on hook transfer for n number of ms -- implemented by low level driver
  */
 #define DAHDI_ONHOOKTRANSFER		_IOW(DAHDI_CODE, 51, int)
 
@@ -1088,6 +1089,21 @@ struct dahdi_vmwi_info {
 /* Put a channel's echo canceller into 'FAX mode' if possible */
 
 #define DAHDI_ECHOCANCEL_FAX_MODE	_IOW(DAHDI_CODE, 102, int)
+
+/*
+ * Defines which channel to receive mirrored traffic from
+ */
+#ifdef CONFIG_DAHDI_MIRROR
+#define DAHDI_RXMIRROR			_IOW(DAHDI_CODE, 103, int)
+#define DAHDI_TXMIRROR			_IOW(DAHDI_CODE, 104, int)
+#endif /* CONFIG_DAHDI_MIRROR */
+
+/*
+  Set the desired state for channel buffer event generation which is disabled
+  by default to allow for backwards compatibility for dumb users of channels
+  such as pattern utilities.
+ */
+#define DAHDI_BUFFER_EVENTS		_IOW(DAHDI_CODE, 105, int)
 
 /* Get current status IOCTL */
 /* Defines for Radio Status (dahdi_radio_stat.radstat) bits */

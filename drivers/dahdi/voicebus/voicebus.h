@@ -31,10 +31,6 @@
 
 #include <linux/interrupt.h>
 
-#ifdef VOICEBUS_NET_DEBUG
-#include <linux/netdevice.h>
-#include <linux/etherdevice.h>
-#endif
 
 #define VOICEBUS_DEFAULT_LATENCY	3U
 #define VOICEBUS_DEFAULT_MAXLATENCY	25U
@@ -61,6 +57,15 @@
  * (and not tasklet). */
 #define CONFIG_VOICEBUS_INTERRUPT
 
+/*
+ * Enable the following definition in order to disable Active-State Power
+ * Management on the PCIe bridge for PCIe cards. This has been known to work
+ * around issues where the BIOS enables it on the cards even though the
+ * platform does not support it.
+ *
+ */
+#undef CONFIG_VOICEBUS_DISABLE_ASPM
+
 /* Define this to use a FIFO for the software echocan reference.
  * (experimental) */
 #undef CONFIG_VOICEBUS_ECREFERENCE
@@ -75,16 +80,21 @@ struct dahdi_fifo *dahdi_fifo_alloc(size_t maxsize, gfp_t alloc_flags);
 
 #endif
 
+#ifdef VOICEBUS_NET_DEBUG
+#include <linux/skbuff.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+#endif
 
 struct voicebus;
 
 struct vbb {
 	u8 data[VOICEBUS_SFRAME_SIZE];
 	struct list_head entry;
-	__le32 paddr;
 #if defined(__FreeBSD__)
 	bus_dmamap_t dma_map;
 #endif
+	dma_addr_t dma_addr;
 };
 
 struct voicebus_operations {
@@ -106,7 +116,7 @@ struct voicebus_descriptor_list {
 	bus_dmamap_t	dma_map;
 #endif
 	dma_addr_t	desc_dma;
-	atomic_t 	count;
+	unsigned long	count;
 	unsigned int	padding;
 };
 
@@ -122,7 +132,7 @@ struct voicebus_descriptor_list {
  *
  * NORMAL:	For non-hx8 boards.  Uses idle_buffers.
  * BOOT:	For hx8 boards.  For sending single packets at a time.
- * RELAXED:	Normal operating mode for Hx8 Boards.  Does not use
+ * HX8:		Normal operating mode for Hx8 Boards.  Does not use
  *		idle_buffers.
  */
 enum voicebus_mode {
@@ -141,7 +151,6 @@ struct voicebus {
 	struct pci_dev		*pdev;
 #if defined(__FreeBSD__)
 	struct pci_dev		_dev;
-	void *			ctx;
 
 	struct resource *	irq_res;	/* resource for irq */
 	int			irq_rid;
@@ -182,6 +191,7 @@ struct voicebus {
 	unsigned int		max_latency;
 	struct list_head	tx_complete;
 	struct list_head	free_rx;
+	struct dma_pool		*pool;
 
 #ifdef VOICEBUS_NET_DEBUG
 	struct sk_buff_head captured_packets;
@@ -195,14 +205,6 @@ struct voicebus {
 #endif
 };
 
-#if !defined(__FreeBSD__)
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
-extern kmem_cache_t *voicebus_vbb_cache;
-#else
-extern struct kmem_cache *voicebus_vbb_cache;
-#endif
-#endif /* !__FreeBSD__ */
-
 int __voicebus_init(struct voicebus *vb, const char *board_name,
 		    enum voicebus_mode mode);
 void voicebus_release(struct voicebus *vb);
@@ -210,6 +212,7 @@ int voicebus_start(struct voicebus *vb);
 void voicebus_stop(struct voicebus *vb);
 struct vbb *voicebus_alloc(struct voicebus *vb, int malloc_flags);
 void voicebus_free(struct voicebus *vb, struct vbb *vbb);
+void voicebus_quiesce(struct voicebus *vb);
 int voicebus_transmit(struct voicebus *vb, struct vbb *vbb);
 int voicebus_set_minlatency(struct voicebus *vb, unsigned int milliseconds);
 int voicebus_current_latency(struct voicebus *vb);

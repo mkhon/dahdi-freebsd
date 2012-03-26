@@ -14,13 +14,27 @@ struct work_struct {
 	struct taskqueue *tq;
 };
 
-#define INIT_WORK(ws, wf)					\
-	do {							\
-		TASK_INIT(&(ws)->task, 0, _work_run, (ws));	\
-		(ws)->func = (wf);				\
-		(ws)->tq = taskqueue_fast;			\
+struct _linux_work_init_args {
+	struct work_struct *work;
+	work_func_t func;
+};
+
+void _linux_work_init(struct _linux_work_init_args *a);
+
+#define DECLARE_WORK(name, wf)						\
+	struct work_struct name;					\
+	static struct _linux_work_init_args name##_work_init_args =	\
+	    { &name, wf };						\
+	SYSINIT(name##_work_sysinit, SI_SUB_LOCK, SI_ORDER_MIDDLE,	\
+	    _linux_work_init, &name##_work_init_args)
+
+#define INIT_WORK(work, wf)						\
+	do {								\
+		struct _linux_work_init_args name##_work_init_args =	\
+		    { work, wf };					\
+		_linux_work_init(&name##_work_init_args);		\
 	} while (0)
-void _work_run(void *context, int pending);
+
 void schedule_work(struct work_struct *work);
 void cancel_work_sync(struct work_struct *work);
 void flush_work(struct work_struct *work);

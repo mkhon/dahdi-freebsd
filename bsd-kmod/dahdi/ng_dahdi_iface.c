@@ -343,7 +343,6 @@ dahdi_iface_destroy(struct dahdi_chan *chan)
 
 	dahdi_net_chan_destroy(chan);
 	chan->iface = NULL;
-	chan->flags &= ~DAHDI_FLAG_NETDEV;
 }
 
 /**

@@ -140,11 +140,7 @@ typedef	unsigned int *	PUINT;
 
 typedef	PSZ *	PPSZ;
 
-#if defined(__FreeBSD__)
-#include <sys/stddef.h>
-#else
 #include <linux/stddef.h>
-#endif
 
 #endif
 

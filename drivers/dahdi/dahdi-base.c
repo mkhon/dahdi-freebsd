@@ -15,7 +15,7 @@
  * from Cisco 3620 to IBM x305 here in F1 Group
  *
  * Copyright (C) 2001 Jim Dixon / Zapata Telephony.
- * Copyright (C) 2001 - 2010 Digium, Inc.
+ * Copyright (C) 2001 - 2012 Digium, Inc.
  *
  * All rights reserved.
  *
@@ -34,14 +34,15 @@
  * this program for more details.
  */
 
+
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
 #if defined(__FreeBSD__)
 #include <linux/slab.h>	/* linux/proc_fs.h */
-#include <sys/filio.h>
 #else
 #include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #endif
 #include <linux/pci.h>
 #include <linux/init.h>
@@ -51,8 +52,10 @@
 #include <linux/moduleparam.h>
 #include <linux/sched.h>
 #include <linux/list.h>
+#include <linux/delay.h>
+#include <linux/mutex.h>
 
-#ifdef HAVE_UNLOCKED_IOCTL
+#if defined(HAVE_UNLOCKED_IOCTL) && defined(CONFIG_BKL)
 #include <linux/smp_lock.h>
 #endif
 
@@ -60,20 +63,13 @@
 
 #include <asm/atomic.h>
 
-#include <dahdi/version.h>
-
-#define module_printk(level, fmt, args...) printk(level "%s: " fmt, THIS_MODULE->name, ## args)
-
-/* #define BUF_MUNGE */
+#define DAHDI_PRINK_MACROS_USE_debug
 
 /* Grab fasthdlc with tables */
 #define FAST_HDLC_NEED_TABLES
 #include <dahdi/kernel.h>
 #include "ecdis.h"
-
-#ifndef CONFIG_OLD_HDLC_API
-#define NEW_HDLC_INTERFACE
-#endif
+#include "dahdi.h"
 
 #ifdef CONFIG_DAHDI_PPP
 #include <linux/netdevice.h>
@@ -93,29 +89,26 @@
 #error "You cannot define both EMPULSE and EMFLASH"
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 37)
+#ifndef CONFIG_BKL
+#warning "No CONFIG_BKL is an experimental configuration."
+#endif
+#endif
+
 /* Get helper arithmetic */
 #include "arith.h"
 #if defined(CONFIG_DAHDI_MMX) || defined(ECHO_CAN_FP)
 #include <asm/i387.h>
 #endif
 
-#define hdlc_to_ztchan(h) (((struct dahdi_hdlc *)(h))->chan)
-#define dev_to_ztchan(h) (((struct dahdi_hdlc *)(dev_to_hdlc(h)->priv))->chan)
-#define ztchan_to_dev(h) ((h)->hdlcnetdev->netdev)
-
-/* names of tx level settings */
-static char *dahdi_txlevelnames[] = {
-"0 db (CSU)/0-133 feet (DSX-1)",
-"133-266 feet (DSX-1)",
-"266-399 feet (DSX-1)",
-"399-533 feet (DSX-1)",
-"533-655 feet (DSX-1)",
-"-7.5db (CSU)",
-"-15db (CSU)",
-"-22.5db (CSU)"
-} ;
+#define hdlc_to_chan(h) (((struct dahdi_hdlc *)(h))->chan)
+#define netdev_to_chan(h) (((struct dahdi_hdlc *)(dev_to_hdlc(h)->priv))->chan)
+#define chan_to_netdev(h) ((h)->hdlcnetdev->netdev)
 
 #if defined(__FreeBSD__)
+#include <sys/filio.h>
+#include <sys/proc.h>
+
 #include "ng_dahdi_iface.h"
 
 /*
@@ -126,6 +119,10 @@ static char *dahdi_txlevelnames[] = {
 #define __copy_from_user(to, from, n)	(bcopy((from), (to), (n)), 0)
 #define __copy_to_user(to, from, n)	(bcopy((from), (to), (n)), 0)
 
+#define signal_pending(current)	(0)
+
+#define POLLRDHUP 0
+
 #define MODULE_PARAM_PREFIX "dahdi"
 #define MODULE_PARAM_PARENT _dahdi
 
@@ -134,122 +131,6 @@ static struct cdev *dev_ctl = NULL;
 static struct cdevsw dahdi_devsw;
 
 #define UNIT(file)	dev2unit(file->dev)
-
-struct dahdi_fp {
-	int fflags;		/**< file flags */
-	void *private_data;	/**< private data */
-};
-
-static void
-dahdi_fp_free(void *fp)
-{
-	free(fp, M_DAHDI);
-}
-
-static int
-dahdi_get_fp(struct cdev *dev, struct dahdi_fp **pfp)
-{
-	int error = devfs_get_cdevpriv((void **) pfp);
-	if (error == ENOENT) {
-		*pfp = malloc(sizeof(struct dahdi_fp), M_DAHDI, M_NOWAIT | M_ZERO);
-		if (*pfp == NULL)
-			return -ENOMEM;
-
-		error = devfs_set_cdevpriv(*pfp, dahdi_fp_free);
-		if (error) {
-			dahdi_fp_free(*pfp);
-			return -ENXIO;
-		}
-	} else if (error) {
-		return (error);
-	}
-
-	return 0;
-}
-
-void *
-dahdi_get_private_data(struct file *file)
-{
-	int error;
-	struct dahdi_fp *fp;
-
-	error = devfs_get_cdevpriv((void **) &fp);
-	if (error || fp == NULL)
-		return NULL;
-
-	return fp->private_data;
-}
-
-void
-dahdi_set_private_data(struct file *file, void *private_data)
-{
-	int error;
-	struct dahdi_fp *fp;
-
-	error = dahdi_get_fp(file->dev, &fp);
-	if (error)
-		return;
-
-	fp->private_data = private_data;
-}
-
-static int
-dahdi_chan_is_nonblocking(struct dahdi_chan *chan)
-{
-	return chan->file && (chan->file_flags & O_NONBLOCK);
-}
-
-static void
-handle_selwakeup(void *context, int pending)
-{
-	struct selinfo *selinfo = context;
-	selwakeup(selinfo);
-}
-
-static void
-dahdi_poll_init(struct pollinfo *sel)
-{
-	TASK_INIT(&sel->task, 0, handle_selwakeup, &sel->selinfo);
-}
-
-void
-dahdi_poll_wait(struct file *file, struct pollinfo *sel, struct poll_table_struct *wait_table)
-{
-	wait_table->selinfo = &sel->selinfo;
-}
-
-static void
-dahdi_poll_wakeup(struct pollinfo *sel)
-{
-	taskqueue_enqueue_fast(taskqueue_fast, &sel->task);
-}
-
-static void
-dahdi_poll_drain(struct pollinfo *sel)
-{
-	taskqueue_drain(taskqueue_fast, &sel->task);
-}
-
-/* sleep in user space until woken up. Equivilant of tsleep() in BSD */
-int
-dahdi_schluffen(wait_queue_head_t *q)
-{
-	int rc = tsleep(q, PZERO | PCATCH, "schluffen", 10);
-	switch (rc) {
-	case EINTR:
-	case ERESTART:
-		return -rc;
-	}
-	return 0;
-}
-
-#ifdef CONFIG_DAHDI_CORE_TIMER
-static inline void
-dahdi_get_current_time(struct timespec *ts)
-{
-	getnanotime(ts);
-}
-#endif
 
 static int
 dahdi_fop_read(FOP_READ_ARGS_DECL, int off, void *buf, int iocount)
@@ -269,9 +150,11 @@ dahdi_copy_from_user(void *to, const void *from, int n)
 	return -copyin(from, to, n);
 }
 
+struct pseudo_chan;
+
 struct pseudo_free {
 	LIST_ENTRY(pseudo_free) pf_link;
-	struct dahdi_chan *pf_pseudo;
+	struct pseudo_chan *pf_pseudo;
 	struct thread *pf_thread;
 };
 
@@ -281,7 +164,7 @@ static LIST_HEAD(, pseudo_free) pseudo_free_list =
 	LIST_HEAD_INITIALIZER(pseudo_free_list);
 
 static void
-free_pseudo(struct dahdi_chan *pseudo)
+free_pseudo(struct pseudo_chan *pseudo)
 {
 	unsigned long flags;
 	struct pseudo_free *pf;
@@ -314,6 +197,9 @@ thread_dtor_free_pseudo(void *arg, struct thread *td)
 	}
 	spin_unlock_irqrestore(&pseudo_free_list_lock, flags);
 }
+
+static int dahdi_span_register_chardev(struct dahdi_span *span);
+static void dahdi_span_unregister_chardev(struct dahdi_span *span);
 #else /* !__FreeBSD__ */
 #define FOP_READ_ARGS_DECL	struct file *file, char __user *usrbuf, size_t count, loff_t *ppos
 #define FOP_READ_ARGS		file, usrbuf, count, ppos
@@ -322,73 +208,6 @@ thread_dtor_free_pseudo(void *arg, struct thread *td)
 
 /* macro-oni for determining a unit (channel) number */
 #define	UNIT(file) MINOR(file->f_dentry->d_inode->i_rdev)
-
-void *
-dahdi_get_private_data(struct file *file)
-{
-	return file->private_data;
-}
-
-void
-dahdi_set_private_data(struct file *file, void *private_data)
-{
-	file->private_data = private_data;
-}
-
-static int
-dahdi_chan_is_nonblocking(struct dahdi_chan *chan)
-{
-	return chan->file && (chan->file->f_flags & O_NONBLOCK);
-}
-
-static void
-dahdi_poll_init(struct pollinfo *sel)
-{
-	init_wait_queue_head(&sel->wait_queue);
-}
-
-void
-dahdi_poll_wait(struct file *file, struct pollinfo *sel, struct poll_table_struct *wait_table)
-{
-	poll_wait(file, &sel->wait_queue, wait_table);
-}
-
-static void
-dahdi_poll_wakeup(struct pollinfo *sel)
-{
-	wake_up_interruptible(&sel->wait_queue);
-}
-
-#define dahdi_poll_drain(sel)
-
-/* sleep in user space until woken up. Equivilant of tsleep() in BSD */
-static int
-dahdi_schluffen(wait_queue_head_t *q)
-{
-	DECLARE_WAITQUEUE(wait, current);
-
-	add_wait_queue(q, &wait);
-	current->state = TASK_INTERRUPTIBLE;
-
-	if (!signal_pending(current))
-		schedule();
-
-	current->state = TASK_RUNNING;
-	remove_wait_queue(q, &wait);
-
-	if (signal_pending(current))
-		return -ERESTARTSYS;
-
-	return 0;
-}
-
-#ifdef CONFIG_DAHDI_CORE_TIMER
-static inline void
-dahdi_get_current_time(struct timespec *ts)
-{
-	*ts = kernel_current_time();
-}
-#endif
 
 static int
 dahdi_fop_read(FOP_READ_ARGS_DECL, int off, void *buf, int iocount)
@@ -408,36 +227,9 @@ dahdi_copy_from_user(void *to, const void __user *from, int n)
 	return copy_from_user(to, from, n);
 }
 
-int
-dahdi_register_chardev(struct dahdi_chardev *dev)
-{
-	static const char *DAHDI_STRING = "dahdi!";
-	char *udevname;
-
-	udevname = kzalloc(strlen(dev->name) + sizeof(DAHDI_STRING) + 1,
-			   GFP_KERNEL);
-	if (!udevname)
-		return -ENOMEM;
-
-	strcpy(udevname, DAHDI_STRING);
-	strcat(udevname, dev->name);
-	CLASS_DEV_CREATE(dahdi_class, MKDEV(DAHDI_MAJOR, dev->minor), NULL, udevname);
-	kfree(udevname);
-	return 0;
-}
-
-int
-dahdi_unregister_chardev(struct dahdi_chardev *dev)
-{
-	CLASS_DEV_DESTROY(dahdi_class, MKDEV(DAHDI_MAJOR, dev->minor));
-	return 0;
-}
-
 EXPORT_SYMBOL(dahdi_transcode_fops);
 EXPORT_SYMBOL(dahdi_init_tone_state);
 EXPORT_SYMBOL(dahdi_mf_tone);
-EXPORT_SYMBOL(dahdi_register);
-EXPORT_SYMBOL(dahdi_unregister);
 EXPORT_SYMBOL(__dahdi_mulaw);
 EXPORT_SYMBOL(__dahdi_alaw);
 #ifdef CONFIG_CALC_XLAW
@@ -447,24 +239,17 @@ EXPORT_SYMBOL(__dahdi_lineartoalaw);
 EXPORT_SYMBOL(__dahdi_lin2mu);
 EXPORT_SYMBOL(__dahdi_lin2a);
 #endif
-EXPORT_SYMBOL(dahdi_lboname);
-EXPORT_SYMBOL(dahdi_transmit);
-EXPORT_SYMBOL(dahdi_receive);
 EXPORT_SYMBOL(dahdi_rbsbits);
 EXPORT_SYMBOL(dahdi_qevent_nolock);
 EXPORT_SYMBOL(dahdi_qevent_lock);
 EXPORT_SYMBOL(dahdi_hooksig);
 EXPORT_SYMBOL(dahdi_alarm_notify);
 EXPORT_SYMBOL(dahdi_set_dynamic_ioctl);
-EXPORT_SYMBOL(dahdi_ec_chunk);
-EXPORT_SYMBOL(dahdi_ec_span);
 EXPORT_SYMBOL(dahdi_hdlc_abort);
 EXPORT_SYMBOL(dahdi_hdlc_finish);
 EXPORT_SYMBOL(dahdi_hdlc_getbuf);
 EXPORT_SYMBOL(dahdi_hdlc_putbuf);
 EXPORT_SYMBOL(dahdi_alarm_channel);
-EXPORT_SYMBOL(dahdi_register_chardev);
-EXPORT_SYMBOL(dahdi_unregister_chardev);
 
 EXPORT_SYMBOL(dahdi_register_echocan_factory);
 EXPORT_SYMBOL(dahdi_unregister_echocan_factory);
@@ -472,54 +257,17 @@ EXPORT_SYMBOL(dahdi_unregister_echocan_factory);
 EXPORT_SYMBOL(dahdi_set_hpec_ioctl);
 
 #ifdef CONFIG_PROC_FS
-static struct proc_dir_entry *proc_entries[DAHDI_MAX_SPANS];
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-#define CLASS_DEV_CREATE(class, devt, device, name) \
-	device_create(class, device, devt, NULL, "%s", name)
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,26)
-#define CLASS_DEV_CREATE(class, devt, device, name) \
-	device_create(class, device, devt, name)
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,15)
-#define CLASS_DEV_CREATE(class, devt, device, name) \
-        class_device_create(class, NULL, devt, device, name)
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,13)
-#define CLASS_DEV_CREATE(class, devt, device, name) \
-        class_device_create(class, devt, device, name)
-#else
-#define CLASS_DEV_CREATE(class, devt, device, name) \
-        class_simple_device_add(class, devt, device, name)
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,26)
-#define CLASS_DEV_DESTROY(class, devt) \
-	device_destroy(class, devt)
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,13)
-#define CLASS_DEV_DESTROY(class, devt) \
-	class_device_destroy(class, devt)
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,9)
-#define CLASS_DEV_DESTROY(class, devt) \
-	class_simple_device_remove(devt)
-#else
-#define CLASS_DEV_DESTROY(class, devt) \
-	class_simple_device_remove(class, devt)
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,13)
-static struct class *dahdi_class = NULL;
-#else
-static struct class_simple *dahdi_class = NULL;
-#define class_create class_simple_create
-#define class_destroy class_simple_destroy
+static struct proc_dir_entry *root_proc_entry;
 #endif
 #endif /* !__FreeBSD__ */
 
-struct file_operations *dahdi_transcode_fops = NULL;
-
 static int deftaps = 64;
 
-static int debug;
+int debug;
+#define DEBUG_MAIN	(1 << 0)
+#define DEBUG_RBS	(1 << 5)
+
+static int hwec_overrides_swec = 1;
 
 /*!
  * \brief states for transmit signalling
@@ -557,17 +305,15 @@ static sumtype *conf_sums;
 static sumtype *conf_sums_prev;
 
 static struct dahdi_span *master;
-
-static struct {
-	int	src;	/* source conf number */
-	int	dst;	/* dst conf number */
-} conf_links[DAHDI_MAX_CONF + 1];
+struct file_operations *dahdi_transcode_fops = NULL;
 
 #ifdef CONFIG_DAHDI_CORE_TIMER
 
 static struct core_timer {
 	struct timer_list timer;
 	struct timespec start_interval;
+	unsigned long interval;
+	int dahdi_receive_used;
 	atomic_t count;
 	atomic_t shutdown;
 	atomic_t last_count;
@@ -575,45 +321,6 @@ static struct core_timer {
 
 #endif /* CONFIG_DAHDI_CORE_TIMER */
 
-
-
-/* There are three sets of conference sum accumulators. One for the current
-sample chunk (conf_sums), one for the next sample chunk (conf_sums_next), and
-one for the previous sample chunk (conf_sums_prev). The following routine
-(rotate_sums) "rotates" the pointers to these accululator arrays as part
-of the events of sample chink processing as follows:
-
-The following sequence is designed to be looked at from the reference point
-of the receive routine of the master span.
-
-1. All (real span) receive chunks are processed (with putbuf). The last one
-to be processed is the master span. The data received is loaded into the
-accumulators for the next chunk (conf_sums_next), to be in alignment with
-current data after rotate_sums() is called (which immediately follows).
-Keep in mind that putbuf is *also* a transmit routine for the pseudo parts
-of channels that are in the REALANDPSEUDO conference mode. These channels
-are processed from data in the current sample chunk (conf_sums), being
-that this is a "transmit" function (for the pseudo part).
-
-2. rotate_sums() is called.
-
-3. All pseudo channel receive chunks are processed. This data is loaded into
-the current sample chunk accumulators (conf_sums).
-
-4. All conference links are processed (being that all receive data for this
-chunk has already been processed by now).
-
-5. All pseudo channel transmit chunks are processed. This data is loaded from
-the current sample chunk accumulators (conf_sums).
-
-6. All (real span) transmit chunks are processed (with getbuf).  This data is
-loaded from the current sample chunk accumulators (conf_sums). Keep in mind
-that getbuf is *also* a receive routine for the pseudo part of channels that
-are in the REALANDPSEUDO conference mode. These samples are loaded into
-the next sample chunk accumulators (conf_sums_next) to be processed as part
-of the next sample chunk's data (next time around the world).
-
-*/
 
 enum dahdi_digit_mode {
 	DIGIT_MODE_DTMF,
@@ -623,15 +330,35 @@ enum dahdi_digit_mode {
 	DIGIT_MODE_MFR2_REV,
 };
 
-#include "digits.h"
-
-static struct dahdi_dialparams global_dialparams = {
-	.dtmf_tonelen = DEFAULT_DTMF_LENGTH,
-	.mfv1_tonelen = DEFAULT_MFR1_LENGTH,
-	.mfr2_tonelen = DEFAULT_MFR2_LENGTH,
+/* At the end of silence, the tone stops */
+static struct dahdi_tone dtmf_silence = {
+	.tonesamples = DAHDI_MS_TO_SAMPLES(DAHDI_CONFIG_DEFAULT_DTMF_LENGTH),
 };
 
-static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long data, int unit);
+/* At the end of silence, the tone stops */
+static struct dahdi_tone mfr1_silence = {
+	.tonesamples = DAHDI_MS_TO_SAMPLES(DAHDI_CONFIG_DEFAULT_MFR1_LENGTH),
+};
+
+/* At the end of silence, the tone stops */
+static struct dahdi_tone mfr2_silence = {
+	.tonesamples = DAHDI_MS_TO_SAMPLES(DAHDI_CONFIG_DEFAULT_MFR2_LENGTH),
+};
+
+/* A pause in the dialing */
+static struct dahdi_tone tone_pause = {
+	.tonesamples = DAHDI_MS_TO_SAMPLES(DAHDI_CONFIG_PAUSE_LENGTH),
+};
+
+static struct dahdi_dialparams global_dialparams = {
+	.dtmf_tonelen = DAHDI_MS_TO_SAMPLES(DAHDI_CONFIG_DEFAULT_DTMF_LENGTH),
+	.mfv1_tonelen = DAHDI_MS_TO_SAMPLES(DAHDI_CONFIG_DEFAULT_MFR1_LENGTH),
+	.mfr2_tonelen = DAHDI_MS_TO_SAMPLES(DAHDI_CONFIG_DEFAULT_MFR2_LENGTH),
+};
+
+static DEFINE_MUTEX(global_dialparamslock);
+
+static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long data);
 
 #if defined(CONFIG_DAHDI_MMX) || defined(ECHO_CAN_FP)
 #if (defined(CONFIG_X86) && !defined(CONFIG_X86_64)) || defined(CONFIG_I386)
@@ -692,22 +419,19 @@ struct dahdi_timer {
 	int ping;		/* Whether we've been ping'd */
 	int tripped;	/* Whether we're tripped */
 	struct list_head list;
-	struct pollinfo sel;
+	wait_queue_head_t sel;
+#if defined(__FreeBSD__)
+	struct selinfo selinfo;
+#endif
 };
 
-static _LIST_HEAD(zaptimers);
+static _LIST_HEAD(dahdi_timers);
 
-#ifdef DEFINE_SPINLOCK
-static DEFINE_SPINLOCK(zaptimerlock);
-static DEFINE_SPINLOCK(bigzaplock);
-#else
-static spinlock_t zaptimerlock = SPIN_LOCK_UNLOCKED;
-static spinlock_t bigzaplock = SPIN_LOCK_UNLOCKED;
-#endif
+static DEFINE_SPINLOCK(dahdi_timer_lock);
+
+#define DEFAULT_TONE_ZONE (-1)
 
 struct dahdi_zone {
-	atomic_t refcount;
-	char name[40];	/* Informational, only */
 	int ringcadence[DAHDI_MAX_CADENCE];
 	struct dahdi_tone *tones[DAHDI_TONE_MAX];
 	/* Each of these is a circular list
@@ -721,17 +445,229 @@ struct dahdi_zone {
 	struct dahdi_tone mfr2_rev[15];		/* MFR2 REV tones for this zone, with desired length */
 	struct dahdi_tone mfr2_fwd_continuous[16];	/* MFR2 FWD tones for this zone, continuous play */
 	struct dahdi_tone mfr2_rev_continuous[16];	/* MFR2 REV tones for this zone, continuous play */
+	struct list_head node;
+	struct kref refcount;
+	const char *name;	/* Informational, only */
+	u8 num;
 };
 
-static struct dahdi_span *spans[DAHDI_MAX_SPANS];
-static struct dahdi_chan *chans[DAHDI_MAX_CHANNELS];
+static void tone_zone_release(struct kref *kref)
+{
+	struct dahdi_zone *z = container_of(kref, struct dahdi_zone, refcount);
+	kfree(z->name);
+	kfree(z);
+}
 
-static int maxspans = 0;
-static int maxchans = 0;
-static int maxconfs = 0;
-static int maxlinks = 0;
+/**
+ * tone_zone_put()  - Release the reference on the tone_zone.
+ *
+ * On old kernels, since kref_put does not have a return value, we'll just
+ * always report that we released the memory.
+ *
+ */
+static inline int tone_zone_put(struct dahdi_zone *z)
+{
+	return kref_put(&z->refcount, tone_zone_release);
+}
 
-static int default_zone = -1;
+static inline void tone_zone_get(struct dahdi_zone *z)
+{
+	kref_get(&z->refcount);
+}
+
+static DEFINE_SPINLOCK(zone_lock);
+
+/* The first zone on the list is the default zone. */
+static _LIST_HEAD(tone_zones);
+
+static inline struct device *span_device(struct dahdi_span *span)
+{
+	return &span->parent->dev;
+}
+
+/* Protects the span_list and pseudo_chans lists from concurrent access in
+ * process context.  The spin_lock is needed to synchronize with the interrupt
+ * handler. */
+static DEFINE_SPINLOCK(chan_lock);
+
+struct pseudo_chan {
+	struct dahdi_chan chan;
+	struct list_head node;
+};
+
+static inline struct pseudo_chan *chan_to_pseudo(struct dahdi_chan *chan)
+{
+	return container_of(chan, struct pseudo_chan, chan);
+}
+
+enum { FIRST_PSEUDO_CHANNEL = 0x8000, };
+/* This list is protected by the chan_lock. */
+static _LIST_HEAD(pseudo_chans);
+
+/**
+ * is_pseudo_chan() - By definition pseudo channels are not on a span.
+ */
+static inline bool is_pseudo_chan(const struct dahdi_chan *chan)
+{
+	return (NULL == chan->span);
+}
+
+static DEFINE_MUTEX(registration_mutex);
+static _LIST_HEAD(span_list);
+
+static unsigned long
+__for_each_channel(unsigned long (*func)(struct dahdi_chan *chan,
+					 unsigned long data),
+		   unsigned long data)
+{
+	int res;
+	struct dahdi_span *s;
+	struct pseudo_chan *pseudo;
+
+	list_for_each_entry(s, &span_list, spans_node) {
+		unsigned long x;
+		for (x = 0; x < s->channels; x++) {
+			struct dahdi_chan *const chan = s->chans[x];
+			res = func(chan, data);
+			if (res)
+				return res;
+		}
+	}
+
+	list_for_each_entry(pseudo, &pseudo_chans, node) {
+		res = func(&pseudo->chan, data);
+		if (res)
+			return res;
+	}
+	return 0;
+}
+
+/**
+ * _chan_from_num - Lookup a channel
+ *
+ * Must be called with the registration_mutex held.
+ *
+ */
+static struct dahdi_chan *_chan_from_num(unsigned int channo)
+{
+	struct dahdi_span *s;
+	struct pseudo_chan *pseudo;
+
+	if (channo >= FIRST_PSEUDO_CHANNEL) {
+		list_for_each_entry(pseudo, &pseudo_chans, node) {
+			if (pseudo->chan.channo == channo)
+				return &pseudo->chan;
+		}
+		return NULL;
+	}
+
+	/* When searching for the channel amongst the spans, we can use the
+	 * fact that channels on a span must be numbered consecutively to skip
+	 * checking each individual channel. */
+	list_for_each_entry(s, &span_list, spans_node) {
+		unsigned int basechan;
+		struct dahdi_chan *chan;
+
+		if (unlikely(!s->channels))
+			continue;
+
+		basechan = s->chans[0]->channo;
+		if (channo >= (basechan + s->channels))
+			continue;
+
+		/* Since all the spans should be on the list in sorted order,
+		 * if channo is less than base chan, the caller must be
+		 * looking for a channel that has already been removed. */
+		if (unlikely(channo < basechan))
+			return NULL;
+
+		chan = s->chans[channo - basechan];
+		WARN_ON(chan->channo != channo);
+		return chan;
+	}
+
+	return NULL;
+}
+
+static struct dahdi_chan *chan_from_num(unsigned int channo)
+{
+	struct dahdi_chan *chan;
+	mutex_lock(&registration_mutex);
+	chan = _chan_from_num(channo);
+	mutex_unlock(&registration_mutex);
+	return chan;
+}
+
+static inline struct dahdi_chan *chan_from_file(struct file *file)
+{
+	return (file->private_data) ?
+			file->private_data : chan_from_num(UNIT(file));
+}
+
+static void
+dahdi_wake_up_chan(struct dahdi_chan *chan)
+{
+	wake_up_interruptible(&chan->waitq);
+#if defined(__FreeBSD__)
+	if (chan->file)
+		selwakeup(&chan->file->selinfo);
+#endif
+}
+
+/**
+ * _find_span() - Find a span by span number.
+ *
+ * Must be called with registration_mutex held.
+ *
+ */
+static struct dahdi_span *_find_span(int spanno)
+{
+	struct dahdi_span *s;
+	list_for_each_entry(s, &span_list, spans_node) {
+		if (s->spanno == spanno) {
+			return s;
+		}
+	}
+	return NULL;
+}
+/**
+ * span_find_and_get() - Search for the span by number, and if found take out
+ * a reference on it.
+ *
+ * When you are no longer using the returned pointer, you must release it with
+ * a put_span call.
+ *
+ */
+static struct dahdi_span *span_find_and_get(int spanno)
+{
+	struct dahdi_span *found;
+
+	mutex_lock(&registration_mutex);
+	found = _find_span(spanno);
+	if (found && !get_span(found))
+		found = NULL;
+	mutex_unlock(&registration_mutex);
+	return found;
+}
+
+static unsigned int span_count(void)
+{
+	unsigned int count = 0;
+	struct dahdi_span *s;
+	unsigned long flags;
+	spin_lock_irqsave(&chan_lock, flags);
+	list_for_each_entry(s, &span_list, spans_node)
+		++count;
+	spin_unlock_irqrestore(&chan_lock, flags);
+	return count;
+}
+
+static inline bool can_provide_timing(const struct dahdi_span *const s)
+{
+	return !s->cannot_provide_timing;
+}
+
+static int maxconfs;
 
 short __dahdi_mulaw[256];
 short __dahdi_alaw[256];
@@ -744,27 +680,9 @@ u_char __dahdi_lin2a[16384];
 
 static u_char defgain[256];
 
-#ifdef DEFINE_RWLOCK
-static DEFINE_RWLOCK(zone_lock);
-static DEFINE_RWLOCK(chan_lock);
-#else
-static rwlock_t zone_lock = RW_LOCK_UNLOCKED;
-static rwlock_t chan_lock = RW_LOCK_UNLOCKED;
-#endif
-
-static struct dahdi_zone *tone_zones[DAHDI_TONE_ZONE_MAX];
-
 #define NUM_SIGS	10
 
-#ifdef DEFINE_RWLOCK
-static DEFINE_RWLOCK(ecfactory_list_lock);
-#else
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 10)
-#define __RW_LOCK_UNLOCKED() RW_LOCK_UNLOCKED
-#endif
-
-static rwlock_t ecfactory_list_lock = __RW_LOCK_UNLOCKED();
-#endif
+static DEFINE_SPINLOCK(ecfactory_list_lock);
 
 static _LIST_HEAD(ecfactory_list);
 
@@ -776,30 +694,31 @@ struct ecfactory {
 int dahdi_register_echocan_factory(const struct dahdi_echocan_factory *ec)
 {
 	struct ecfactory *cur;
+	struct ecfactory *new;
 
 	WARN_ON(!ec->owner);
 
-	write_lock(&ecfactory_list_lock);
+	new = kzalloc(sizeof(*new), GFP_KERNEL);
+	if (!new)
+		return -ENOMEM;
+
+	INIT_LIST_HEAD(&new->list);
+
+	spin_lock(&ecfactory_list_lock);
 
 	/* make sure it isn't already registered */
 	list_for_each_entry(cur, &ecfactory_list, list) {
 		if (cur->ec == ec) {
-			write_unlock(&ecfactory_list_lock);
+			spin_unlock(&ecfactory_list_lock);
+			kfree(new);
 			return -EPERM;
 		}
 	}
 
-	if (!(cur = kzalloc(sizeof(*cur), GFP_KERNEL))) {
-		write_unlock(&ecfactory_list_lock);
-		return -ENOMEM;
-	}
+	new->ec = ec;
+	list_add_tail(&new->list, &ecfactory_list);
 
-	cur->ec = ec;
-	INIT_LIST_HEAD(&cur->list);
-
-	list_add_tail(&cur->list, &ecfactory_list);
-
-	write_unlock(&ecfactory_list_lock);
+	spin_unlock(&ecfactory_list_lock);
 
 	return 0;
 }
@@ -808,16 +727,23 @@ void dahdi_unregister_echocan_factory(const struct dahdi_echocan_factory *ec)
 {
 	struct ecfactory *cur, *next;
 
-	write_lock(&ecfactory_list_lock);
+	spin_lock(&ecfactory_list_lock);
 
 	list_for_each_entry_safe(cur, next, &ecfactory_list, list) {
 		if (cur->ec == ec) {
 			list_del(&cur->list);
+			kfree(cur);
 			break;
 		}
 	}
 
-	write_unlock(&ecfactory_list_lock);
+	spin_unlock(&ecfactory_list_lock);
+}
+
+/* Is this span our syncronization master? */
+int dahdi_is_sync_master(const struct dahdi_span *span)
+{
+	return span == master;
 }
 
 static inline void rotate_sums(void)
@@ -831,6 +757,14 @@ static inline void rotate_sums(void)
 	memset(conf_sums_next, 0, maxconfs * sizeof(sumtype));
 }
 
+/**
+ * is_chan_dacsed() - True if chan is sourcing it's data from another channel.
+ *
+ */
+static inline bool is_chan_dacsed(const struct dahdi_chan *const chan)
+{
+	return (NULL != chan->dacs_chan);
+}
 
 /**
  * can_dacs_chans() - Returns true if it may be possible to dacs two channels.
@@ -870,17 +804,6 @@ static int dahdi_chan_dacs(struct dahdi_chan *dst, struct dahdi_chan *src)
 static void dahdi_disable_dacs(struct dahdi_chan *chan)
 {
 	dahdi_chan_dacs(chan, NULL);
-}
-
-static int dahdi_chan_echocan_create(struct dahdi_chan *chan,
-				     struct dahdi_echocanparams *ecp,
-				     struct dahdi_echocanparam *p,
-				     struct dahdi_echocan_state **ec)
-{
-	if (chan->span && chan->span->ops->echocan_create)
-		return chan->span->ops->echocan_create(chan, ecp, p, ec);
-	else
-		return -ENODEV;
 }
 
 /*!
@@ -984,163 +907,138 @@ static int fill_alarm_string(char *buf, int count, int alarms)
 			(alarms & DAHDI_ALARM_RECOVER) ? "RECOVERING " : "",
 			(alarms & DAHDI_ALARM_NOTOPEN) ? "NOTOPEN " : "");
 
-	if (len > 0)
-		buf[--len] = '\0';	/* strip last space */
-
 	return len;
 }
 
-static int dahdi_proc_read(char *page, char **start, off_t off, int count, int *eof, void *data)
+/*
+ * Sequential proc interface
+ */
+
+static void seq_fill_alarm_string(struct seq_file *sfile, int alarms)
 {
-	int x, len = 0, real_count;
-	long span;
+	char tmp[70];
 
-	/* In Linux 2.6, page is always PROC_BLOCK_SIZE=(PAGE_SIZE-1024) bytes.
-	 * 0<count<=PROC_BLOCK_SIZE . count=1 will produce an error in
-	 * vsnprintf ('head -c 1 /proc/dahdi/1', 'dd bs=1').
-	 * An ugly hack. Good way: seq_printf (seq_file.c). */
-        real_count = count;
-	count = PAGE_SIZE-1024;
-	span = (long)data;
-	if (!span)
-		return 0;
+	if (fill_alarm_string(tmp, sizeof(tmp), alarms))
+		seq_printf(sfile, "%s", tmp);
+}
 
-	if (spans[span]->name)
-		len += snprintf(page + len, count - len, "Span %ld: %s ",
-				span, spans[span]->name);
-	if (spans[span]->desc)
-		len += snprintf(page + len, count - len, "\"%s\"",
-				spans[span]->desc);
+static int dahdi_seq_show(struct seq_file *sfile, void *v)
+{
+	long spanno = (long)sfile->private;
+	int x;
+	struct dahdi_span *s;
+
+	s = span_find_and_get(spanno);
+	if (!s)
+		return -ENODEV;
+
+	if (s->name)
+		seq_printf(sfile, "Span %d: %s ", s->spanno, s->name);
+	if (s->desc)
+		seq_printf(sfile, "\"%s\"", s->desc);
 	else
-		len += snprintf(page + len, count - len, "\"\"");
+		seq_printf(sfile, "\"\"");
 
-	if (spans[span] == master)
-		len += snprintf(page + len, count - len, " (MASTER)");
+	if (dahdi_is_sync_master(s))
+		seq_printf(sfile, " (MASTER)");
 
-	if (spans[span]->lineconfig) {
+	if (s->lineconfig) {
 		/* framing first */
-		if (spans[span]->lineconfig & DAHDI_CONFIG_B8ZS)
-			len += snprintf(page + len, count - len, " B8ZS/");
-		else if (spans[span]->lineconfig & DAHDI_CONFIG_AMI)
-			len += snprintf(page + len, count - len, " AMI/");
-		else if (spans[span]->lineconfig & DAHDI_CONFIG_HDB3)
-			len += snprintf(page + len, count - len, " HDB3/");
+		if (s->lineconfig & DAHDI_CONFIG_B8ZS)
+			seq_printf(sfile, " B8ZS/");
+		else if (s->lineconfig & DAHDI_CONFIG_AMI)
+			seq_printf(sfile, " AMI/");
+		else if (s->lineconfig & DAHDI_CONFIG_HDB3)
+			seq_printf(sfile, " HDB3/");
 		/* then coding */
-		if (spans[span]->lineconfig & DAHDI_CONFIG_ESF)
-			len += snprintf(page + len, count - len, "ESF");
-		else if (spans[span]->lineconfig & DAHDI_CONFIG_D4)
-			len += snprintf(page + len, count - len, "D4");
-		else if (spans[span]->lineconfig & DAHDI_CONFIG_CCS)
-			len += snprintf(page + len, count - len, "CCS");
+		if (s->lineconfig & DAHDI_CONFIG_ESF)
+			seq_printf(sfile, "ESF");
+		else if (s->lineconfig & DAHDI_CONFIG_D4)
+			seq_printf(sfile, "D4");
+		else if (s->lineconfig & DAHDI_CONFIG_CCS)
+			seq_printf(sfile, "CCS");
 		/* E1's can enable CRC checking */
-		if (spans[span]->lineconfig & DAHDI_CONFIG_CRC4)
-			len += snprintf(page + len, count - len, "/CRC4");
+		if (s->lineconfig & DAHDI_CONFIG_CRC4)
+			seq_printf(sfile, "/CRC4");
 	}
 
-	len += snprintf(page + len, count - len, " ");
+	seq_printf(sfile, " ");
 
 	/* list alarms */
-	len += fill_alarm_string(page + len, count - len, spans[span]->alarms);
-	if (spans[span]->syncsrc &&
-		(spans[span]->syncsrc == spans[span]->spanno))
-		len += snprintf(page + len, count - len, "ClockSource ");
-	len += snprintf(page + len, count - len, "\n");
-	if (spans[span]->count.bpv)
-		len += snprintf(page + len, count - len, "\tBPV count: %d\n",
-				spans[span]->count.bpv);
-	if (spans[span]->count.crc4)
-		len += snprintf(page + len, count - len,
-				"\tCRC4 error count: %d\n",
-				spans[span]->count.crc4);
-	if (spans[span]->count.ebit)
-		len += snprintf(page + len, count - len,
-				"\tE-bit error count: %d\n",
-				spans[span]->count.ebit);
-	if (spans[span]->count.fas)
-		len += snprintf(page + len, count - len,
-				"\tFAS error count: %d\n",
-				spans[span]->count.fas);
-	if (spans[span]->irqmisses)
-		len += snprintf(page + len, count - len,
-				"\tIRQ misses: %d\n",
-				spans[span]->irqmisses);
-	if (spans[span]->timingslips)
-		len += snprintf(page + len, count - len,
-				"\tTiming slips: %d\n",
-				spans[span]->timingslips);
-	len += snprintf(page + len, count - len, "\n");
+	seq_fill_alarm_string(sfile, s->alarms);
+	if (s->syncsrc &&
+		(s->syncsrc == s->spanno))
+		seq_printf(sfile, "ClockSource ");
+	seq_printf(sfile, "\n");
+	if (s->count.bpv)
+		seq_printf(sfile, "\tBPV count: %d\n", s->count.bpv);
+	if (s->count.crc4)
+		seq_printf(sfile, "\tCRC4 error count: %d\n", s->count.crc4);
+	if (s->count.ebit)
+		seq_printf(sfile, "\tE-bit error count: %d\n", s->count.ebit);
+	if (s->count.fas)
+		seq_printf(sfile, "\tFAS error count: %d\n", s->count.fas);
+	if (s->parent->irqmisses)
+		seq_printf(sfile, "\tIRQ misses: %d\n", s->parent->irqmisses);
+	if (s->timingslips)
+		seq_printf(sfile, "\tTiming slips: %d\n", s->timingslips);
+	seq_printf(sfile, "\n");
 
-	for (x = 0; x < spans[span]->channels; x++) {
-		struct dahdi_chan *chan = spans[span]->chans[x];
+	for (x = 0; x < s->channels; x++) {
+		struct dahdi_chan *chan = s->chans[x];
 
 		if (chan->name)
-			len += snprintf(page + len, count - len,
-					"\t%4d %s ", chan->channo, chan->name);
+			seq_printf(sfile, "\t%4d %s ", chan->channo,
+					chan->name);
 
 		if (chan->sig) {
 			if (chan->sig == DAHDI_SIG_SLAVE)
-				len += snprintf(page+len, count-len, "%s ",
+				seq_printf(sfile, "%s ",
 						sigstr(chan->master->sig));
 			else {
-				len += snprintf(page+len, count-len, "%s ",
-						sigstr(chan->sig));
+				seq_printf(sfile, "%s ", sigstr(chan->sig));
 				if (chan->nextslave &&
 					(chan->master->channo == chan->channo))
-					len += snprintf(page+len, count-len,
-							"Master ");
+					seq_printf(sfile, "Master ");
 			}
 		} else if (!chan->sigcap) {
-			len += snprintf(page+len, count-len, "Reserved ");
+			seq_printf(sfile, "Reserved ");
 		}
 
 		if (test_bit(DAHDI_FLAGBIT_OPEN, &chan->flags))
-			len += snprintf(page + len, count - len, "(In use) ");
+			seq_printf(sfile, "(In use) ");
 
 #ifdef	OPTIMIZE_CHANMUTE
 		if (chan->chanmute)
-			len += snprintf(page+len, count-len, "(no pcm) ");
+			seq_printf(sfile, "(no pcm) ");
 #endif
 
-		len += fill_alarm_string(page+len, count-len,
-				chan->chan_alarms);
+		seq_fill_alarm_string(sfile, chan->chan_alarms);
 
 		if (chan->ec_factory)
-			len += snprintf(page+len, count-len, "(SWEC: %s) ",
-					chan->ec_factory->name);
+			seq_printf(sfile, "(EC: %s - %s) ",
+					chan->ec_factory->get_name(chan),
+					chan->ec_state ? "ACTIVE" : "INACTIVE");
 
-		if (chan->ec_state)
-			len += snprintf(page+len, count-len, "(EC: %s) ",
-					chan->ec_state->ops->name);
-
-		len += snprintf(page+len, count-len, "\n");
-
-		/* If everything printed so far is before beginning 
-		 * of request */
-		if (len <= off) {
-			off -= len;
-			len = 0;
-		}
-
-		/* stop if we've already generated enough */
-		if (len > off + count)
-			break;
-		/* stop if we're NEAR danger limit. let it be -128 bytes. */
-		if (len > count-128)
-			break;
+		seq_printf(sfile, "\n");
 	}
-	count = real_count;
-	/* If everything printed so far is before beginning of request */
-	if (len <= off) {
-		off = 0;
-		len = 0;
-	}
-	*start = page + off;
-	len -= off;		/* un-count any remaining offset */
-	*eof = 1;
-	if (len > count)
-		len = count;	/* don't return bytes not asked for */
-	return len;
+	put_span(s);
+	return 0;
 }
+
+static int dahdi_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, dahdi_seq_show, PDE(inode)->data);
+}
+
+static const struct file_operations dahdi_proc_ops = {
+	.owner		= THIS_MODULE,
+	.open		= dahdi_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
 #endif
 
 static int dahdi_first_empty_alias(void)
@@ -1166,20 +1064,6 @@ static void recalc_maxconfs(void)
 	}
 
 	maxconfs = 0;
-}
-
-static void recalc_maxlinks(void)
-{
-	int x;
-
-	for (x = DAHDI_MAX_CONF - 1; x > 0; x--) {
-		if (conf_links[x].src || conf_links[x].dst) {
-			maxlinks = x + 1;
-			return;
-		}
-	}
-
-	maxlinks = 0;
 }
 
 static int dahdi_first_empty_conference(void)
@@ -1213,9 +1097,21 @@ static int dahdi_get_conf_alias(int x)
 	return a;
 }
 
+static unsigned long _chan_in_conf(struct dahdi_chan *chan, unsigned long x)
+{
+	const int confmode = chan->confmode & DAHDI_CONF_MODE_MASK;
+	return (chan && (chan->confna == x) &&
+	    (confmode == DAHDI_CONF_CONF ||
+	     confmode == DAHDI_CONF_CONFANN ||
+	     confmode == DAHDI_CONF_CONFMON ||
+	     confmode == DAHDI_CONF_CONFANNMON ||
+	     confmode == DAHDI_CONF_REALANDPSEUDO)) ? 1 : 0;
+}
+
 static void dahdi_check_conf(int x)
 {
-	int y;
+	unsigned long res;
+	unsigned long flags;
 
 	/* return if no valid conf number */
 	if (x <= 0)
@@ -1225,16 +1121,11 @@ static void dahdi_check_conf(int x)
 	if (!confalias[x])
 		return;
 
-	for (y = 0; y < maxchans; y++) {
-		if (chans[y] && (chans[y]->confna == x) &&
-				((chans[y]->confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_CONF ||
-				(chans[y]->confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_CONFANN ||
-				(chans[y]->confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_CONFMON ||
-				(chans[y]->confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_CONFANNMON ||
-				(chans[y]->confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_REALANDPSEUDO)) {
-			return;
-		}
-	}
+	spin_lock_irqsave(&chan_lock, flags);
+	res = __for_each_channel(_chan_in_conf, x);
+	spin_unlock_irqrestore(&chan_lock, flags);
+	if (res)
+		return;
 
 	/* If we get here, nobody is in the conference anymore.  Clear it out
 	   both forward and reverse */
@@ -1264,12 +1155,7 @@ static void __qevent(struct dahdi_chan *chan, int event)
 		chan->eventinidx = 0;
 
 	/* wake em all up */
-	if (chan->iomask & DAHDI_IOMUX_SIGEVENT)
-		wake_up_interruptible(&chan->eventbufq);
-
-	wake_up_interruptible(&chan->readbufq);
-	wake_up_interruptible(&chan->writebufq);
-	dahdi_poll_wakeup(&chan->sel);
+	dahdi_wake_up_chan(chan);
 
 	return;
 }
@@ -1404,7 +1290,7 @@ static void dahdi_set_law(struct dahdi_chan *chan, int law);
 /* Pull a DAHDI_CHUNKSIZE piece off the queue.  Returns
    0 on success or -1 on failure.  If failed, provides
    silence */
-static int __buf_pull(struct confq *q, u_char *data, struct dahdi_chan *c, char *label)
+static int __buf_pull(struct confq *q, u_char *data, struct dahdi_chan *c)
 {
 	int oldoutbuf = q->outbuf;
 	/* Ain't nuffin to read */
@@ -1446,36 +1332,9 @@ static u_char *__buf_peek(struct confq *q)
 	return q->buf[q->outbuf];
 }
 
-#ifdef BUF_MUNGE
-static u_char *__buf_cpush(struct confq *q)
-{
-	int pos;
-	/* If we have no space, return where the
-	   last space that we *did* have was */
-	if (q->inbuf > -1)
-		return NULL;
-	pos = q->outbuf - 1;
-	if (pos < 0)
-		pos += DAHDI_CB_SIZE;
-	return q->buf[pos];
-}
-
-static void __buf_munge(struct dahdi_chan *chan, u_char *old, u_char *new)
-{
-	/* Run a weighted average of the old and new, in order to
-	   mask a missing sample */
-	int x;
-	int val;
-	for (x=0;x<DAHDI_CHUNKSIZE;x++) {
-		val = x * DAHDI_XLAW(new[x], chan) + (DAHDI_CHUNKSIZE - x - 1) * DAHDI_XLAW(old[x], chan);
-		val = val / (DAHDI_CHUNKSIZE - 1);
-		old[x] = DAHDI_LIN2X(val, chan);
-	}
-}
-#endif
 /* Push something onto the queue, or assume what
    is there is valid if data is NULL */
-static int __buf_push(struct confq *q, u_char *data, char *label)
+static int __buf_push(struct confq *q, const u_char *data)
 {
 	int oldinbuf = q->inbuf;
 	if (q->inbuf < 0) {
@@ -1540,23 +1399,23 @@ static const struct dahdi_echocan_factory *find_echocan(const char *name)
 	*c = '\0';
 
 retry:
-	read_lock(&ecfactory_list_lock);
+	spin_lock(&ecfactory_list_lock);
 
 	list_for_each_entry(cur, &ecfactory_list, list) {
-		if (!strcmp(name_upper, cur->ec->name)) {
+		if (!strcmp(name_upper, cur->ec->get_name(NULL))) {
 			if (try_module_get(cur->ec->owner)) {
-				read_unlock(&ecfactory_list_lock);
+				spin_unlock(&ecfactory_list_lock);
 				kfree(name_upper);
 				return cur->ec;
 			} else {
-				read_unlock(&ecfactory_list_lock);
+				spin_unlock(&ecfactory_list_lock);
 				kfree(name_upper);
 				return NULL;
 			}
 		}
 	}
 
-	read_unlock(&ecfactory_list_lock);
+	spin_unlock(&ecfactory_list_lock);
 
 	if (tried_once) {
 		kfree(name_upper);
@@ -1583,18 +1442,97 @@ static void release_echocan(const struct dahdi_echocan_factory *ec)
 		module_put(ec->owner);
 }
 
+/**
+ * is_gain_allocated() - True if gain tables were dynamically allocated.
+ * @chan:  The channel to check.
+ */
+static inline bool is_gain_allocated(const struct dahdi_chan *chan)
+{
+	return (chan->rxgain && (chan->rxgain != defgain));
+}
+
+static const char *hwec_def_name = "HWEC";
+static const char *hwec_get_name(const struct dahdi_chan *chan)
+{
+	if (chan && chan->span && chan->span->ops->echocan_name)
+		return chan->span->ops->echocan_name(chan);
+	else
+		return hwec_def_name;
+}
+
+static int hwec_echocan_create(struct dahdi_chan *chan,
+	struct dahdi_echocanparams *ecp, struct dahdi_echocanparam *p,
+	struct dahdi_echocan_state **ec)
+{
+	if (chan->span && chan->span->ops->echocan_create)
+		return chan->span->ops->echocan_create(chan, ecp, p, ec);
+	else
+		return -ENODEV;
+}
+
+static const struct dahdi_echocan_factory hwec_factory = {
+	.get_name = hwec_get_name,
+	.owner = THIS_MODULE,
+	.echocan_create = hwec_echocan_create,
+};
+
+/**
+ * dahdi_enable_hw_preechocan - Let the board driver enable hwpreec if possible.
+ * @chan:	The channel to monitor.
+ *
+ * Returns 0 on success, if there is a software echocanceler attached on
+ * the channel, or the span does not have an enable_hw_preechocan callback.
+ * Otherwise an error code.
+ *
+ */
+static int dahdi_enable_hw_preechocan(struct dahdi_chan *chan)
+{
+	int res;
+	unsigned long flags;
+
+	spin_lock_irqsave(&chan->lock, flags);
+	if (chan->ec_factory != &hwec_factory)
+		res = -ENODEV;
+	else
+		res = 0;
+	spin_unlock_irqrestore(&chan->lock, flags);
+
+	if (-ENODEV == res)
+		return 0;
+
+	if (chan->span->ops->enable_hw_preechocan)
+		return chan->span->ops->enable_hw_preechocan(chan);
+	else
+		return 0;
+}
+
+/**
+ * dahdi_disable_hw_preechocan - Disable any hardware pre echocan monitoring.
+ * @chan:	The channel to stop monitoring.
+ *
+ * Give the board driver the option to free any resources needed to monitor
+ * the preechocan stream.
+ *
+ */
+static void dahdi_disable_hw_preechocan(struct dahdi_chan *chan)
+{
+	if (chan->span->ops->disable_hw_preechocan)
+		chan->span->ops->disable_hw_preechocan(chan);
+}
+
 /* 
  * close_channel - close the channel, resetting any channel variables
  * @chan: the dahdi_chan to close
  *
- * This function might be called before the channel is placed on the global
- * array of channels, (chans), and therefore, neither this function nor it's
- * children should depend on the dahdi_chan.channo member which is not set yet.
+ * This function is called before either the parent span is linked into the
+ * span list, or for pseudos, place on the psuedo_list.  Therefore, this
+ * function nor it's callers should depend on the channel being findable
+ * via those methods.
  */
 static void close_channel(struct dahdi_chan *chan)
 {
 	unsigned long flags;
-	void *rxgain = NULL;
+	const void *rxgain = NULL;
 	struct dahdi_echocan_state *ec_state;
 	const struct dahdi_echocan_factory *ec_current;
 	int oldconf;
@@ -1604,6 +1542,23 @@ static void close_channel(struct dahdi_chan *chan)
 #endif
 
 	might_sleep();
+
+	if (chan->conf_chan &&
+	    ((DAHDI_CONF_MONITOR_RX_PREECHO == chan->confmode) ||
+	     (DAHDI_CONF_MONITOR_TX_PREECHO == chan->confmode) ||
+	     (DAHDI_CONF_MONITORBOTH_PREECHO == chan->confmode))) {
+		void *readchunkpreec;
+
+		spin_lock_irqsave(&chan->conf_chan->lock, flags);
+		readchunkpreec = chan->conf_chan->readchunkpreec;
+		chan->conf_chan->readchunkpreec = NULL;
+		spin_unlock_irqrestore(&chan->conf_chan->lock, flags);
+
+		if (readchunkpreec) {
+			dahdi_disable_hw_preechocan(chan->conf_chan);
+			kfree(readchunkpreec);
+		}
+	}
 
 	/* XXX Buffers should be send out before reallocation!!! XXX */
 	if (!(chan->flags & DAHDI_FLAG_NOSTDTXRX))
@@ -1620,9 +1575,11 @@ static void close_channel(struct dahdi_chan *chan)
 	readchunkpreec = chan->readchunkpreec;
 	chan->readchunkpreec = NULL;
 	chan->curtone = NULL;
-	if (chan->curzone)
-		atomic_dec(&chan->curzone->refcount);
-	chan->curzone = NULL;
+	if (chan->curzone) {
+		struct dahdi_zone *zone = chan->curzone;
+		chan->curzone = NULL;
+		tone_zone_put(zone);
+	}
 	chan->cadencepos = 0;
 	chan->pdialcount = 0;
 	dahdi_hangup(chan);
@@ -1630,11 +1587,6 @@ static void close_channel(struct dahdi_chan *chan)
 	chan->pulsecount = 0;
 	chan->pulsetimer = 0;
 	chan->ringdebtimer = 0;
-	dahdi_poll_init(&chan->sel);
-	init_waitqueue_head(&chan->readbufq);
-	init_waitqueue_head(&chan->writebufq);
-	init_waitqueue_head(&chan->eventbufq);
-	init_waitqueue_head(&chan->txstateq);
 	chan->txdialbuf[0] = '\0';
 	chan->digitmode = DIGIT_MODE_DTMF;
 	chan->dialing = 0;
@@ -1645,26 +1597,25 @@ static void close_channel(struct dahdi_chan *chan)
 	oldconf = chan->confna;
 	  /* initialize conference variables */
 	chan->_confn = 0;
-	if ((chan->sig & __DAHDI_SIG_DACS) != __DAHDI_SIG_DACS) {
-		chan->confna = 0;
-		chan->confmode = 0;
-	}
+	chan->confna = 0;
+	chan->confmode = 0;
+	if ((chan->sig & __DAHDI_SIG_DACS) != __DAHDI_SIG_DACS)
+		chan->dacs_chan = NULL;
+
 	chan->confmute = 0;
-	/* release conference resource, if any to release */
-	if (oldconf) dahdi_check_conf(oldconf);
 	chan->gotgs = 0;
 	reset_conf(chan);
+	chan->dacs_chan = NULL;
 
-	if (chan->gainalloc && chan->rxgain)
+	if (is_gain_allocated(chan))
 		rxgain = chan->rxgain;
 
 	chan->rxgain = defgain;
 	chan->txgain = defgain;
-	chan->gainalloc = 0;
 	chan->eventinidx = chan->eventoutidx = 0;
 	chan->flags &= ~(DAHDI_FLAG_LOOPED | DAHDI_FLAG_LINEAR | DAHDI_FLAG_PPP | DAHDI_FLAG_SIGFREEZE);
 
-	dahdi_set_law(chan,0);
+	dahdi_set_law(chan, DAHDI_LAW_DEFAULT);
 
 	memset(chan->conflast, 0, sizeof(chan->conflast));
 	memset(chan->conflast1, 0, sizeof(chan->conflast1));
@@ -1673,17 +1624,24 @@ static void close_channel(struct dahdi_chan *chan)
 	if (chan->span && oldconf)
 		dahdi_disable_dacs(chan);
 
+	spin_unlock_irqrestore(&chan->lock, flags);
+
 	if (ec_state) {
 		ec_state->ops->echocan_free(chan, ec_state);
 		release_echocan(ec_current);
 	}
 
-	spin_unlock_irqrestore(&chan->lock, flags);
+	/* release conference resource, if any to release */
+	if (oldconf)
+		dahdi_check_conf(oldconf);
 
 	if (rxgain)
 		kfree(rxgain);
-	if (readchunkpreec)
+
+	if (readchunkpreec) {
+		dahdi_disable_hw_preechocan(chan);
 		kfree(readchunkpreec);
+	}
 
 #ifdef CONFIG_DAHDI_PPP
 	if (ppp) {
@@ -1696,49 +1654,60 @@ static void close_channel(struct dahdi_chan *chan)
 
 }
 
-static int free_tone_zone(int num)
+static int dahdi_ioctl_freezone(unsigned long data)
 {
-	struct dahdi_zone *z = NULL;
-	int res = 0;
+	struct dahdi_zone *z;
+	struct dahdi_zone *found = NULL;
+	int num;
 
-	if ((num >= DAHDI_TONE_ZONE_MAX) || (num < 0))
-		return -EINVAL;
+	if (get_user(num, (int __user *) data))
+		return -EFAULT;
 
-	write_lock(&zone_lock);
-	if (tone_zones[num]) {
-		if (!atomic_read(&tone_zones[num]->refcount)) {
-			z = tone_zones[num];
-			tone_zones[num] = NULL;
-		} else {
-			res = -EBUSY;
+	spin_lock(&zone_lock);
+	list_for_each_entry(z, &tone_zones, node) {
+		if (z->num == num) {
+			found = z;
+			break;
 		}
 	}
-	write_unlock(&zone_lock);
+	if (found) {
+		list_del(&found->node);
+	}
+	spin_unlock(&zone_lock);
 
-	if (z)
-		kfree(z);
-
-	return res;
+	if (found) {
+		if (debug) {
+			module_printk(KERN_INFO,
+				      "Unregistering tone zone %d (%s)\n",
+				      found->num, found->name);
+		}
+		tone_zone_put(found);
+	}
+	return 0;
 }
 
-static int dahdi_register_tone_zone(int num, struct dahdi_zone *zone)
+static int dahdi_register_tone_zone(struct dahdi_zone *zone)
 {
+	struct dahdi_zone *cur;
 	int res = 0;
 
-	if ((num >= DAHDI_TONE_ZONE_MAX) || (num < 0))
-		return -EINVAL;
-
-	write_lock(&zone_lock);
-	if (tone_zones[num]) {
-		res = -EINVAL;
-	} else {
-		res = 0;
-		tone_zones[num] = zone;
+	kref_init(&zone->refcount);
+	spin_lock(&zone_lock);
+	list_for_each_entry(cur, &tone_zones, node) {
+		if (cur->num == zone->num) {
+			res = -EINVAL;
+			break;
+		}
 	}
-	write_unlock(&zone_lock);
-
-	if (!res)
-		module_printk(KERN_INFO, "Registered tone zone %d (%s)\n", num, zone->name);
+	if (!res) {
+		list_add_tail(&zone->node, &tone_zones);
+		if (debug) {
+			module_printk(KERN_INFO,
+				      "Registered tone zone %d (%s)\n",
+				      zone->num, zone->name);
+		}
+	}
+	spin_unlock(&zone_lock);
 
 	return res;
 }
@@ -1842,44 +1811,45 @@ static int start_tone(struct dahdi_chan *chan, int tone)
 static int set_tone_zone(struct dahdi_chan *chan, int zone)
 {
 	int res = 0;
+	struct dahdi_zone *cur;
 	struct dahdi_zone *z;
+	unsigned long flags;
 
-	/* Do not call with the channel locked. */
-
-	if (zone == -1)
-		zone = default_zone;
-
-	if ((zone >= DAHDI_TONE_ZONE_MAX) || (zone < 0))
-		return -EINVAL;
-
-	read_lock(&zone_lock);
-
-	if ((z = tone_zones[zone])) {
-		unsigned long flags;
-
-		spin_lock_irqsave(&chan->lock, flags);
-
-		if (chan->curzone)
-			atomic_dec(&chan->curzone->refcount);
-
-		atomic_inc(&z->refcount);
-		chan->curzone = z;
-		chan->tonezone = zone;
-		memcpy(chan->ringcadence, z->ringcadence, sizeof(chan->ringcadence));
-
-		spin_unlock_irqrestore(&chan->lock, flags);
+	z = NULL;
+	spin_lock(&zone_lock);
+	if ((DEFAULT_TONE_ZONE == zone) && !list_empty(&tone_zones)) {
+		z = list_entry(tone_zones.next, struct dahdi_zone, node);
+		tone_zone_get(z);
 	} else {
-		res = -ENODATA;
+		list_for_each_entry(cur, &tone_zones, node) {
+			if (cur->num != (u8)zone)
+				continue;
+			z = cur;
+			tone_zone_get(z);
+			break;
+		}
 	}
+	spin_unlock(&zone_lock);
 
-	read_unlock(&zone_lock);
+	if (unlikely(!z))
+		return -ENODATA;
+
+	spin_lock_irqsave(&chan->lock, flags);
+	if (chan->curzone) {
+		struct dahdi_zone *zone = chan->curzone;
+		chan->curzone = NULL;
+		tone_zone_put(zone);
+	}
+	chan->curzone = z;
+	memcpy(chan->ringcadence, z->ringcadence, sizeof(chan->ringcadence));
+	spin_unlock_irqrestore(&chan->lock, flags);
 
 	return res;
 }
 
 static void dahdi_set_law(struct dahdi_chan *chan, int law)
 {
-	if (!law) {
+	if (DAHDI_LAW_DEFAULT == law) {
 		if (chan->deflaw)
 			law = chan->deflaw;
 		else
@@ -1903,52 +1873,62 @@ static void dahdi_set_law(struct dahdi_chan *chan, int law)
 	}
 }
 
-static int dahdi_chan_reg(struct dahdi_chan *chan)
+/**
+ * __dahdi_init_chan - Initialize the channel data structures.
+ * @chan:	The channel to initialize
+ *
+ */
+static void __dahdi_init_chan(struct dahdi_chan *chan)
 {
-	int x;
-	unsigned long flags;
-
 	might_sleep();
 
 	spin_lock_init(&chan->lock);
+	init_waitqueue_head(&chan->waitq);
 	if (!chan->master)
 		chan->master = chan;
 	if (!chan->readchunk)
 		chan->readchunk = chan->sreadchunk;
 	if (!chan->writechunk)
 		chan->writechunk = chan->swritechunk;
-	dahdi_set_law(chan, 0);
+	chan->rxgain = NULL;
+	chan->txgain = NULL;
 	close_channel(chan);
-
-	write_lock_irqsave(&chan_lock, flags);
-	for (x = 1; x < DAHDI_MAX_CHANNELS; x++) {
-		if (chans[x])
-			continue;
-
-		chans[x] = chan;
-		if (maxchans < x + 1)
-			maxchans = x + 1;
-		chan->channo = x;
-		/* set this AFTER running close_channel() so that
-		   HDLC channels wont cause hangage */
-		set_bit(DAHDI_FLAGBIT_REGISTERED, &chan->flags);
-		break;
-	}
-	write_unlock_irqrestore(&chan_lock, flags);
-	if (DAHDI_MAX_CHANNELS == x) {
-		module_printk(KERN_ERR, "No more channels available\n");
-		return -ENOMEM;
-	}
-
-	return 0;
 }
 
-char *dahdi_lboname(int x)
+/**
+ * dahdi_chan_reg - Mark the channel registered.
+ *
+ * This must be called after close channel during registration, normally
+ * covered by the call to __dahdi_init_chan, to avoid "HDLC hangage"
+ */
+static inline void dahdi_chan_reg(struct dahdi_chan *chan)
 {
-	if ((x < 0) || (x > 7))
-		return "Unknown";
-	return dahdi_txlevelnames[x];
+	set_bit(DAHDI_FLAGBIT_REGISTERED, &chan->flags);
 }
+
+/**
+ * dahdi_lboname() - Convert line build out number to string.
+ *
+ */
+const char *dahdi_lboname(int lbo)
+{
+	/* names of tx level settings */
+	static const char *const dahdi_txlevelnames[] = {
+		"0 db (CSU)/0-133 feet (DSX-1)",
+		"133-266 feet (DSX-1)",
+		"266-399 feet (DSX-1)",
+		"399-533 feet (DSX-1)",
+		"533-655 feet (DSX-1)",
+		"-7.5db (CSU)",
+		"-15db (CSU)",
+		"-22.5db (CSU)"
+	};
+
+	if ((lbo < 0) || (lbo > 7))
+		return "Unknown";
+	return dahdi_txlevelnames[lbo];
+}
+EXPORT_SYMBOL(dahdi_lboname);
 
 #if defined(CONFIG_DAHDI_NET) || defined(CONFIG_DAHDI_PPP)
 static inline void print_debug_writebuf(struct dahdi_chan* ss, struct sk_buff *skb, int oldbuf)
@@ -2010,8 +1990,9 @@ void dahdi_net_chan_xmit(struct dahdi_chan *ss)
 	if (ss->inwritebuf == ss->outwritebuf) {
 		/* Whoops, no more space.  */
 		ss->inwritebuf = -1;
+
 #if !defined(__FreeBSD__)
-		netif_stop_queue(ztchan_to_dev(ss));
+		netif_stop_queue(chan_to_dev(ss));
 #endif
 	}
 	if (ss->outwritebuf < 0) {
@@ -2022,21 +2003,22 @@ void dahdi_net_chan_xmit(struct dahdi_chan *ss)
 }
 
 #ifdef CONFIG_DAHDI_NET
-#ifdef NEW_HDLC_INTERFACE
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 26)
+static inline struct net_device_stats *hdlc_stats(struct net_device *dev)
+{
+	return &dev->stats;
+}
+#endif
+
 static int dahdi_net_open(struct net_device *dev)
 {
 	int res = hdlc_open(dev);
-	struct dahdi_chan *ms = dev_to_ztchan(dev);
+	struct dahdi_chan *ms = netdev_to_chan(dev);
 
 /*	if (!dev->hard_start_xmit) return res; is this really necessary? --byg */
 	if (res) /* this is necessary to avoid kernel panic when UNSPEC link encap, proven --byg */
 		return res;
-#else
-static int dahdi_net_open(hdlc_device *hdlc)
-{
-	struct dahdi_chan *ms = hdlc_to_ztchan(hdlc);
-	int res;
-#endif
+
 	if (!ms) {
 		module_printk(KERN_NOTICE, "dahdi_net_open: nothing??\n");
 		return -EINVAL;
@@ -2045,7 +2027,7 @@ static int dahdi_net_open(hdlc_device *hdlc)
 		module_printk(KERN_NOTICE, "%s is already open!\n", ms->name);
 		return -EBUSY;
 	}
-	if (!(ms->flags & DAHDI_FLAG_NETDEV)) {
+	if (!dahdi_have_netdev(ms)) {
 		module_printk(KERN_NOTICE, "%s is not a net device!\n", ms->name);
 		return -EINVAL;
 	}
@@ -2054,7 +2036,7 @@ static int dahdi_net_open(hdlc_device *hdlc)
 	if (res)
 		return res;
 
-	netif_start_queue(ztchan_to_dev(ms));
+	netif_start_queue(chan_to_netdev(ms));
 
 #ifdef CONFIG_DAHDI_DEBUG
 	module_printk(KERN_NOTICE, "DAHDINET: Opened channel %d name %s\n", ms->channo, ms->name);
@@ -2073,54 +2055,30 @@ static int dahdi_register_hdlc_device(struct net_device *dev, const char *dev_na
 	result = register_netdev(dev);
 	if (result != 0)
 		return -EIO;
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,14)
-	if (netif_carrier_ok(dev))
-		netif_carrier_off(dev); /* no carrier until DCD goes up */
-#endif
 	return 0;
 }
 
-#ifdef NEW_HDLC_INTERFACE
 static int dahdi_net_stop(struct net_device *dev)
 {
-    hdlc_device *h = dev_to_hdlc(dev);
-    struct dahdi_hdlc *hdlc = h->priv;
+	hdlc_device *h = dev_to_hdlc(dev);
+	struct dahdi_hdlc *hdlc = h->priv;
 
-#else
-static void dahdi_net_close(hdlc_device *hdlc)
-{
-#endif
-	struct dahdi_chan *ms = hdlc_to_ztchan(hdlc);
+	struct dahdi_chan *ms = hdlc_to_chan(hdlc);
 	if (!ms) {
-#ifdef NEW_HDLC_INTERFACE
 		module_printk(KERN_NOTICE, "dahdi_net_stop: nothing??\n");
 		return 0;
-#else
-		module_printk(KERN_NOTICE, "dahdi_net_close: nothing??\n");
-		return;
-#endif
 	}
-	if (!(ms->flags & DAHDI_FLAG_NETDEV)) {
-#ifdef NEW_HDLC_INTERFACE
+	if (!dahdi_have_netdev(ms)) {
 		module_printk(KERN_NOTICE, "dahdi_net_stop: %s is not a net device!\n", ms->name);
 		return 0;
-#else
-		module_printk(KERN_NOTICE, "dahdi_net_close: %s is not a net device!\n", ms->name);
-		return;
-#endif
 	}
 	/* Not much to do here.  Just deallocate the buffers */
-        netif_stop_queue(ztchan_to_dev(ms));
+	netif_stop_queue(chan_to_netdev(ms));
 	dahdi_net_chan_destroy(ms);
 	hdlc_close(dev);
-#ifdef NEW_HDLC_INTERFACE
 	return 0;
-#else
-	return;
-#endif
 }
 
-#ifdef NEW_HDLC_INTERFACE
 /* kernel 2.4.20+ has introduced attach function, dunno what to do,
  just copy sources from dscc4 to be sure and ready for further mastering,
  NOOP right now (i.e. really a stub)  --byg */
@@ -2148,28 +2106,20 @@ static int dahdi_net_attach(struct net_device *dev, unsigned short encoding,
         dpriv->parity = parity;*/
         return 0;
 }
-#endif
 
 static struct dahdi_hdlc *dahdi_hdlc_alloc(void)
 {
 	return kzalloc(sizeof(struct dahdi_hdlc), GFP_KERNEL);
 }
 
-#ifdef NEW_HDLC_INTERFACE
 static int dahdi_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-	/* FIXME: this construction seems to be not very optimal for me but I could find nothing better at the moment (Friday, 10PM :( )  --byg */
-/*	struct dahdi_chan *ss = hdlc_to_ztchan(list_entry(dev, struct dahdi_hdlc, netdev.netdev));*/
-	struct dahdi_chan *ss = dev_to_ztchan(dev);
+	/* FIXME: this construction seems to be not very optimal for me but I
+	 * could find nothing better at the moment (Friday, 10PM :( )  --byg
+	 * */
+	struct dahdi_chan *ss = netdev_to_chan(dev);
 	struct net_device_stats *stats = hdlc_stats(dev);
 
-#else
-static int dahdi_xmit(hdlc_device *hdlc, struct sk_buff *skb)
-{
-	struct dahdi_chan *ss = hdlc_to_ztchan(hdlc);
-	struct net_device *dev = &ss->hdlcnetdev->netdev.netdev;
-	struct net_device_stats *stats = &ss->hdlcnetdev->netdev.stats;
-#endif
 	int retval = 1;
 	unsigned char *data;
 	unsigned long flags;
@@ -2198,17 +2148,10 @@ static int dahdi_xmit(hdlc_device *hdlc, struct sk_buff *skb)
 	return retval;
 }
 
-#ifdef NEW_HDLC_INTERFACE
 static int dahdi_net_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 {
 	return hdlc_ioctl(dev, ifr, cmd);
 }
-#else
-static int dahdi_net_ioctl(hdlc_device *hdlc, struct ifreq *ifr, int cmd)
-{
-	return -EIO;
-}
-#endif
 
 #endif
 
@@ -2311,75 +2254,151 @@ static struct ppp_channel_ops ztppp_ops =
 
 #endif
 
+/**
+ * is_monitor_mode() - True if the confmode indicates that one channel is monitoring another.
+ *
+ */
+static bool is_monitor_mode(int confmode)
+{
+	confmode &= DAHDI_CONF_MODE_MASK;
+	if ((confmode == DAHDI_CONF_MONITOR) ||
+	    (confmode == DAHDI_CONF_MONITORTX) ||
+	    (confmode == DAHDI_CONF_MONITORBOTH) ||
+	    (confmode == DAHDI_CONF_MONITOR_RX_PREECHO) ||
+	    (confmode == DAHDI_CONF_MONITOR_TX_PREECHO) ||
+	    (confmode == DAHDI_CONF_MONITORBOTH_PREECHO)) {
+		return true;
+	} else {
+		return false;
+	}
+}
+
+static unsigned long _chan_cleanup(struct dahdi_chan *pos, unsigned long data)
+{
+	unsigned long flags;
+	struct dahdi_chan *const chan = (struct dahdi_chan *)data;
+	/* Remove anyone pointing to us as master
+	   and make them their own thing */
+	if (pos->master == chan)
+		pos->master = pos;
+
+	if (((pos->confna == chan->channo) &&
+	    is_monitor_mode(pos->confmode)) ||
+	    (pos->dacs_chan == chan) ||
+	    (pos->conf_chan == chan)) {
+		/* Take them out of conference with us */
+		/* release conference resource if any */
+		if (pos->confna)
+			dahdi_check_conf(pos->confna);
+
+		dahdi_disable_dacs(pos);
+		spin_lock_irqsave(&pos->lock, flags);
+		pos->confna = 0;
+		pos->_confn = 0;
+		pos->confmode = 0;
+		pos->conf_chan = NULL;
+		pos->dacs_chan = NULL;
+		spin_unlock_irqrestore(&pos->lock, flags);
+	}
+
+	return 0;
+}
+
+static const struct file_operations nodev_fops;
+
 static void dahdi_chan_unreg(struct dahdi_chan *chan)
 {
-	int x;
 	unsigned long flags;
 
 	might_sleep();
 
+	/* In the case of surprise removal of hardware, make sure any open
+	 * file handles to this channel are disassociated with the actual
+	 * dahdi_chan. */
+	spin_lock_irqsave(&chan->lock, flags);
+	if (chan->file) {
+		module_printk(KERN_NOTICE,
+			"%s: surprise removal: chan %d\n",
+			__func__, chan->channo);
+		chan->file->private_data = NULL;
+		chan->file->f_op = &nodev_fops;
+		/*
+		 * From now on, any file_operations for this device
+		 * would call the nodev_fops methods.
+		 */
+#if defined(__FreeBSD__)
+		seldrain(&chan->file->selinfo);
+#endif
+	}
+
 	release_echocan(chan->ec_factory);
+	chan->ec_factory = NULL;
+	spin_unlock_irqrestore(&chan->lock, flags);
 
 #ifdef CONFIG_DAHDI_NET
-	if (chan->flags & DAHDI_FLAG_NETDEV) {
+	if (dahdi_have_netdev(chan)) {
 		unregister_hdlc_device(chan->hdlcnetdev->netdev);
 		free_netdev(chan->hdlcnetdev->netdev);
 		kfree(chan->hdlcnetdev);
 		chan->hdlcnetdev = NULL;
 	}
 #elif defined(__FreeBSD__)
-	if (chan->flags & DAHDI_FLAG_NETDEV) {
+	if (dahdi_have_netdev(chan)) {
 		dahdi_iface_destroy(chan);
+		clear_bit(DAHDI_FLAGBIT_NETDEV, &chan->flags);
 	}
 #endif
-	write_lock_irqsave(&chan_lock, flags);
-	if (test_bit(DAHDI_FLAGBIT_REGISTERED, &chan->flags)) {
-		chans[chan->channo] = NULL;
-		clear_bit(DAHDI_FLAGBIT_REGISTERED, &chan->flags);
-	}
+	clear_bit(DAHDI_FLAGBIT_REGISTERED, &chan->flags);
+
 #ifdef CONFIG_DAHDI_PPP
 	if (chan->ppp) {
 		module_printk(KERN_NOTICE, "HUH???  PPP still attached??\n");
 	}
 #endif
-	maxchans = 0;
-	for (x=1;x<DAHDI_MAX_CHANNELS;x++)
-		if (chans[x]) {
-			maxchans = x + 1;
-			/* Remove anyone pointing to us as master
-			   and make them their own thing */
-			if (chans[x]->master == chan) {
-				chans[x]->master = chans[x];
-			}
-			if ((chans[x]->confna == chan->channo) &&
-				((chans[x]->confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_MONITOR ||
-				(chans[x]->confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_MONITORTX ||
-				(chans[x]->confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_MONITORBOTH ||
-				(chans[x]->confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_MONITOR_RX_PREECHO ||
-				(chans[x]->confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_MONITOR_TX_PREECHO ||
-				(chans[x]->confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_MONITORBOTH_PREECHO ||
-				(chans[x]->confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_DIGITALMON)) {
-				/* Take them out of conference with us */
-				/* release conference resource if any */
-				if (chans[x]->confna) {
-					dahdi_check_conf(chans[x]->confna);
-					if (chans[x]->span)
-						dahdi_disable_dacs(chans[x]);
+	spin_lock_irqsave(&chan_lock, flags);
+	__for_each_channel(_chan_cleanup, (unsigned long)chan);
+	spin_unlock_irqrestore(&chan_lock, flags);
+
+	chan->channo = -1;
+
+	/* Let processeses out of their poll_wait() */
+	wake_up_interruptible(&chan->waitq);
+
+	/* release tone_zone */
+	close_channel(chan);
+
+	if (chan->file) {
+		if (test_bit(DAHDI_FLAGBIT_OPEN, &chan->flags)) {
+			clear_bit(DAHDI_FLAGBIT_OPEN, &chan->flags);
+			if (chan->span) {
+				if (chan->span->ops->close) {
+					int res;
+
+					res = chan->span->ops->close(chan);
+					if (res)
+						module_printk(KERN_NOTICE,
+							"%s: close() failed: %d\n",
+							__func__, res);
 				}
-				chans[x]->confna = 0;
-				chans[x]->_confn = 0;
-				chans[x]->confmode = 0;
 			}
 		}
-	chan->channo = -1;
-	spin_lock_destroy(&chan->lock);
-	dahdi_poll_drain(&chan->sel);
-	write_unlock_irqrestore(&chan_lock, flags);
+		msleep(20);
+		/*
+		 * FIXME: THE BIG SLEEP above, is hiding a terrible
+		 * race condition:
+		 *  - the module_put() ahead, would allow the low-level driver
+		 *    to free the channel.
+		 *  - We should make sure no-one reference this channel
+		 *    from now on.
+		 */
+		if (chan->span)
+			put_span(chan->span);
+	}
 }
 
-static ssize_t dahdi_chan_read(FOP_READ_ARGS_DECL, int unit)
+static ssize_t dahdi_chan_read(FOP_READ_ARGS_DECL)
 {
-	struct dahdi_chan *chan = chans[unit];
+	struct dahdi_chan *chan = file->private_data;
 	int amnt;
 	int res, rv;
 	int oldbuf,x;
@@ -2388,10 +2407,17 @@ static ssize_t dahdi_chan_read(FOP_READ_ARGS_DECL, int unit)
 	/* Make sure count never exceeds 65k, and make sure it's unsigned */
 	count &= 0xffff;
 
-	if (!chan)
-		return -EINVAL;
+	if (unlikely(!chan)) {
+		/*
+		 * This should never happen. Surprise device removal
+		 * should lead us to the nodev_* file_operations
+		 */
+		msleep(5);
+		module_printk(KERN_ERR, "%s: NODEV\n", __func__);
+		return -ENODEV;
+	}
 
-	if (count < 1)
+	if (unlikely(count < 1))
 		return -EINVAL;
 
 	for (;;) {
@@ -2408,28 +2434,17 @@ static ssize_t dahdi_chan_read(FOP_READ_ARGS_DECL, int unit)
 			break;
 		if (file->f_flags & O_NONBLOCK)
 			return -EAGAIN;
-		rv = dahdi_schluffen(&chan->readbufq);
+
+		/* Wake up when data is available or when the board driver
+		 * unregistered the channel. */
+		rv = wait_event_interruptible(chan->waitq,
+			(!chan->file->private_data || chan->outreadbuf > -1));
 		if (rv)
 			return rv;
+		if (unlikely(!chan->file->private_data))
+			return -ENODEV;
 	}
 	amnt = count;
-/* added */
-#if 0
-	if ((unit == 24) || (unit == 48) || (unit == 16) || (unit == 47)) {
-		int myamnt = amnt;
-		int x;
-		if (amnt > chan->readn[res])
-			myamnt = chan->readn[res];
-		module_printk(KERN_NOTICE, "dahdi_chan_read(unit: %d, inwritebuf: %d, outwritebuf: %d amnt: %d\n",
-			      unit, chan->inwritebuf, chan->outwritebuf, myamnt);
-
-		module_printk(KERN_DEBUG, "\t("); 
-		for (x = 0; x < myamnt; x++) 
-			printk((x ? " %02x" : "%02x"), (unsigned char)usrbuf[x]);
-		printk(")\n");
-	}
-#endif
-/* end addition */
 	if (chan->flags & DAHDI_FLAG_LINEAR) {
 		if (amnt > (chan->readn[res] << 1))
 			amnt = chan->readn[res] << 1;
@@ -2503,25 +2518,31 @@ static int num_filled_bufs(struct dahdi_chan *chan)
 	return range1 + range2;
 }
 
-static ssize_t dahdi_chan_write(FOP_WRITE_ARGS_DECL, int unit)
+static ssize_t dahdi_chan_write(FOP_WRITE_ARGS_DECL)
 {
 	unsigned long flags;
-	struct dahdi_chan *chan = chans[unit];
+	struct dahdi_chan *chan = file->private_data;
 	int res, amnt, oldbuf, rv, x;
 
 	/* Make sure count never exceeds 65k, and make sure it's unsigned */
 	count &= 0xffff;
 
-	if (!chan)
-		return -EINVAL;
-
-	if (count < 1) {
-		return -EINVAL;
+	if (unlikely(!chan)) {
+		/*
+		 * This should never happen. Surprise device removal
+		 * should lead us to the nodev_* file_operations
+		 */
+		msleep(5);
+		module_printk(KERN_ERR, "%s: NODEV\n", __func__);
+		return -ENODEV;
 	}
+
+	if (unlikely(count < 1))
+		return -EINVAL;
 
 	for (;;) {
 		spin_lock_irqsave(&chan->lock, flags);
-		if ((chan->curtone || chan->pdialcount) && !(chan->flags & DAHDI_FLAG_PSEUDO)) {
+		if ((chan->curtone || chan->pdialcount) && !is_pseudo_chan(chan)) {
 			chan->curtone = NULL;
 			chan->tonep = 0;
 			chan->dialing = 0;
@@ -2542,11 +2563,15 @@ static ssize_t dahdi_chan_write(FOP_WRITE_ARGS_DECL, int unit)
 #endif
 			return -EAGAIN;
 		}
-		/* Wait for something to be available */
-		rv = dahdi_schluffen(&chan->writebufq);
-		if (rv) {
+
+		/* Wake up when room in the write queue is available or when
+		 * the board driver unregistered the channel. */
+		rv = wait_event_interruptible(chan->waitq,
+			(!chan->file->private_data || chan->inwritebuf > -1));
+		if (rv)
 			return rv;
-		}
+		if (unlikely(!chan->file->private_data))
+			return -ENODEV;
 	}
 
 	amnt = count;
@@ -2559,17 +2584,8 @@ static ssize_t dahdi_chan_write(FOP_WRITE_ARGS_DECL, int unit)
 	}
 
 #ifdef CONFIG_DAHDI_DEBUG
-	module_printk(KERN_NOTICE, "dahdi_chan_write(unit: %d, res: %d, outwritebuf: %d amnt: %d\n",
-		      unit, res, chan->outwritebuf, amnt);
-#endif
-#if 0
- 	if ((unit == 24) || (unit == 48) || (unit == 16) || (unit == 47)) {
- 		int x;
- 		module_printk(KERN_NOTICE, "dahdi_chan_write/in(unit: %d, res: %d, outwritebuf: %d amnt: %d, txdisable: %d)\n",
-			      unit, res, chan->outwritebuf, amnt, chan->txdisable);
- 		module_printk(KERN_DEBUG, "\t("); for (x = 0; x < amnt; x++) module_printk(KERN_DEBUG, (x ? " %02x" : "%02x"), (unsigned char)usrbuf[x]);
- 		module_printk(KERN_DEBUG, ")\n");
- 	}
+	module_printk(KERN_NOTICE, "dahdi_chan_write(chan: %d, res: %d, outwritebuf: %d amnt: %d\n",
+		      chan->channo, res, chan->outwritebuf, amnt);
 #endif
 
 	if (amnt) {
@@ -2599,6 +2615,21 @@ static ssize_t dahdi_chan_write(FOP_WRITE_ARGS_DECL, int unit)
 			}
 			chan->writen[res] = amnt;
 		}
+#ifdef CONFIG_DAHDI_ECHOCAN_PROCESS_TX
+		if ((chan->ec_state) &&
+		    (ECHO_MODE_ACTIVE == chan->ec_state->status.mode) &&
+		    (chan->ec_state->ops->echocan_process_tx)) {
+			struct ec_state *const ec_state = chan->ec_state;
+			for (x = 0; x < chan->writen[res]; ++x) {
+				short tx;
+				tx = DAHDI_XLAW(chan->writebuf[res][x], chan);
+				ec_state->ops->echocan_process_tx(ec_state,
+								  &tx, 1);
+				chan->writebuf[res][x] = DAHDI_LIN2X((int) tx,
+								     chan);
+			}
+		}
+#endif
 		chan->writeidx[res] = 0;
 		if (chan->flags & DAHDI_FLAG_FCS)
 			calc_fcs(chan, res);
@@ -2898,7 +2929,7 @@ static int initialize_channel(struct dahdi_chan *chan)
 {
 	int res;
 	unsigned long flags;
-	void *rxgain=NULL;
+	const void *rxgain = NULL;
 	struct dahdi_echocan_state *ec_state;
 	const struct dahdi_echocan_factory *ec_current;
 
@@ -2951,14 +2982,10 @@ static int initialize_channel(struct dahdi_chan *chan)
 	chan->itimerset = chan->itimer = chan->otimer = 0;
 	chan->ringdebtimer = 0;
 
-	dahdi_poll_init(&chan->sel);
-	init_waitqueue_head(&chan->readbufq);
-	init_waitqueue_head(&chan->writebufq);
-	init_waitqueue_head(&chan->eventbufq);
-	init_waitqueue_head(&chan->txstateq);
-
 	/* Reset conferences */
 	reset_conf(chan);
+
+	chan->dacs_chan = NULL;
 
 	/* I/O Mask, etc */
 	chan->iomask = 0;
@@ -2968,6 +2995,7 @@ static int initialize_channel(struct dahdi_chan *chan)
 	if ((chan->sig & __DAHDI_SIG_DACS) != __DAHDI_SIG_DACS) {
 		chan->confna = 0;
 		chan->confmode = 0;
+		chan->conf_chan = NULL;
 		dahdi_disable_dacs(chan);
 	}
 	chan->_confn = 0;
@@ -2979,13 +3007,12 @@ static int initialize_channel(struct dahdi_chan *chan)
 	chan->curtone = NULL;
 	chan->tonep = 0;
 	chan->pdialcount = 0;
-	if (chan->gainalloc && chan->rxgain)
+	if (is_gain_allocated(chan))
 		rxgain = chan->rxgain;
 	chan->rxgain = defgain;
 	chan->txgain = defgain;
-	chan->gainalloc = 0;
 	chan->eventinidx = chan->eventoutidx = 0;
-	dahdi_set_law(chan,0);
+	dahdi_set_law(chan, DAHDI_LAW_DEFAULT);
 	dahdi_hangup(chan);
 
 	/* Make sure that the audio flag is cleared on a clear channel */
@@ -3013,7 +3040,7 @@ static int initialize_channel(struct dahdi_chan *chan)
 
 	spin_unlock_irqrestore(&chan->lock, flags);
 
-	set_tone_zone(chan, -1);
+	set_tone_zone(chan, DEFAULT_TONE_ZONE);
 
 	if (rxgain)
 		kfree(rxgain);
@@ -3029,13 +3056,13 @@ static int dahdi_timing_open(struct file *file)
 	if (!(t = kzalloc(sizeof(*t), GFP_KERNEL)))
 		return -ENOMEM;
 
-	dahdi_poll_init(&t->sel);
+	init_waitqueue_head(&t->sel);
 	INIT_LIST_HEAD(&t->list);
-	dahdi_set_private_data(file, t);
+	file->private_data = t;
 
-	spin_lock_irqsave(&zaptimerlock, flags);
-	list_add(&t->list, &zaptimers);
-	spin_unlock_irqrestore(&zaptimerlock, flags);
+	spin_lock_irqsave(&dahdi_timer_lock, flags);
+	list_add(&t->list, &dahdi_timers);
+	spin_unlock_irqrestore(&dahdi_timer_lock, flags);
 
 	return 0;
 }
@@ -3045,39 +3072,43 @@ static int dahdi_timer_release(struct file *file)
 	struct dahdi_timer *t, *cur, *next;
 	unsigned long flags;
 
-	if (!(t = dahdi_get_private_data(file)))
+	if (!(t = file->private_data))
 		return 0;
 
-	spin_lock_irqsave(&zaptimerlock, flags);
+	spin_lock_irqsave(&dahdi_timer_lock, flags);
 
-	list_for_each_entry_safe(cur, next, &zaptimers, list) {
+	list_for_each_entry_safe(cur, next, &dahdi_timers, list) {
 		if (t == cur) {
 			list_del(&cur->list);
 			break;
 		}
 	}
 
-	spin_unlock_irqrestore(&zaptimerlock, flags);
+	spin_unlock_irqrestore(&dahdi_timer_lock, flags);
 
 	if (!cur) {
 		module_printk(KERN_NOTICE, "Timer: Not on list??\n");
 		return 0;
 	}
 
-	dahdi_poll_drain(&t->sel);
+#if defined(__FreeBSD__)
+	seldrain(&cur->selinfo);
+#endif
 	kfree(cur);
 
 	return 0;
 }
 
-static int dahdi_specchan_open(struct file *file, int unit)
+static const struct file_operations dahdi_chan_fops;
+
+static int dahdi_specchan_open(struct file *file)
 {
 	int res = 0;
-	struct dahdi_chan *const chan = chans[unit];
+	struct dahdi_chan *const chan = chan_from_file(file);
 
 	if (chan && chan->sig) {
 		/* Make sure we're not already open, a net device, or a slave device */
-		if (chan->flags & DAHDI_FLAG_NETDEV)
+		if (dahdi_have_netdev(chan))
 			res = -EBUSY;
 		else if (chan->master != chan)
 			res = -EBUSY;
@@ -3092,21 +3123,26 @@ static int dahdi_specchan_open(struct file *file, int unit)
 				return res;
 			}
 			spin_lock_irqsave(&chan->lock, flags);
-			if (chan->flags & DAHDI_FLAG_PSEUDO)
+			if (is_pseudo_chan(chan))
 				chan->flags |= DAHDI_FLAG_AUDIO;
 			if (chan->span) {
-				if (!try_module_get(chan->span->ops->owner))
+				const struct dahdi_span_ops *const ops =
+								chan->span->ops;
+				if (!try_module_get(ops->owner)) {
 					res = -ENXIO;
-				else if (chan->span->ops->open)
-					res = chan->span->ops->open(chan);
+				} else if (ops->open) {
+					res = ops->open(chan);
+					if (res)
+						module_put(ops->owner);
+				}
 			}
 			if (!res) {
-#if defined(__FreeBSD__)
-				chan->file = file->dev;
-				chan->file_flags = file->f_flags;
-#else
 				chan->file = file;
-#endif
+				file->private_data = chan;
+				/* Since we know we're a channel now, we can
+				 * update the f_op pointer and bypass a few of
+				 * the checks on the minor number. */
+				file->f_op = &dahdi_chan_fops;
 				spin_unlock_irqrestore(&chan->lock, flags);
 			} else {
 				spin_unlock_irqrestore(&chan->lock, flags);
@@ -3121,19 +3157,48 @@ static int dahdi_specchan_open(struct file *file, int unit)
 	return res;
 }
 
-static int dahdi_specchan_release(struct file *file, int unit)
+static int dahdi_specchan_release(struct file *file)
 {
 	int res=0;
 	unsigned long flags;
-	struct dahdi_chan *const chan = chans[unit];
+	struct dahdi_chan *chan = chan_from_file(file);
 
 	if (chan) {
 		/* Chan lock protects contents against potentially non atomic accesses.
 		 * So if the pointer setting is not atomic, we should protect */
+#ifdef CONFIG_DAHDI_MIRROR
+		if (chan->srcmirror) {
+			struct dahdi_chan *const srcmirror = chan->srcmirror;
+			spin_lock_irqsave(&srcmirror->lock, flags);
+			if (chan == srcmirror->txmirror) {
+				module_printk(KERN_INFO, "Chan %d tx mirror " \
+					      "to %d stopped\n",
+					      srcmirror->txmirror->channo,
+					      srcmirror->channo);
+				srcmirror->txmirror = NULL;
+			}
+
+			if (chan == srcmirror->rxmirror) {
+				module_printk(KERN_INFO, "Chan %d rx mirror " \
+					      "to %d stopped\n",
+					      srcmirror->rxmirror->channo,
+					      srcmirror->channo);
+				chan->srcmirror->rxmirror = NULL;
+			}
+			spin_unlock_irqrestore(&chan->srcmirror->lock, flags);
+		}
+#endif /* CONFIG_DAHDI_MIRROR */
+
 		spin_lock_irqsave(&chan->lock, flags);
 		chan->file = NULL;
+		file->private_data = NULL;
+#ifdef CONFIG_DAHDI_MIRROR
+		chan->srcmirror = NULL;
+#endif /* CONFIG_DAHDI_MIRROR */
+
 		spin_unlock_irqrestore(&chan->lock, flags);
 		close_channel(chan);
+		clear_bit(DAHDI_FLAGBIT_OPEN, &chan->flags);
 		if (chan->span) {
 			struct module *owner = chan->span->ops->owner;
 
@@ -3141,9 +3206,6 @@ static int dahdi_specchan_release(struct file *file, int unit)
 				res = chan->span->ops->close(chan);
 			module_put(owner);
 		}
-		/* The channel might be destroyed by low-level driver span->close() */
-		if (chans[unit])
-			clear_bit(DAHDI_FLAGBIT_OPEN, &chans[unit]->flags);
 	} else
 		res = -ENXIO;
 	return res;
@@ -3154,46 +3216,97 @@ static int can_open_timer(void)
 #ifdef CONFIG_DAHDI_CORE_TIMER
 	return 1;
 #else
-	return maxspans > 0;
+	return (list_empty(&span_list)) ? 0 : 1;
 #endif
 }
 
-static struct dahdi_chan *dahdi_alloc_pseudo(void)
+static unsigned int max_pseudo_channels = 512;
+static unsigned int num_pseudo_channels;
+
+/**
+ * dahdi_alloc_pseudo() - Returns a new pseudo channel.
+ *
+ * Call with the registration_mutex held since this function will determine a
+ * channel number, and must be protected from additional registrations while
+ * that is happening.
+ *
+ */
+static struct dahdi_chan *dahdi_alloc_pseudo(struct file *file)
 {
-	struct dahdi_chan *pseudo;
+	struct pseudo_chan *pseudo;
+	unsigned long flags;
+	unsigned int channo;
+	struct pseudo_chan *p;
+	struct list_head *pos = &pseudo_chans;
 
 	/* Don't allow /dev/dahdi/pseudo to open if there is not a timing
 	 * source. */
 	if (!can_open_timer())
 		return NULL;
 
-	if (!(pseudo = kzalloc(sizeof(*pseudo), GFP_KERNEL)))
+	if (unlikely(num_pseudo_channels >= max_pseudo_channels))
 		return NULL;
 
-	pseudo->sig = DAHDI_SIG_CLEAR;
-	pseudo->sigcap = DAHDI_SIG_CLEAR;
-	pseudo->flags = DAHDI_FLAG_PSEUDO | DAHDI_FLAG_AUDIO;
+	pseudo = kzalloc(sizeof(*pseudo), GFP_KERNEL);
+	if (NULL == pseudo)
+		return NULL;
 
-	if (dahdi_chan_reg(pseudo)) {
-		kfree(pseudo);
-		pseudo = NULL;
-	} else {
-		snprintf(pseudo->name, sizeof(pseudo->name)-1,"Pseudo/%d", pseudo->channo); 
+	pseudo->chan.sig = DAHDI_SIG_CLEAR;
+	pseudo->chan.sigcap = DAHDI_SIG_CLEAR;
+	pseudo->chan.flags = DAHDI_FLAG_AUDIO;
+	pseudo->chan.span = NULL; /* No span == psuedo channel */
+
+	channo = FIRST_PSEUDO_CHANNEL;
+	list_for_each_entry(p, &pseudo_chans, node) {
+		if (channo != p->chan.channo)
+			break;
+		pos = &p->node;
+		++channo;
 	}
 
-	return pseudo;
+	pseudo->chan.channo = channo;
+	pseudo->chan.chanpos = channo - FIRST_PSEUDO_CHANNEL + 1;
+	__dahdi_init_chan(&pseudo->chan);
+	dahdi_chan_reg(&pseudo->chan);
+
+	snprintf(pseudo->chan.name, sizeof(pseudo->chan.name)-1,
+		 "Pseudo/%d", pseudo->chan.chanpos);
+
+	file->private_data = &pseudo->chan;
+
+	/* Once we place the pseudo chan on the list...it's registered and
+	 * live. */
+	spin_lock_irqsave(&chan_lock, flags);
+	++num_pseudo_channels;
+	list_add(&pseudo->node, pos);
+	spin_unlock_irqrestore(&chan_lock, flags);
+
+	return &pseudo->chan;
 }
 
-static void dahdi_free_pseudo(struct dahdi_chan *pseudo)
+static void dahdi_free_pseudo(struct dahdi_chan *chan)
 {
-	if (pseudo) {
-		dahdi_chan_unreg(pseudo);
+	struct pseudo_chan *pseudo;
+	unsigned long flags;
+
+	if (!chan)
+		return;
+
+	mutex_lock(&registration_mutex);
+	pseudo = chan_to_pseudo(chan);
+
+	spin_lock_irqsave(&chan_lock, flags);
+	list_del(&pseudo->node);
+	--num_pseudo_channels;
+	spin_unlock_irqrestore(&chan_lock, flags);
+
+	dahdi_chan_unreg(chan);
+	mutex_unlock(&registration_mutex);
 #if defined(__FreeBSD__)
-		free_pseudo(pseudo);
+	free_pseudo(pseudo);
 #else
-		kfree(pseudo);
+	kfree(pseudo);
 #endif
-	}
 }
 
 static int dahdi_open(struct inode *inode, struct file *file)
@@ -3201,21 +3314,17 @@ static int dahdi_open(struct inode *inode, struct file *file)
 	int unit = UNIT(file);
 	struct dahdi_chan *chan;
 	/* Minor 0: Special "control" descriptor */
-	if (!unit)
+	if (unit == DAHDI_CTL)
 		return dahdi_ctl_open(file);
-	if (unit == 250) {
+	if (unit == DAHDI_TRANSCODE) {
 		if (!dahdi_transcode_fops) {
 			if (request_module("dahdi_transcode")) {
 				return -ENXIO;
 			}
 		}
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,0)
-		__MOD_INC_USE_COUNT (dahdi_transcode_fops->owner);
-#else
 		if (!try_module_get(dahdi_transcode_fops->owner)) {
 			return -ENXIO;
 		}
-#endif
 		if (dahdi_transcode_fops && dahdi_transcode_fops->open) {
 			return dahdi_transcode_fops->open(inode, file);
 		} else {
@@ -3225,128 +3334,56 @@ static int dahdi_open(struct inode *inode, struct file *file)
 		}
 		return -ENXIO;
 	}
-	if (unit == 253) {
+	if (unit == DAHDI_TIMER) {
 		if (can_open_timer()) {
 			return dahdi_timing_open(file);
 		} else {
 			return -ENXIO;
 		}
 	}
-	if (unit == 254)
+	if (unit == DAHDI_CHANNEL)
 		return dahdi_chan_open(file);
-	if (unit == 255) {
-		chan = dahdi_alloc_pseudo();
-		if (chan) {
-			dahdi_set_private_data(file, chan);
-			return dahdi_specchan_open(file, chan->channo);
-		} else {
-			return -ENXIO;
-		}
+	if (unit == DAHDI_PSEUDO) {
+		mutex_lock(&registration_mutex);
+		chan = dahdi_alloc_pseudo(file);
+		mutex_unlock(&registration_mutex);
+		if (unlikely(!chan))
+			return -ENOMEM;
+		return dahdi_specchan_open(file);
 	}
-	return dahdi_specchan_open(file, unit);
+	return dahdi_specchan_open(file);
 }
 
-#if 0
-static int dahdi_open(struct file *file)
+/**
+ * dahdi_ioctl_defaultzone() - Set defzone to the default.
+ * @defzone:	The number of the default zone.
+ *
+ * The default zone is the zone that will be used if the channels request the
+ * default zone in dahdi_ioctl_chanconfig.  The first entry on the tone_zones
+ * list is the default zone.  This function searches the list for the zone,
+ * and if found, moves it to the head of the list.
+ */
+static int dahdi_ioctl_defaultzone(unsigned long data)
 {
-	int res;
-	unsigned long flags;
-	spin_lock_irqsave(&bigzaplock, flags);
-	res = __dahdi_open(file);
-	spin_unlock_irqrestore(&bigzaplock, flags);
-	return res;
-}
-#endif
+	int defzone;
+	struct dahdi_zone *cur;
+	struct dahdi_zone *dz = NULL;
 
-static ssize_t dahdi_read(FOP_READ_ARGS_DECL)
-{
-	int unit = UNIT(file);
-	struct dahdi_chan *chan;
+	if (get_user(defzone, (int __user *)data))
+		return -EFAULT;
 
-	/* Can't read from control */
-	if (!unit) {
-		return -EINVAL;
+	spin_lock(&zone_lock);
+	list_for_each_entry(cur, &tone_zones, node) {
+		if (cur->num != defzone)
+			continue;
+		dz = cur;
+		break;
 	}
+	if (dz)
+		list_move(&dz->node, &tone_zones);
+	spin_unlock(&zone_lock);
 
-	if (unit == 250) {
-		if (dahdi_transcode_fops && dahdi_transcode_fops->read)
-			return dahdi_transcode_fops->read(FOP_READ_ARGS);
-		return -ENOSYS;
-	}
-
-	if (unit == 253)
-		return -EINVAL;
-
-	if (unit == 254) {
-		chan = dahdi_get_private_data(file);
-		if (!chan)
-			return -EINVAL;
-		return dahdi_chan_read(FOP_READ_ARGS, chan->channo);
-	}
-
-	if (unit == 255) {
-		chan = dahdi_get_private_data(file);
-		if (!chan) {
-			module_printk(KERN_NOTICE, "No pseudo channel structure to read?\n");
-			return -EINVAL;
-		}
-		return dahdi_chan_read(FOP_READ_ARGS, chan->channo);
-	}
-	if (count < 0)
-		return -EINVAL;
-
-	return dahdi_chan_read(FOP_READ_ARGS, unit);
-}
-
-static int dahdi_write(FOP_WRITE_ARGS_DECL)
-{
-	int unit = UNIT(file);
-	struct dahdi_chan *chan;
-	/* Can't read from control */
-	if (!unit)
-		return -EINVAL;
-	if (count < 0)
-		return -EINVAL;
-	if (unit == 250) {
-		if (dahdi_transcode_fops && dahdi_transcode_fops->write)
-			return dahdi_transcode_fops->write(FOP_WRITE_ARGS);
-		return -ENOSYS;
-	}
-	if (unit == 253)
-		return -EINVAL;
-	if (unit == 254) {
-		chan = dahdi_get_private_data(file);
-		if (!chan)
-			return -EINVAL;
-		return dahdi_chan_write(FOP_WRITE_ARGS, chan->channo);
-	}
-	if (unit == 255) {
-		chan = dahdi_get_private_data(file);
-		if (!chan) {
-			module_printk(KERN_NOTICE, "No pseudo channel structure to read?\n");
-			return -EINVAL;
-		}
-		return dahdi_chan_write(FOP_WRITE_ARGS, chan->channo);
-	}
-	return dahdi_chan_write(FOP_WRITE_ARGS, unit);
-
-}
-
-static int dahdi_set_default_zone(int defzone)
-{
-	if ((defzone < 0) || (defzone >= DAHDI_TONE_ZONE_MAX))
-		return -EINVAL;
-	write_lock(&zone_lock);
-	if (!tone_zones[defzone]) {
-		write_unlock(&zone_lock);
-		return -EINVAL;
-	}
-	if ((default_zone != -1) && tone_zones[default_zone])
-		atomic_dec(&tone_zones[default_zone]->refcount);
-	atomic_inc(&tone_zones[defzone]->refcount);
-	default_zone = defzone;
-	write_unlock(&zone_lock);
-	return 0;
+	return (dz) ? 0 : -EINVAL;
 }
 
 /* No bigger than 32k for everything per tone zone */
@@ -3360,7 +3397,7 @@ static int dahdi_set_default_zone(int defzone)
    format is much simpler (an array structure field of the zone
    structure, rather an array of pointers).
 */
-static int ioctl_load_zone(unsigned long data)
+static int dahdi_ioctl_loadzone(unsigned long data)
 {
 	struct load_zone_workarea {
 		struct dahdi_tone *samples[MAX_TONES];
@@ -3373,51 +3410,67 @@ static int ioctl_load_zone(unsigned long data)
 	size_t size;
 	int res;
 	int x;
-	void *slab, *ptr;
-	struct dahdi_zone *z;
-	struct dahdi_tone *t;
+	void *ptr;
+	struct dahdi_zone *z = NULL;
+	struct dahdi_tone *t = NULL;
 	char __user * user_data = (char __user *)data;
+	const unsigned char MAX_ZONE = -1;
 
 	work = kzalloc(sizeof(*work), GFP_KERNEL);
 	if (!work)
 		return -ENOMEM;
 
+#if defined(__FreeBSD__)
+	if (copy_from_user(&data, (void *) data, sizeof(data))) {
+		res = -EFAULT;
+		goto error_exit;
+	}
+#endif
+
 	if (dahdi_copy_from_user(&work->th, user_data, sizeof(work->th))) {
-		kfree(work);
-		return -EFAULT;
+		res = -EFAULT;
+		goto error_exit;
+	}
+
+	if ((work->th.zone < 0) || (work->th.zone > MAX_ZONE)) {
+		res = -EINVAL;
+		goto error_exit;
 	}
 
 	user_data += sizeof(work->th);
 
 	if ((work->th.count < 0) || (work->th.count > MAX_TONES)) {
 		module_printk(KERN_NOTICE, "Too many tones included\n");
-		kfree(work);
-		return -EINVAL;
+		res = -EINVAL;
+		goto error_exit;
 	}
 
 	space = size = sizeof(*z) + work->th.count * sizeof(*t);
 
 	if (size > MAX_SIZE) {
-		kfree(work);
-		return -E2BIG;
+		res = -E2BIG;
+		goto error_exit;
 	}
 
-	z = ptr = slab = kzalloc(size, GFP_KERNEL);
+	z = ptr = kzalloc(size, GFP_KERNEL);
 	if (!z) {
-		kfree(work);
-		return -ENOMEM;
+		res = -ENOMEM;
+		goto error_exit;
 	}
 
 	ptr = (char *) ptr + sizeof(*z);
 	space -= sizeof(*z);
 
-	dahdi_copy_string(z->name, work->th.name, sizeof(z->name));
+	z->name = kasprintf(GFP_KERNEL, work->th.name);
+	if (!z->name) {
+		res = -ENOMEM;
+		goto error_exit;
+	}
 
 	for (x = 0; x < DAHDI_MAX_CADENCE; x++)
 		z->ringcadence[x] = work->th.ringcadence[x];
 
-	atomic_set(&z->refcount, 0);
-
+	mutex_lock(&global_dialparamslock);
 	for (x = 0; x < work->th.count; x++) {
 		enum {
 			REGULAR_TONE,
@@ -3428,18 +3481,16 @@ static int ioctl_load_zone(unsigned long data)
 		} tone_type;
 
 		if (space < sizeof(*t)) {
-			kfree(slab);
-			kfree(work);
 			module_printk(KERN_NOTICE, "Insufficient tone zone space\n");
-			return -EINVAL;
+			res = -EINVAL;
+			goto unlock_error_exit;
 		}
 
 		res = dahdi_copy_from_user(&work->td, user_data,
 				     sizeof(work->td));
 		if (res) {
-			kfree(slab);
-			kfree(work);
-			return -EFAULT;
+			res = -EFAULT;
+			goto unlock_error_exit;
 		}
 
 		user_data += sizeof(work->td);
@@ -3461,9 +3512,8 @@ static int ioctl_load_zone(unsigned long data)
 				module_printk(KERN_NOTICE,
 					      "Invalid 'next' pointer: %d\n",
 					      work->next[x]);
-				kfree(slab);
-				kfree(work);
-				return -EINVAL;
+				res = -EINVAL;
+				goto unlock_error_exit;
 			}
 		} else if ((work->td.tone >= DAHDI_TONE_DTMF_BASE) &&
 			   (work->td.tone <= DAHDI_TONE_DTMF_MAX)) {
@@ -3489,9 +3539,8 @@ static int ioctl_load_zone(unsigned long data)
 			module_printk(KERN_NOTICE,
 				      "Invalid tone (%d) defined\n",
 				      work->td.tone);
-			kfree(slab);
-			kfree(work);
-			return -EINVAL;
+			res = -EINVAL;
+			goto unlock_error_exit;
 		}
 
 		t->fac1 = work->td.fac1;
@@ -3547,21 +3596,30 @@ static int ioctl_load_zone(unsigned long data)
 			break;
 		}
 	}
+	mutex_unlock(&global_dialparamslock);
 
 	for (x = 0; x < work->th.count; x++) {
 		if (work->samples[x])
 			work->samples[x]->next = work->samples[work->next[x]];
 	}
 
-	res = dahdi_register_tone_zone(work->th.zone, z);
-	if (res) {
-		kfree(slab);
-	} else {
-		if ( -1 == default_zone ) {
-			dahdi_set_default_zone(work->th.zone);
-		}
-	}
+	z->num = work->th.zone;
 
+	/* After we call dahdi_register_tone_zone, the only safe way to free
+	 * the zone is with a tone_zone_put call. */
+	res = dahdi_register_tone_zone(z);
+	if (res)
+		tone_zone_put(z);
+
+	kfree(work);
+	return res;
+
+unlock_error_exit:
+	mutex_unlock(&global_dialparamslock);
+error_exit:
+	if (z)
+		kfree(z->name);
+	kfree(z);
 	kfree(work);
 	return res;
 }
@@ -3600,7 +3658,6 @@ struct dahdi_tone *dahdi_mf_tone(const struct dahdi_chan *chan, char digit, int 
 			return &tone_pause;
 
 		return NULL;
-		/* You should not get here */
 	case DIGIT_MODE_DTMF:
 		switch (digit) {
 		case '0':
@@ -3626,6 +3683,7 @@ struct dahdi_tone *dahdi_mf_tone(const struct dahdi_chan *chan, char digit, int 
 		case 'C':
 		case 'D':
 			tone_index = DAHDI_TONE_DTMF_A + (digit - 'A');
+			break;
 		case 'W':
 			return &tone_pause;
 		default:
@@ -3784,33 +3842,29 @@ static int dahdi_release(struct inode *inode, struct file *file)
 	int res;
 	struct dahdi_chan *chan;
 
-	if (!unit)
+	if (unit == DAHDI_CTL)
 		return dahdi_ctl_release(file);
-	if (unit == 253) {
+	if (unit == DAHDI_TIMER) {
 		return dahdi_timer_release(file);
 	}
-	if (unit == 250) {
-#if defined(__FreeBSD__)
-		if (dahdi_transcode_fops && dahdi_transcode_fops->release)
-			return dahdi_transcode_fops->release(inode, file);
-#endif /* __FreeBSD__ */
+	if (unit == DAHDI_TRANSCODE) {
 		/* We should not be here because the dahdi_transcode.ko module
 		 * should have updated the file_operations for this file
 		 * handle when the file was opened. */
 		WARN_ON(1);
 		return -EFAULT;
 	}
-	if (unit == 254) {
-		chan = dahdi_get_private_data(file);
+	if (unit == DAHDI_CHANNEL) {
+		chan = file->private_data;
 		if (!chan)
 			return dahdi_chan_release(file);
 		else
-			return dahdi_specchan_release(file, chan->channo);
+			return dahdi_specchan_release(file);
 	}
-	if (unit == 255) {
-		chan = dahdi_get_private_data(file);
+	if (unit == DAHDI_PSEUDO) {
+		chan = file->private_data;
 		if (chan) {
-			res = dahdi_specchan_release(file, chan->channo);
+			res = dahdi_specchan_release(file);
 			dahdi_free_pseudo(chan);
 		} else {
 			module_printk(KERN_NOTICE, "Pseudo release and no private data??\n");
@@ -3818,22 +3872,8 @@ static int dahdi_release(struct inode *inode, struct file *file)
 		}
 		return res;
 	}
-	return dahdi_specchan_release(file, unit);
+	return dahdi_specchan_release(file);
 }
-
-#if 0
-static int dahdi_release(struct inode *inode, struct file *file)
-{
-	/* Lock the big zap lock when handling a release */
-	unsigned long flags;
-	int res;
-	spin_lock_irqsave(&bigzaplock, flags);
-	res = __dahdi_release(file);
-	spin_unlock_irqrestore(&bigzaplock, flags);
-	return res;
-}
-#endif
-
 
 /**
  * dahdi_alarm_channel() - notify userspace channel is (not) in alarm
@@ -3865,6 +3905,54 @@ void dahdi_alarm_channel(struct dahdi_chan *chan, int alarms)
 	spin_unlock_irqrestore(&chan->lock, flags);
 }
 
+static void __dahdi_find_master_span(void)
+{
+	struct dahdi_span *s;
+	unsigned long flags;
+	struct dahdi_span *old_master;
+
+	spin_lock_irqsave(&chan_lock, flags);
+	old_master = master;
+	list_for_each_entry(s, &span_list, spans_node) {
+		if (s->alarms && old_master)
+			continue;
+		if (dahdi_is_digital_span(s) &&
+		    !test_bit(DAHDI_FLAGBIT_RUNNING, &s->flags) &&
+		    old_master)
+			continue;
+		if (!can_provide_timing(s))
+			continue;
+		if (master == s)
+			continue;
+
+		master = s;
+		break;
+	}
+	spin_unlock_irqrestore(&chan_lock, flags);
+
+	if ((debug & DEBUG_MAIN) && (old_master != master))
+		module_printk(KERN_NOTICE, "Master changed to %s\n", s->name);
+}
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+static void _dahdi_find_master_span(void *work)
+{
+	__dahdi_find_master_span();
+}
+static DECLARE_WORK(find_master_work, _dahdi_find_master_span, NULL);
+#else
+static void _dahdi_find_master_span(struct work_struct *work)
+{
+	__dahdi_find_master_span();
+}
+static DECLARE_WORK(find_master_work, _dahdi_find_master_span);
+#endif
+
+static void dahdi_find_master_span(void)
+{
+	schedule_work(&find_master_work);
+}
+
 void dahdi_alarm_notify(struct dahdi_span *span)
 {
 	int x;
@@ -3881,21 +3969,13 @@ void dahdi_alarm_notify(struct dahdi_span *span)
 		span->lastalarms = span->alarms;
 		for (x = 0; x < span->channels; x++)
 			dahdi_alarm_channel(span->chans[x], span->alarms);
-		/* Switch to other master if current master in alarm */
-		for (x=1; x<maxspans; x++) {
-			if (spans[x] && !spans[x]->alarms && (spans[x]->flags & DAHDI_FLAG_RUNNING)) {
-				if (master != spans[x]) {
-					module_printk(KERN_NOTICE,
-						"Master changed to %s\n",
-						spans[x]->name);
-				}
-				master = spans[x];
-				break;
-			}
-		}
+
+		/* If we're going into or out of alarm we should try to find a
+		 * new master that may be a better fit. */
+		dahdi_find_master_span();
 
 		/* Report more detailed alarms */
-		if (debug) {
+		if (debug & DEBUG_MAIN) {
 			if (span->alarms & DAHDI_ALARM_LOS) {
 				module_printk(KERN_NOTICE,
 					"Span %d: Loss of signal\n",
@@ -3915,27 +3995,6 @@ void dahdi_alarm_notify(struct dahdi_span *span)
 	}
 }
 
-#define VALID_SPAN(j) do { \
-	if ((j >= DAHDI_MAX_SPANS) || (j < 1)) \
-		return -EINVAL; \
-	if (!spans[j]) \
-		return -ENXIO; \
-} while(0)
-
-#define CHECK_VALID_SPAN(j) do { \
-	/* Start a given span */ \
-	if (get_user(j, (int __user *)data)) \
-		return -EFAULT; \
-	VALID_SPAN(j); \
-} while(0)
-
-#define VALID_CHANNEL(j) do { \
-	if ((j >= DAHDI_MAX_CHANNELS) || (j < 1)) \
-		return -EINVAL; \
-	if (!chans[j]) \
-		return -ENXIO; \
-} while(0)
-
 static int dahdi_timer_ioctl(struct file *file, unsigned int cmd, unsigned long data, struct dahdi_timer *timer)
 {
 	int j;
@@ -3945,39 +4004,42 @@ static int dahdi_timer_ioctl(struct file *file, unsigned int cmd, unsigned long 
 		get_user(j, (int __user *)data);
 		if (j < 0)
 			j = 0;
-		spin_lock_irqsave(&zaptimerlock, flags);
+		spin_lock_irqsave(&dahdi_timer_lock, flags);
 		timer->ms = timer->pos = j;
-		spin_unlock_irqrestore(&zaptimerlock, flags);
+		spin_unlock_irqrestore(&dahdi_timer_lock, flags);
 		break;
 	case DAHDI_TIMERACK:
 		get_user(j, (int __user *)data);
-		spin_lock_irqsave(&zaptimerlock, flags);
+		spin_lock_irqsave(&dahdi_timer_lock, flags);
 		if ((j < 1) || (j > timer->tripped))
 			j = timer->tripped;
 		timer->tripped -= j;
-		spin_unlock_irqrestore(&zaptimerlock, flags);
+		spin_unlock_irqrestore(&dahdi_timer_lock, flags);
 		break;
 	case DAHDI_GETEVENT:  /* Get event on queue */
 		j = DAHDI_EVENT_NONE;
-		spin_lock_irqsave(&zaptimerlock, flags);
+		spin_lock_irqsave(&dahdi_timer_lock, flags);
 		  /* set up for no event */
 		if (timer->tripped)
 			j = DAHDI_EVENT_TIMER_EXPIRED;
 		if (timer->ping)
 			j = DAHDI_EVENT_TIMER_PING;
-		spin_unlock_irqrestore(&zaptimerlock, flags);
+		spin_unlock_irqrestore(&dahdi_timer_lock, flags);
 		put_user(j, (int __user *)data);
 		break;
 	case DAHDI_TIMERPING:
-		spin_lock_irqsave(&zaptimerlock, flags);
+		spin_lock_irqsave(&dahdi_timer_lock, flags);
 		timer->ping = 1;
-		dahdi_poll_wakeup(&timer->sel);
-		spin_unlock_irqrestore(&zaptimerlock, flags);
+		wake_up_interruptible(&timer->sel);
+#if defined(__FreeBSD__)
+		selwakeup(&timer->selinfo);
+#endif
+		spin_unlock_irqrestore(&dahdi_timer_lock, flags);
 		break;
 	case DAHDI_TIMERPONG:
-		spin_lock_irqsave(&zaptimerlock, flags);
+		spin_lock_irqsave(&dahdi_timer_lock, flags);
 		timer->ping = 0;
-		spin_unlock_irqrestore(&zaptimerlock, flags);
+		spin_unlock_irqrestore(&dahdi_timer_lock, flags);
 		break;
 	default:
 		return -ENOTTY;
@@ -3985,13 +4047,13 @@ static int dahdi_timer_ioctl(struct file *file, unsigned int cmd, unsigned long 
 	return 0;
 }
 
-static int dahdi_ioctl_getgains(struct file *file,
-				unsigned int cmd, unsigned long data, int unit)
+static int dahdi_ioctl_getgains(struct file *file, unsigned long data)
 {
 	int res = 0;
 	struct dahdi_gains *gain;
-	int i, j;
+	int j;
 	void __user * const user_data = (void __user *)data;
+	struct dahdi_chan *chan;
 
 	gain = kzalloc(sizeof(*gain), GFP_KERNEL);
 	if (!gain)
@@ -4001,25 +4063,21 @@ static int dahdi_ioctl_getgains(struct file *file,
 		res = -EFAULT;
 		goto cleanup;
 	}
-	i = gain->chan;  /* get channel no */
-	   /* if zero, use current channel no */
-	if (!i)
-		i = unit;
-
-	  /* make sure channel number makes sense */
-	if ((i < 0) || (i > DAHDI_MAX_CHANNELS) || !chans[i]) {
+	chan = (!gain->chan) ? chan_from_file(file) :
+			       chan_from_num(gain->chan);
+	if (!chan) {
 		res = -EINVAL;
 		goto cleanup;
 	}
 
-	if (!(chans[i]->flags & DAHDI_FLAG_AUDIO)) {
+	if (!(chan->flags & DAHDI_FLAG_AUDIO)) {
 		res = -EINVAL;
 		goto cleanup;
 	}
-	gain->chan = i; /* put the span # in here */
+	gain->chan = chan->channo;
 	for (j = 0; j < 256; ++j)  {
-		gain->txgain[j] = chans[i]->txgain[j];
-		gain->rxgain[j] = chans[i]->rxgain[j];
+		gain->txgain[j] = chan->txgain[j];
+		gain->rxgain[j] = chan->rxgain[j];
 	}
 	if (copy_to_user(user_data, gain, sizeof(*gain))) {
 		res = -EFAULT;
@@ -4031,16 +4089,16 @@ cleanup:
 	return res;
 }
 
-static int dahdi_ioctl_setgains(struct file *file,
-				unsigned int cmd, unsigned long data, int unit)
+static int dahdi_ioctl_setgains(struct file *file, unsigned long data)
 {
 	int res = 0;
 	struct dahdi_gains *gain;
 	unsigned char *txgain, *rxgain;
-	int i, j;
+	int j;
 	unsigned long flags;
 	const int GAIN_TABLE_SIZE = sizeof(defgain);
 	void __user * const user_data = (void __user *)data;
+	struct dahdi_chan *chan;
 
 	gain = kzalloc(sizeof(*gain), GFP_KERNEL);
 	if (!gain)
@@ -4050,16 +4108,14 @@ static int dahdi_ioctl_setgains(struct file *file,
 		res = -EFAULT;
 		goto cleanup;
 	}
-	i = gain->chan;  /* get channel no */
-	   /* if zero, use current channel no */
-	if (!i)
-		i = unit;
-	  /* make sure channel number makes sense */
-	if ((i < 0) || (i > DAHDI_MAX_CHANNELS) || !chans[i]) {
+
+	chan = (!gain->chan) ? chan_from_file(file) :
+			       chan_from_num(gain->chan);
+	if (!chan) {
 		res = -EINVAL;
 		goto cleanup;
 	}
-	if (!(chans[i]->flags & DAHDI_FLAG_AUDIO)) {
+	if (!(chan->flags & DAHDI_FLAG_AUDIO)) {
 		res = -EINVAL;
 		goto cleanup;
 	}
@@ -4070,7 +4126,7 @@ static int dahdi_ioctl_setgains(struct file *file,
 		goto cleanup;
 	}
 
-	gain->chan = i; /* put the span # in here */
+	gain->chan = chan->channo;
 	txgain = rxgain + GAIN_TABLE_SIZE;
 
 	for (j = 0; j < GAIN_TABLE_SIZE; ++j) {
@@ -4081,22 +4137,20 @@ static int dahdi_ioctl_setgains(struct file *file,
 	if (!memcmp(rxgain, defgain, GAIN_TABLE_SIZE) &&
 	    !memcmp(txgain, defgain, GAIN_TABLE_SIZE)) {
 		kfree(rxgain);
-		spin_lock_irqsave(&chans[i]->lock, flags);
-		if (chans[i]->gainalloc)
-			kfree(chans[i]->rxgain);
-		chans[i]->gainalloc = 0;
-		chans[i]->rxgain = defgain;
-		chans[i]->txgain = defgain;
-		spin_unlock_irqrestore(&chans[i]->lock, flags);
+		spin_lock_irqsave(&chan->lock, flags);
+		if (is_gain_allocated(chan))
+			kfree(chan->rxgain);
+		chan->rxgain = defgain;
+		chan->txgain = defgain;
+		spin_unlock_irqrestore(&chan->lock, flags);
 	} else {
 		/* This is a custom gain setting */
-		spin_lock_irqsave(&chans[i]->lock, flags);
-		if (chans[i]->gainalloc)
-			kfree(chans[i]->rxgain);
-		chans[i]->gainalloc = 1;
-		chans[i]->rxgain = rxgain;
-		chans[i]->txgain = txgain;
-		spin_unlock_irqrestore(&chans[i]->lock, flags);
+		spin_lock_irqsave(&chan->lock, flags);
+		if (is_gain_allocated(chan))
+			kfree(chan->rxgain);
+		chan->rxgain = rxgain;
+		chan->txgain = txgain;
+		spin_unlock_irqrestore(&chan->lock, flags);
 	}
 
 	if (copy_to_user(user_data, gain, sizeof(*gain))) {
@@ -4109,337 +4163,427 @@ cleanup:
 	return res;
 }
 
-static int dahdi_common_ioctl(struct file *file, unsigned int cmd, unsigned long data, int unit)
+static int dahdi_ioctl_chandiag(struct file *file, unsigned long data)
 {
-	union {
-		struct dahdi_spaninfo_v1 spaninfo_v1;
-		struct dahdi_spaninfo spaninfo;
-		struct dahdi_params param;
-	} stack;
-
-	struct dahdi_chan *chan;
 	unsigned long flags;
-	int i,j;
-	int return_master = 0;
-	size_t size_to_copy;
-	void __user * const user_data = (void __user *)data;
+	int channo;
+	/* there really is no need to initialize this structure because when it is used it has
+	 * already been completely overwritten, but apparently the compiler cannot figure that
+	 * out and warns about uninitialized usage... so initialize it.
+	 */
+	struct dahdi_echocan_state ec_state = { .ops = NULL, };
+	struct dahdi_chan *chan;
+	struct dahdi_chan *temp;
 
-	switch(cmd) {
+	/* get channel number from user */
+	get_user(channo, (int __user *)data);
+
+	chan = chan_from_num(channo);
+	if (!chan)
+		return -EINVAL;
+
+	temp = kmalloc(sizeof(*chan), GFP_KERNEL);
+	if (!temp)
+		return -ENOMEM;
+
+	spin_lock_irqsave(&chan->lock, flags);
+	*temp = *chan;
+	if (temp->ec_state)
+		ec_state = *temp->ec_state;
+	if (temp->curzone)
+		tone_zone_get(temp->curzone);
+	spin_unlock_irqrestore(&chan->lock, flags);
+
+	module_printk(KERN_INFO, "Dump of DAHDI Channel %d (%s,%d,%d):\n\n",
+		      channo, temp->name, temp->channo, temp->chanpos);
+	module_printk(KERN_INFO, "flags: %x hex, writechunk: %p, readchunk: %p\n",
+		      (unsigned int) temp->flags, temp->writechunk, temp->readchunk);
+	module_printk(KERN_INFO, "rxgain: %p, txgain: %p, gainalloc: %d\n",
+		      temp->rxgain, temp->txgain, is_gain_allocated(temp));
+	module_printk(KERN_INFO, "span: %p, sig: %x hex, sigcap: %x hex\n",
+		      temp->span, temp->sig, temp->sigcap);
+	module_printk(KERN_INFO, "inreadbuf: %d, outreadbuf: %d, inwritebuf: %d, outwritebuf: %d\n",
+		      temp->inreadbuf, temp->outreadbuf, temp->inwritebuf, temp->outwritebuf);
+	module_printk(KERN_INFO, "blocksize: %d, numbufs: %d, txbufpolicy: %d, txbufpolicy: %d\n",
+		      temp->blocksize, temp->numbufs, temp->txbufpolicy, temp->rxbufpolicy);
+	module_printk(KERN_INFO, "txdisable: %d, rxdisable: %d, iomask: %d\n",
+		      temp->txdisable, temp->rxdisable, temp->iomask);
+	module_printk(KERN_INFO, "curzone: %p, tonezone: %d, curtone: %p, tonep: %d\n",
+		      temp->curzone,
+		      ((temp->curzone) ? temp->curzone->num : -1),
+		      temp->curtone, temp->tonep);
+	module_printk(KERN_INFO, "digitmode: %d, txdialbuf: %s, dialing: %d, aftdialtimer: %d, cadpos. %d\n",
+		      temp->digitmode, temp->txdialbuf, temp->dialing,
+		      temp->afterdialingtimer, temp->cadencepos);
+	module_printk(KERN_INFO, "confna: %d, confn: %d, confmode: %d, confmute: %d\n",
+		      temp->confna, temp->_confn, temp->confmode, temp->confmute);
+	module_printk(KERN_INFO, "ec: %p, deflaw: %d, xlaw: %p\n",
+		      temp->ec_state, temp->deflaw, temp->xlaw);
+	if (temp->ec_state) {
+		module_printk(KERN_INFO, "echostate: %02x, echotimer: %d, echolastupdate: %d\n",
+			      ec_state.status.mode, ec_state.status.pretrain_timer, ec_state.status.last_train_tap);
+	}
+	module_printk(KERN_INFO, "itimer: %d, otimer: %d, ringdebtimer: %d\n\n",
+		      temp->itimer, temp->otimer, temp->ringdebtimer);
+
+	if (temp->curzone)
+		tone_zone_put(temp->curzone);
+	kfree(temp);
+	return 0;
+}
+
+/**
+ * dahdi_ioctl_getparams() - Get channel parameters.
+ *
+ */
+static int dahdi_ioctl_getparams(struct file *file, unsigned long data)
+{
+	size_t size_to_copy;
+	struct dahdi_params param;
+	bool return_master = false;
+	struct dahdi_chan *chan;
+	int j;
+	size_to_copy = sizeof(struct dahdi_params);
+	if (copy_from_user(&param, (void __user *)data, size_to_copy))
+		return -EFAULT;
+
+	/* check to see if the caller wants to receive our master channel
+	 * number */
+	if (param.channo & DAHDI_GET_PARAMS_RETURN_MASTER) {
+		return_master = true;
+		param.channo &= ~DAHDI_GET_PARAMS_RETURN_MASTER;
+	}
+
+	/* Pick the right channo's */
+	chan = chan_from_file(file);
+	if (!chan)
+		chan = chan_from_num(param.channo);
+
+	if (!chan)
+		return -EINVAL;
+
+	/* point to relevant structure */
+	param.sigtype = chan->sig;  /* get signalling type */
+	/* return non-zero if rx not in idle state */
+	if (chan->span) {
+		j = dahdi_q_sig(chan);
+		if (j >= 0) { /* if returned with success */
+			param.rxisoffhook = ((chan->rxsig & (j >> 8)) !=
+							(j & 0xff));
+		} else {
+			const int sig = chan->rxhooksig;
+			param.rxisoffhook = ((sig != DAHDI_RXSIG_ONHOOK) &&
+				(sig != DAHDI_RXSIG_INITIAL));
+		}
+	} else if ((chan->txstate == DAHDI_TXSTATE_KEWL) ||
+		   (chan->txstate == DAHDI_TXSTATE_AFTERKEWL)) {
+		param.rxisoffhook = 1;
+	} else {
+		param.rxisoffhook = 0;
+	}
+
+	if (chan->span &&
+	    chan->span->ops->rbsbits && !(chan->sig & DAHDI_SIG_CLEAR)) {
+		param.rxbits = chan->rxsig;
+		param.txbits = chan->txsig;
+		param.idlebits = chan->idlebits;
+	} else {
+		param.rxbits = -1;
+		param.txbits = -1;
+		param.idlebits = 0;
+	}
+	if (chan->span &&
+	    (chan->span->ops->rbsbits || chan->span->ops->hooksig) &&
+	    !(chan->sig & DAHDI_SIG_CLEAR)) {
+		param.rxhooksig = chan->rxhooksig;
+		param.txhooksig = chan->txhooksig;
+	} else {
+		param.rxhooksig = -1;
+		param.txhooksig = -1;
+	}
+	param.prewinktime = chan->prewinktime;
+	param.preflashtime = chan->preflashtime;
+	param.winktime = chan->winktime;
+	param.flashtime = chan->flashtime;
+	param.starttime = chan->starttime;
+	param.rxwinktime = chan->rxwinktime;
+	param.rxflashtime = chan->rxflashtime;
+	param.debouncetime = chan->debouncetime;
+	param.channo = chan->channo;
+	param.chan_alarms = chan->chan_alarms;
+
+	/* if requested, put the master channel number in the top 16 bits of
+	 * the result */
+	if (return_master)
+		param.channo |= chan->master->channo << 16;
+
+	param.pulsemaketime = chan->pulsemaketime;
+	param.pulsebreaktime = chan->pulsebreaktime;
+	param.pulseaftertime = chan->pulseaftertime;
+	param.spanno = (chan->span) ? chan->span->spanno : 0;
+	strlcpy(param.name, chan->name, sizeof(param.name));
+	param.chanpos = chan->chanpos;
+	param.sigcap = chan->sigcap;
+	/* Return current law */
+	if (chan->xlaw == __dahdi_alaw)
+		param.curlaw = DAHDI_LAW_ALAW;
+	else
+		param.curlaw = DAHDI_LAW_MULAW;
+
+	if (copy_to_user((void __user *)data, &param, size_to_copy))
+		return -EFAULT;
+
+	return 0;
+}
+
+/**
+ * dahdi_ioctl_setparams() - Set channel parameters.
+ *
+ */
+static int dahdi_ioctl_setparams(struct file *file, unsigned long data)
+{
+	struct dahdi_params param;
+	struct dahdi_chan *chan;
+
+	if (copy_from_user(&param, (void __user *)data, sizeof(param)))
+		return -EFAULT;
+
+	param.chan_alarms = 0; /* be explicit about the above */
+
+	/* Pick the right channo's */
+	chan = chan_from_file(file);
+	if (!chan)
+		chan = chan_from_num(param.channo);
+
+	if (!chan)
+		return -EINVAL;
+
+	/* point to relevant structure */
+	/* NOTE: sigtype is *not* included in this */
+	  /* get timing paramters */
+	chan->prewinktime = param.prewinktime;
+	chan->preflashtime = param.preflashtime;
+	chan->winktime = param.winktime;
+	chan->flashtime = param.flashtime;
+	chan->starttime = param.starttime;
+	/* Update ringtime if not using a tone zone */
+	if (!chan->curzone)
+		chan->ringcadence[0] = chan->starttime;
+	chan->rxwinktime = param.rxwinktime;
+	chan->rxflashtime = param.rxflashtime;
+	chan->debouncetime = param.debouncetime;
+	chan->pulsemaketime = param.pulsemaketime;
+	chan->pulsebreaktime = param.pulsebreaktime;
+	chan->pulseaftertime = param.pulseaftertime;
+	return 0;
+}
+
+/**
+ * dahdi_ioctl_spanstat() - Return statistics for a span.
+ *
+ */
+static int dahdi_ioctl_spanstat(struct file *file, unsigned long data)
+{
+	int ret = 0;
+	struct dahdi_spaninfo spaninfo;
+	struct dahdi_span *s;
+	int j;
+	size_t size_to_copy;
+	bool via_chan = false;
+
+	size_to_copy = sizeof(struct dahdi_spaninfo);
+	if (copy_from_user(&spaninfo, (void __user *)data, size_to_copy))
+		return -EFAULT;
+	if (!spaninfo.spanno) {
+		struct dahdi_chan *const chan = chan_from_file(file);
+		if (!chan)
+			return -EINVAL;
+
+		s = chan->span;
+		via_chan = true;
+	} else {
+		s = span_find_and_get(spaninfo.spanno);
+	}
+	if (!s)
+		return -EINVAL;
+
+	spaninfo.spanno = s->spanno; /* put the span # in here */
+	spaninfo.totalspans = span_count();
+	strlcpy(spaninfo.desc, s->desc, sizeof(spaninfo.desc));
+	strlcpy(spaninfo.name, s->name, sizeof(spaninfo.name));
+	spaninfo.alarms = s->alarms;		/* get alarm status */
+	spaninfo.rxlevel = s->rxlevel;	/* get rx level */
+	spaninfo.txlevel = s->txlevel;	/* get tx level */
+
+	spaninfo.bpvcount = s->count.bpv;
+	spaninfo.crc4count = s->count.crc4;
+	spaninfo.ebitcount = s->count.ebit;
+	spaninfo.fascount = s->count.fas;
+	spaninfo.fecount = s->count.fe;
+	spaninfo.cvcount = s->count.cv;
+	spaninfo.becount = s->count.be;
+	spaninfo.prbs = s->count.prbs;
+	spaninfo.errsec = s->count.errsec;
+
+	spaninfo.irqmisses = s->parent->irqmisses;	/* get IRQ miss count */
+	spaninfo.syncsrc = s->syncsrc;	/* get active sync source */
+	spaninfo.totalchans = s->channels;
+	spaninfo.numchans = 0;
+	for (j = 0; j < s->channels; j++) {
+		if (s->chans[j]->sig)
+			spaninfo.numchans++;
+	}
+	spaninfo.lbo = s->lbo;
+	spaninfo.lineconfig = s->lineconfig;
+	spaninfo.irq = 0;
+	spaninfo.linecompat = s->linecompat;
+	strlcpy(spaninfo.lboname, dahdi_lboname(s->lbo),
+			  sizeof(spaninfo.lboname));
+	if (s->parent->manufacturer) {
+		strlcpy(spaninfo.manufacturer, s->parent->manufacturer,
+			sizeof(spaninfo.manufacturer));
+	}
+	if (s->parent->devicetype) {
+		strlcpy(spaninfo.devicetype, s->parent->devicetype,
+			sizeof(spaninfo.devicetype));
+	}
+	if (s->parent->location) {
+		strlcpy(spaninfo.location, s->parent->location,
+			sizeof(spaninfo.location));
+	}
+	if (s->spantype) {
+		strlcpy(spaninfo.spantype, s->spantype,
+				  sizeof(spaninfo.spantype));
+	}
+
+	if (copy_to_user((void __user *)data, &spaninfo, size_to_copy))
+		ret = -EFAULT;
+
+	if (!via_chan)
+		put_span(s);
+
+	return ret;
+}
+
+/**
+ * dahdi_ioctl_spanstat_v1() - Return statistics for a span in a legacy format.
+ *
+ */
+static int dahdi_ioctl_spanstat_v1(struct file *file, unsigned long data)
+{
+	int ret = 0;
+	struct dahdi_spaninfo_v1 spaninfo_v1;
+	struct dahdi_span *s;
+	int j;
+	bool via_chan = false;
+
+	if (copy_from_user(&spaninfo_v1, (void __user *)data,
+			   sizeof(spaninfo_v1))) {
+		return -EFAULT;
+	}
+
+	if (!spaninfo_v1.spanno) {
+		struct dahdi_chan *const chan = chan_from_file(file);
+		if (!chan)
+			return -EINVAL;
+
+		s = chan->span;
+		via_chan = true;
+	} else {
+		s = span_find_and_get(spaninfo_v1.spanno);
+	}
+
+	if (!s)
+		return -EINVAL;
+
+	spaninfo_v1.spanno = s->spanno; /* put the span # in here */
+	spaninfo_v1.totalspans = 0;
+	spaninfo_v1.totalspans = span_count();
+	strlcpy(spaninfo_v1.desc,
+			  s->desc,
+			  sizeof(spaninfo_v1.desc));
+	strlcpy(spaninfo_v1.name,
+			  s->name,
+			  sizeof(spaninfo_v1.name));
+	spaninfo_v1.alarms = s->alarms;
+	spaninfo_v1.bpvcount = s->count.bpv;
+	spaninfo_v1.rxlevel = s->rxlevel;
+	spaninfo_v1.txlevel = s->txlevel;
+	spaninfo_v1.crc4count = s->count.crc4;
+	spaninfo_v1.ebitcount = s->count.ebit;
+	spaninfo_v1.fascount = s->count.fas;
+	spaninfo_v1.irqmisses = s->parent->irqmisses;
+	spaninfo_v1.syncsrc = s->syncsrc;
+	spaninfo_v1.totalchans = s->channels;
+	spaninfo_v1.numchans = 0;
+	for (j = 0; j < s->channels; j++) {
+		if (s->chans[j]->sig)
+			spaninfo_v1.numchans++;
+	}
+	spaninfo_v1.lbo = s->lbo;
+	spaninfo_v1.lineconfig = s->lineconfig;
+	spaninfo_v1.irq = 0;
+	spaninfo_v1.linecompat = s->linecompat;
+	strlcpy(spaninfo_v1.lboname,
+			  dahdi_lboname(s->lbo),
+			  sizeof(spaninfo_v1.lboname));
+
+	if (s->parent->manufacturer) {
+		strlcpy(spaninfo_v1.manufacturer, s->parent->manufacturer,
+			sizeof(spaninfo_v1.manufacturer));
+	}
+
+	if (s->parent->devicetype) {
+		strlcpy(spaninfo_v1.devicetype, s->parent->devicetype,
+			sizeof(spaninfo_v1.devicetype));
+	}
+
+	strlcpy(spaninfo_v1.location, s->parent->location,
+		sizeof(spaninfo_v1.location));
+
+	if (s->spantype) {
+		strlcpy(spaninfo_v1.spantype,
+				  s->spantype,
+				  sizeof(spaninfo_v1.spantype));
+	}
+
+	if (copy_to_user((void __user *)data, &spaninfo_v1,
+			 sizeof(spaninfo_v1))) {
+		ret = -EFAULT;
+	}
+	if (!via_chan)
+		put_span(s);
+	return ret;
+}
+
+static int dahdi_common_ioctl(struct file *file, unsigned int cmd,
+			      unsigned long data)
+{
+	switch (cmd) {
 		/* get channel parameters */
 	case DAHDI_GET_PARAMS_V1: /* Intentional drop through. */
 	case DAHDI_GET_PARAMS:
-		size_to_copy = sizeof(struct dahdi_params);
-		if (copy_from_user(&stack.param, user_data, size_to_copy))
-			return -EFAULT;
+		return dahdi_ioctl_getparams(file, data);
 
-		/* check to see if the caller wants to receive our master channel number */
-		if (stack.param.channo & DAHDI_GET_PARAMS_RETURN_MASTER) {
-			return_master = 1;
-			stack.param.channo &= ~DAHDI_GET_PARAMS_RETURN_MASTER;
-		}
-
-		/* Pick the right channo's */
-		if (!stack.param.channo || unit) {
-			stack.param.channo = unit;
-		}
-		/* Check validity of channel */
-		VALID_CHANNEL(stack.param.channo);
-		chan = chans[stack.param.channo];
-
-		/* point to relevant structure */
-		stack.param.sigtype = chan->sig;  /* get signalling type */
-		/* return non-zero if rx not in idle state */
-		if (chan->span) {
-			j = dahdi_q_sig(chan);
-			if (j >= 0) { /* if returned with success */
-				stack.param.rxisoffhook = ((chan->rxsig & (j >> 8)) != (j & 0xff));
-			} else {
-				stack.param.rxisoffhook = ((chan->rxhooksig != DAHDI_RXSIG_ONHOOK) &&
-					(chan->rxhooksig != DAHDI_RXSIG_INITIAL));
-			}
-		} else if ((chan->txstate == DAHDI_TXSTATE_KEWL) || (chan->txstate == DAHDI_TXSTATE_AFTERKEWL))
-			stack.param.rxisoffhook = 1;
-		else
-			stack.param.rxisoffhook = 0;
-		if (chan->span && chan->span->ops->rbsbits && !(chan->sig & DAHDI_SIG_CLEAR)) {
-			stack.param.rxbits = chan->rxsig;
-			stack.param.txbits = chan->txsig;
-			stack.param.idlebits = chan->idlebits;
-		} else {
-			stack.param.rxbits = -1;
-			stack.param.txbits = -1;
-			stack.param.idlebits = 0;
-		}
-		if (chan->span && (chan->span->ops->rbsbits || chan->span->ops->hooksig) &&
-			!(chan->sig & DAHDI_SIG_CLEAR)) {
-			stack.param.rxhooksig = chan->rxhooksig;
-			stack.param.txhooksig = chan->txhooksig;
-		} else {
-			stack.param.rxhooksig = -1;
-			stack.param.txhooksig = -1;
-		}
-		stack.param.prewinktime = chan->prewinktime;
-		stack.param.preflashtime = chan->preflashtime;
-		stack.param.winktime = chan->winktime;
-		stack.param.flashtime = chan->flashtime;
-		stack.param.starttime = chan->starttime;
-		stack.param.rxwinktime = chan->rxwinktime;
-		stack.param.rxflashtime = chan->rxflashtime;
-		stack.param.debouncetime = chan->debouncetime;
-		stack.param.channo = chan->channo;
-		stack.param.chan_alarms = chan->chan_alarms;
-
-		/* if requested, put the master channel number in the top 16 bits of the result */
-		if (return_master)
-			stack.param.channo |= chan->master->channo << 16;
-
-		stack.param.pulsemaketime = chan->pulsemaketime;
-		stack.param.pulsebreaktime = chan->pulsebreaktime;
-		stack.param.pulseaftertime = chan->pulseaftertime;
-		if (chan->span) stack.param.spanno = chan->span->spanno;
-			else stack.param.spanno = 0;
-		dahdi_copy_string(stack.param.name, chan->name, sizeof(stack.param.name));
-		stack.param.chanpos = chan->chanpos;
-		stack.param.sigcap = chan->sigcap;
-		/* Return current law */
-		if (chan->xlaw == __dahdi_alaw)
-			stack.param.curlaw = DAHDI_LAW_ALAW;
-		else
-			stack.param.curlaw = DAHDI_LAW_MULAW;
-
-		if (copy_to_user(user_data, &stack.param, size_to_copy))
-			return -EFAULT;
-
-		break;
-		/* set channel parameters */
 	case DAHDI_SET_PARAMS:
-		if (copy_from_user(&stack.param, user_data,
-				   sizeof(struct dahdi_params)))
-			return -EFAULT;
+		return dahdi_ioctl_setparams(file, data);
 
-		stack.param.chan_alarms = 0; /* be explicit about the above */
-
-		/* Pick the right channo's */
-		if (!stack.param.channo || unit) {
-			stack.param.channo = unit;
-		}
-		/* Check validity of channel */
-		VALID_CHANNEL(stack.param.channo);
-		chan = chans[stack.param.channo];
-		  /* point to relevant structure */
-		/* NOTE: sigtype is *not* included in this */
-		  /* get timing stack.paramters */
-		chan->prewinktime = stack.param.prewinktime;
-		chan->preflashtime = stack.param.preflashtime;
-		chan->winktime = stack.param.winktime;
-		chan->flashtime = stack.param.flashtime;
-		chan->starttime = stack.param.starttime;
-		/* Update ringtime if not using a tone zone */
-		if (!chan->curzone)
-			chan->ringcadence[0] = chan->starttime;
-		chan->rxwinktime = stack.param.rxwinktime;
-		chan->rxflashtime = stack.param.rxflashtime;
-		chan->debouncetime = stack.param.debouncetime;
-		chan->pulsemaketime = stack.param.pulsemaketime;
-		chan->pulsebreaktime = stack.param.pulsebreaktime;
-		chan->pulseaftertime = stack.param.pulseaftertime;
-		break;
 	case DAHDI_GETGAINS_V1: /* Intentional drop through. */
 	case DAHDI_GETGAINS:  /* get gain stuff */
-		return dahdi_ioctl_getgains(file, cmd, data, unit);
+		return dahdi_ioctl_getgains(file, data);
+
 	case DAHDI_SETGAINS:  /* set gain stuff */
-		return dahdi_ioctl_setgains(file, cmd, data, unit);
+		return dahdi_ioctl_setgains(file, data);
+
 	case DAHDI_SPANSTAT:
-		size_to_copy = sizeof(struct dahdi_spaninfo);
-		if (copy_from_user(&stack.spaninfo, user_data, size_to_copy))
-			return -EFAULT;
-		i = stack.spaninfo.spanno; /* get specified span number */
-		if ((i < 0) || (i >= maxspans)) return(-EINVAL);  /* if bad span no */
-		if (i == 0) {
-			/* if to figure it out for this chan */
-			if (!chans[unit])
-				return -EINVAL;
-			i = chans[unit]->span->spanno;
-		}
-		if (!spans[i])
-			return -EINVAL;
-		stack.spaninfo.spanno = i; /* put the span # in here */
-		stack.spaninfo.totalspans = 0;
-		if (maxspans) stack.spaninfo.totalspans = maxspans - 1; /* put total number of spans here */
-		dahdi_copy_string(stack.spaninfo.desc, spans[i]->desc, sizeof(stack.spaninfo.desc));
-		dahdi_copy_string(stack.spaninfo.name, spans[i]->name, sizeof(stack.spaninfo.name));
-		stack.spaninfo.alarms = spans[i]->alarms;		/* get alarm status */
-		stack.spaninfo.rxlevel = spans[i]->rxlevel;	/* get rx level */
-		stack.spaninfo.txlevel = spans[i]->txlevel;	/* get tx level */
+		return dahdi_ioctl_spanstat(file, data);
 
-		stack.spaninfo.bpvcount = spans[i]->count.bpv;
-		stack.spaninfo.crc4count = spans[i]->count.crc4;
-		stack.spaninfo.ebitcount = spans[i]->count.ebit;
-		stack.spaninfo.fascount = spans[i]->count.fas;
-		stack.spaninfo.fecount = spans[i]->count.fe;
-		stack.spaninfo.cvcount = spans[i]->count.cv;
-		stack.spaninfo.becount = spans[i]->count.be;
-		stack.spaninfo.prbs = spans[i]->count.prbs;
-		stack.spaninfo.errsec = spans[i]->count.errsec;
-
-		stack.spaninfo.irqmisses = spans[i]->irqmisses;	/* get IRQ miss count */
-		stack.spaninfo.syncsrc = spans[i]->syncsrc;	/* get active sync source */
-		stack.spaninfo.totalchans = spans[i]->channels;
-		stack.spaninfo.numchans = 0;
-		for (j = 0; j < spans[i]->channels; j++) {
-			if (spans[i]->chans[j]->sig)
-				stack.spaninfo.numchans++;
-		}
-		stack.spaninfo.lbo = spans[i]->lbo;
-		stack.spaninfo.lineconfig = spans[i]->lineconfig;
-		stack.spaninfo.irq = spans[i]->irq;
-		stack.spaninfo.linecompat = spans[i]->linecompat;
-		dahdi_copy_string(stack.spaninfo.lboname, dahdi_lboname(spans[i]->lbo), sizeof(stack.spaninfo.lboname));
-		if (spans[i]->manufacturer)
-			dahdi_copy_string(stack.spaninfo.manufacturer, spans[i]->manufacturer,
-				sizeof(stack.spaninfo.manufacturer));
-		if (spans[i]->devicetype)
-			dahdi_copy_string(stack.spaninfo.devicetype, spans[i]->devicetype, sizeof(stack.spaninfo.devicetype));
-		dahdi_copy_string(stack.spaninfo.location, spans[i]->location, sizeof(stack.spaninfo.location));
-		if (spans[i]->spantype)
-			dahdi_copy_string(stack.spaninfo.spantype, spans[i]->spantype, sizeof(stack.spaninfo.spantype));
-
-		if (copy_to_user(user_data, &stack.spaninfo, size_to_copy))
-			return -EFAULT;
-		break;
 	case DAHDI_SPANSTAT_V1:
-		size_to_copy = sizeof(struct dahdi_spaninfo_v1);
-		if (copy_from_user(&stack.spaninfo_v1,
-				   (__user struct dahdi_spaninfo_v1 *) data,
-				   size_to_copy))
-			return -EFAULT;
-		i = stack.spaninfo_v1.spanno; /* get specified span number */
-		if ((i < 0) || (i >= maxspans))
-			return -EINVAL;  /* if bad span no */
-		if (i == 0) {
-			/* if to figure it out for this chan */
-			if (!chans[unit])
-				return -EINVAL;
-			i = chans[unit]->span->spanno;
-		}
-		if (!spans[i])
-			return -EINVAL;
-		stack.spaninfo_v1.spanno = i; /* put the span # in here */
-		stack.spaninfo_v1.totalspans = 0;
-		if (maxspans) /* put total number of spans here */
-			stack.spaninfo_v1.totalspans = maxspans - 1;
-		dahdi_copy_string(stack.spaninfo_v1.desc,
-				  spans[i]->desc,
-				  sizeof(stack.spaninfo_v1.desc));
-		dahdi_copy_string(stack.spaninfo_v1.name,
-				  spans[i]->name,
-				  sizeof(stack.spaninfo_v1.name));
-		stack.spaninfo_v1.alarms = spans[i]->alarms;
-		stack.spaninfo_v1.bpvcount = spans[i]->count.bpv;
-		stack.spaninfo_v1.rxlevel = spans[i]->rxlevel;
-		stack.spaninfo_v1.txlevel = spans[i]->txlevel;
-		stack.spaninfo_v1.crc4count = spans[i]->count.crc4;
-		stack.spaninfo_v1.ebitcount = spans[i]->count.ebit;
-		stack.spaninfo_v1.fascount = spans[i]->count.fas;
-		stack.spaninfo_v1.irqmisses = spans[i]->irqmisses;
-		stack.spaninfo_v1.syncsrc = spans[i]->syncsrc;
-		stack.spaninfo_v1.totalchans = spans[i]->channels;
-		stack.spaninfo_v1.numchans = 0;
-		for (j = 0; j < spans[i]->channels; j++) {
-			if (spans[i]->chans[j]->sig)
-				stack.spaninfo_v1.numchans++;
-		}
-		stack.spaninfo_v1.lbo = spans[i]->lbo;
-		stack.spaninfo_v1.lineconfig = spans[i]->lineconfig;
-		stack.spaninfo_v1.irq = spans[i]->irq;
-		stack.spaninfo_v1.linecompat = spans[i]->linecompat;
-		dahdi_copy_string(stack.spaninfo_v1.lboname,
-				  dahdi_lboname(spans[i]->lbo),
-				  sizeof(stack.spaninfo_v1.lboname));
-		if (spans[i]->manufacturer)
-			dahdi_copy_string(stack.spaninfo_v1.manufacturer,
-				spans[i]->manufacturer,
-				sizeof(stack.spaninfo_v1.manufacturer));
-		if (spans[i]->devicetype)
-			dahdi_copy_string(stack.spaninfo_v1.devicetype,
-					  spans[i]->devicetype,
-					  sizeof(stack.spaninfo_v1.devicetype));
-		dahdi_copy_string(stack.spaninfo_v1.location,
-				  spans[i]->location,
-				  sizeof(stack.spaninfo_v1.location));
-		if (spans[i]->spantype)
-			dahdi_copy_string(stack.spaninfo_v1.spantype,
-					  spans[i]->spantype,
-					  sizeof(stack.spaninfo_v1.spantype));
+		return dahdi_ioctl_spanstat_v1(file, data);
 
-		if (copy_to_user((__user struct dahdi_spaninfo_v1 *) data,
-				 &stack.spaninfo_v1, size_to_copy))
-			return -EFAULT;
-		break;
 	case DAHDI_CHANDIAG_V1: /* Intentional drop through. */
 	case DAHDI_CHANDIAG:
-	{
-		/* there really is no need to initialize this structure because when it is used it has
-		 * already been completely overwritten, but apparently the compiler cannot figure that
-		 * out and warns about uninitialized usage... so initialize it.
-		 */
-		struct dahdi_echocan_state ec_state = { .ops = NULL, };
-
-		/* get channel number from user */
-		get_user(j, (int __user *)data);
-		/* make sure its a valid channel number */
-		if ((j < 1) || (j >= maxchans))
-			return -EINVAL;
-		/* if channel not mapped, not there */
-		if (!chans[j])
-			return -EINVAL;
-
-		chan = kmalloc(sizeof(*chan), GFP_KERNEL);
-		if (!chan)
-			return -ENOMEM;
-
-		/* lock channel */
-		spin_lock_irqsave(&chans[j]->lock, flags);
-		/* make static copy of channel */
-		*chan = *chans[j];
-		if (chan->ec_state) {
-			ec_state = *chan->ec_state;
-		}
-		/* release it. */
-		spin_unlock_irqrestore(&chans[j]->lock, flags);
-
-		module_printk(KERN_INFO, "Dump of DAHDI Channel %d (%s,%d,%d):\n\n",j,
-			      chan->name, chan->channo, chan->chanpos);
-		module_printk(KERN_INFO, "flags: %x hex, writechunk: %p, readchunk: %p\n",
-			      (unsigned int) chan->flags, chan->writechunk, chan->readchunk);
-		module_printk(KERN_INFO, "rxgain: %p, txgain: %p, gainalloc: %d\n",
-			      chan->rxgain, chan->txgain, chan->gainalloc);
-		module_printk(KERN_INFO, "span: %p, sig: %x hex, sigcap: %x hex\n",
-			      chan->span, chan->sig, chan->sigcap);
-		module_printk(KERN_INFO, "inreadbuf: %d, outreadbuf: %d, inwritebuf: %d, outwritebuf: %d\n",
-			      chan->inreadbuf, chan->outreadbuf, chan->inwritebuf, chan->outwritebuf);
-		module_printk(KERN_INFO, "blocksize: %d, numbufs: %d, txbufpolicy: %d, txbufpolicy: %d\n",
-			      chan->blocksize, chan->numbufs, chan->txbufpolicy, chan->rxbufpolicy);
-		module_printk(KERN_INFO, "txdisable: %d, rxdisable: %d, iomask: %d\n",
-			      chan->txdisable, chan->rxdisable, chan->iomask);
-		module_printk(KERN_INFO, "curzone: %p, tonezone: %d, curtone: %p, tonep: %d\n",
-			      chan->curzone, chan->tonezone, chan->curtone, chan->tonep);
-		module_printk(KERN_INFO, "digitmode: %d, txdialbuf: %s, dialing: %d, aftdialtimer: %d, cadpos. %d\n",
-			      chan->digitmode, chan->txdialbuf, chan->dialing,
-			      chan->afterdialingtimer, chan->cadencepos);
-		module_printk(KERN_INFO, "confna: %d, confn: %d, confmode: %d, confmute: %d\n",
-			      chan->confna, chan->_confn, chan->confmode, chan->confmute);
-		module_printk(KERN_INFO, "ec: %p, deflaw: %d, xlaw: %p\n",
-			      chan->ec_state, chan->deflaw, chan->xlaw);
-		if (chan->ec_state) {
-			module_printk(KERN_INFO, "echostate: %02x, echotimer: %d, echolastupdate: %d\n",
-				      ec_state.status.mode, ec_state.status.pretrain_timer, ec_state.status.last_train_tap);
-		}
-		module_printk(KERN_INFO, "itimer: %d, otimer: %d, ringdebtimer: %d\n\n",
-			      chan->itimer, chan->otimer, chan->ringdebtimer);
-		kfree(chan);
-		break;
-	}
+		return dahdi_ioctl_chandiag(file, data);
 	default:
 		return -ENOTTY;
 	}
@@ -4480,533 +4624,740 @@ static void recalc_slaves(struct dahdi_chan *chan)
 			module_printk(KERN_NOTICE, "Channel %s, slave to %s, last is %s, its next will be %d\n",
 				      chan->span->chans[x]->name, chan->name, last->name, x);
 #endif
-			last->nextslave = x;
-			last = chan->span->chans[x];
+			last->nextslave = chan->span->chans[x];
+			last = last->nextslave;
 		}
 	/* Terminate list */
-	last->nextslave = 0;
+	last->nextslave = NULL;
 #ifdef CONFIG_DAHDI_DEBUG
 	module_printk(KERN_NOTICE, "Done Recalculating slaves on %s (last is %s)\n", chan->name, last->name);
 #endif
 }
 
-static int dahdi_ctl_ioctl(struct file *file, unsigned int cmd, unsigned long data)
+#if defined(CONFIG_DAHDI_NET) && defined(HAVE_NET_DEVICE_OPS)
+static const struct net_device_ops dahdi_netdev_ops = {
+	.ndo_open       = dahdi_net_open,
+	.ndo_stop       = dahdi_net_stop,
+	.ndo_do_ioctl   = dahdi_net_ioctl,
+	.ndo_start_xmit = dahdi_xmit,
+};
+#endif
+
+static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 {
-	/* I/O CTL's for control interface */
-	int i,j;
-	int sigcap;
 	int res = 0;
-	int x,y;
+	int y;
+	struct dahdi_chanconfig ch;
 	struct dahdi_chan *newmaster;
+	struct dahdi_chan *chan;
+	struct dahdi_chan *dacs_chan = NULL;
 	unsigned long flags;
-	void __user * const user_data = (void __user *)data;
-	int rv;
-	switch(cmd) {
-	case DAHDI_INDIRECT:
-	{
-		struct dahdi_indirect_data ind;
+	int sigcap;
 
-		if (copy_from_user(&ind, user_data, sizeof(ind)))
-			return -EFAULT;
-		VALID_CHANNEL(ind.chan);
-		return dahdi_chan_ioctl(file, ind.op, (unsigned long) ind.data, ind.chan);
+	if (copy_from_user(&ch, (void __user *)data, sizeof(ch)))
+		return -EFAULT;
+
+	chan = chan_from_num(ch.chan);
+	if (!chan) {
+		printk(KERN_NOTICE "%s: No channel for number %d\n",
+				__func__, ch.chan);
+		return -EINVAL;
 	}
-	case DAHDI_SPANCONFIG:
-	{
-		struct dahdi_lineconfig lc;
 
-		if (copy_from_user(&lc, user_data, sizeof(lc)))
-			return -EFAULT;
-		VALID_SPAN(lc.span);
-		if ((lc.lineconfig & 0x1ff0 & spans[lc.span]->linecompat) !=
-		    (lc.lineconfig & 0x1ff0))
+	if (ch.sigtype == DAHDI_SIG_SLAVE) {
+		newmaster = chan_from_num(ch.master);
+		if (!newmaster) {
+			chan_notice(chan, "%s: slave channel without master.\n",
+					__func__);
 			return -EINVAL;
-		if (spans[lc.span]->ops->spanconfig) {
-			spans[lc.span]->lineconfig = lc.lineconfig;
-			spans[lc.span]->lbo = lc.lbo;
-			spans[lc.span]->txlevel = lc.lbo;
-			spans[lc.span]->rxlevel = 0;
-
-			return spans[lc.span]->ops->spanconfig(spans[lc.span], &lc);
 		}
-		return 0;
+		ch.sigtype = newmaster->sig;
+	} else if ((ch.sigtype & __DAHDI_SIG_DACS) == __DAHDI_SIG_DACS) {
+		newmaster = chan;
+		dacs_chan = chan_from_num(ch.idlebits);
+		if (!dacs_chan) {
+			chan_notice(chan, "%s: dacs channel not found: %d.\n",
+					__func__, ch.idlebits);
+			return -EINVAL;
+		}
+	} else {
+		newmaster = chan;
 	}
-	case DAHDI_STARTUP:
-		CHECK_VALID_SPAN(j);
-		if (spans[j]->flags & DAHDI_FLAG_RUNNING)
-			return 0;
-
-		if (spans[j]->ops->startup)
-			res = spans[j]->ops->startup(spans[j]);
-
-		if (!res) {
-			/* Mark as running and hangup any channels */
-			spans[j]->flags |= DAHDI_FLAG_RUNNING;
-			for (x=0;x<spans[j]->channels;x++) {
-				y = dahdi_q_sig(spans[j]->chans[x]) & 0xff;
-				if (y >= 0) spans[j]->chans[x]->rxsig = (unsigned char)y;
-				spin_lock_irqsave(&spans[j]->chans[x]->lock, flags);
-				dahdi_hangup(spans[j]->chans[x]);
-				spin_unlock_irqrestore(&spans[j]->chans[x]->lock, flags);
-				/*
-				 * Set the rxhooksig back to
-				 * DAHDI_RXSIG_INITIAL so that new events are
-				 * queued on the channel with the actual
-				 * received hook state.
-				 * 
-				 */
-				spans[j]->chans[x]->rxhooksig = DAHDI_RXSIG_INITIAL;
-			}
-		}
-		return 0;
-	case DAHDI_SHUTDOWN:
-		CHECK_VALID_SPAN(j);
-		if (spans[j]->ops->shutdown)
-			res =  spans[j]->ops->shutdown(spans[j]);
-		spans[j]->flags &= ~DAHDI_FLAG_RUNNING;
-		return 0;
-	case DAHDI_ATTACH_ECHOCAN:
-	{
-		struct dahdi_attach_echocan ae;
-		const struct dahdi_echocan_factory *new = NULL, *old;
-
-		if (copy_from_user(&ae, user_data, sizeof(ae)))
-			return -EFAULT;
-
-		VALID_CHANNEL(ae.chan);
-
-		ae.echocan[sizeof(ae.echocan) - 1] = 0;
-		if (ae.echocan[0]) {
-			if (!(new = find_echocan(ae.echocan))) {
-				return -EINVAL;
-			}
-		}
-
-		spin_lock_irqsave(&chans[ae.chan]->lock, flags);
-		old = chans[ae.chan]->ec_factory;
-		chans[ae.chan]->ec_factory = new;
-		spin_unlock_irqrestore(&chans[ae.chan]->lock, flags);
-
-		if (old) {
-			release_echocan(old);
-		}
-
-		break;
-	}
-	case DAHDI_CHANCONFIG:
-	{
-		struct dahdi_chanconfig ch;
-
-		if (copy_from_user(&ch, user_data, sizeof(ch)))
-			return -EFAULT;
-		VALID_CHANNEL(ch.chan);
-		if (ch.sigtype == DAHDI_SIG_SLAVE) {
-			/* We have to use the master's sigtype */
-			if ((ch.master < 1) || (ch.master >= DAHDI_MAX_CHANNELS))
-				return -EINVAL;
-			if (!chans[ch.master])
-				return -EINVAL;
-			ch.sigtype = chans[ch.master]->sig;
-			newmaster = chans[ch.master];
-		} else if ((ch.sigtype & __DAHDI_SIG_DACS) == __DAHDI_SIG_DACS) {
-			newmaster = chans[ch.chan];
-			if ((ch.idlebits < 1) || (ch.idlebits >= DAHDI_MAX_CHANNELS))
-				return -EINVAL;
-			if (!chans[ch.idlebits])
-				return -EINVAL;
-		} else {
-			newmaster = chans[ch.chan];
-		}
-		spin_lock_irqsave(&chans[ch.chan]->lock, flags);
+	spin_lock_irqsave(&chan->lock, flags);
 #ifdef CONFIG_DAHDI_NET
-		if (chans[ch.chan]->flags & DAHDI_FLAG_NETDEV) {
-			if (ztchan_to_dev(chans[ch.chan])->flags & IFF_UP) {
-				spin_unlock_irqrestore(&chans[ch.chan]->lock, flags);
-				module_printk(KERN_WARNING, "Can't switch HDLC net mode on channel %s, since current interface is up\n", chans[ch.chan]->name);
-				return -EBUSY;
-			}
-			spin_unlock_irqrestore(&chans[ch.chan]->lock, flags);
-			unregister_hdlc_device(chans[ch.chan]->hdlcnetdev->netdev);
-			spin_lock_irqsave(&chans[ch.chan]->lock, flags);
-			free_netdev(chans[ch.chan]->hdlcnetdev->netdev);
-			kfree(chans[ch.chan]->hdlcnetdev);
-			chans[ch.chan]->hdlcnetdev = NULL;
-			chans[ch.chan]->flags &= ~DAHDI_FLAG_NETDEV;
+	if (dahdi_have_netdev(chan)) {
+		if (chan_to_netdev(chan)->flags & IFF_UP) {
+			spin_unlock_irqrestore(&chan->lock, flags);
+			module_printk(KERN_WARNING, "Can't switch HDLC net mode on channel %s, since current interface is up\n", chan->name);
+			return -EBUSY;
 		}
+		spin_unlock_irqrestore(&chan->lock, flags);
+		unregister_hdlc_device(chan->hdlcnetdev->netdev);
+		spin_lock_irqsave(&chan->lock, flags);
+		free_netdev(chan->hdlcnetdev->netdev);
+		kfree(chan->hdlcnetdev);
+		chan->hdlcnetdev = NULL;
+		clear_bit(DAHDI_FLAGBIT_NETDEV, &chan->flags);
+	}
 #elif defined(__FreeBSD__)
-		if (chans[ch.chan]->flags & DAHDI_FLAG_NETDEV) {
-			dahdi_iface_destroy(chans[ch.chan]);
-		}
+	if (dahdi_have_netdev(chan)) {
+		dahdi_iface_destroy(chan);
+		clear_bit(DAHDI_FLAGBIT_NETDEV, &chan->flags);
+	}
 #else
-		if (ch.sigtype == DAHDI_SIG_HDLCNET) {
-			spin_unlock_irqrestore(&chans[ch.chan]->lock, flags);
-			module_printk(KERN_WARNING, "DAHDI networking not supported by this build.\n");
-			return -ENOSYS;
+	if (ch.sigtype == DAHDI_SIG_HDLCNET) {
+		spin_unlock_irqrestore(&chan->lock, flags);
+		module_printk(KERN_WARNING, "DAHDI networking not supported by this build.\n");
+		return -ENOSYS;
+	}
+#endif /* !__FreeBSD__ */
+	sigcap = chan->sigcap;
+	/* If they support clear channel, then they support the HDLC and such through
+	   us.  */
+	if (sigcap & DAHDI_SIG_CLEAR)
+		sigcap |= (DAHDI_SIG_HDLCRAW | DAHDI_SIG_HDLCFCS | DAHDI_SIG_HDLCNET | DAHDI_SIG_DACS);
+
+	if ((sigcap & ch.sigtype) != ch.sigtype) {
+		if (debug) {
+			chan_notice(chan, "%s: bad sigtype. sigcap: %x, sigtype: %x.\n",
+					__func__, sigcap, ch.sigtype);
 		}
-#endif
-		sigcap = chans[ch.chan]->sigcap;
-		/* If they support clear channel, then they support the HDLC and such through
-		   us.  */
-		if (sigcap & DAHDI_SIG_CLEAR)
-			sigcap |= (DAHDI_SIG_HDLCRAW | DAHDI_SIG_HDLCFCS | DAHDI_SIG_HDLCNET | DAHDI_SIG_DACS);
+		res = -EINVAL;
+	}
 
-		if ((sigcap & ch.sigtype) != ch.sigtype)
-			res = -EINVAL;
+	if (chan->master != chan) {
+		struct dahdi_chan *oldmaster = chan->master;
 
-		if (chans[ch.chan]->master != chans[ch.chan]) {
-			struct dahdi_chan *oldmaster = chans[ch.chan]->master;
+		/* Clear the master channel */
+		chan->master = chan;
+		chan->nextslave = NULL;
+		/* Unlink this channel from the master's channel list */
+		recalc_slaves(oldmaster);
+	}
 
-			/* Clear the master channel */
-			chans[ch.chan]->master = chans[ch.chan];
-			chans[ch.chan]->nextslave = 0;
-			/* Unlink this channel from the master's channel list */
-			recalc_slaves(oldmaster);
+	if (!res) {
+		chan->sig = ch.sigtype;
+		if (chan->sig == DAHDI_SIG_CAS)
+			chan->idlebits = ch.idlebits;
+		else
+			chan->idlebits = 0;
+		if ((ch.sigtype & DAHDI_SIG_CLEAR) == DAHDI_SIG_CLEAR) {
+			/* Set clear channel flag if appropriate */
+			chan->flags &= ~DAHDI_FLAG_AUDIO;
+			chan->flags |= DAHDI_FLAG_CLEAR;
+		} else {
+			/* Set audio flag and not clear channel otherwise */
+			chan->flags |= DAHDI_FLAG_AUDIO;
+			chan->flags &= ~DAHDI_FLAG_CLEAR;
+		}
+		if ((ch.sigtype & DAHDI_SIG_HDLCRAW) == DAHDI_SIG_HDLCRAW) {
+			/* Set the HDLC flag */
+			chan->flags |= DAHDI_FLAG_HDLC;
+		} else {
+			/* Clear the HDLC flag */
+			chan->flags &= ~DAHDI_FLAG_HDLC;
+		}
+		if ((ch.sigtype & DAHDI_SIG_HDLCFCS) == DAHDI_SIG_HDLCFCS) {
+			/* Set FCS to be calculated if appropriate */
+			chan->flags |= DAHDI_FLAG_FCS;
+		} else {
+			/* Clear FCS flag */
+			chan->flags &= ~DAHDI_FLAG_FCS;
+		}
+		if ((ch.sigtype & __DAHDI_SIG_DACS) == __DAHDI_SIG_DACS) {
+			if (unlikely(!dacs_chan)) {
+				spin_unlock_irqrestore(&chan->lock, flags);
+				chan_notice(chan, "%s: dacs but no dacs_chan\n",
+						__func__);
+				return -EINVAL;
+			}
+			/* Setup conference properly */
+			chan->confmode = DAHDI_CONF_DIGITALMON;
+			chan->confna = ch.idlebits;
+			chan->dacs_chan = dacs_chan;
+			res = dahdi_chan_dacs(chan, dacs_chan);
+		} else {
+			dahdi_disable_dacs(chan);
+		}
+		chan->master = newmaster;
+		/* Note new slave if we are not our own master */
+		if (newmaster != chan) {
+			recalc_slaves(chan->master);
+		}
+		if ((ch.sigtype & DAHDI_SIG_HARDHDLC) == DAHDI_SIG_HARDHDLC) {
+			chan->flags &= ~DAHDI_FLAG_FCS;
+			chan->flags &= ~DAHDI_FLAG_HDLC;
+			chan->flags |= DAHDI_FLAG_NOSTDTXRX;
+		} else {
+			chan->flags &= ~DAHDI_FLAG_NOSTDTXRX;
 		}
 
-		if (!res) {
-			chans[ch.chan]->sig = ch.sigtype;
-			if (chans[ch.chan]->sig == DAHDI_SIG_CAS)
-				chans[ch.chan]->idlebits = ch.idlebits;
-			else
-				chans[ch.chan]->idlebits = 0;
-			if ((ch.sigtype & DAHDI_SIG_CLEAR) == DAHDI_SIG_CLEAR) {
-				/* Set clear channel flag if appropriate */
-				chans[ch.chan]->flags &= ~DAHDI_FLAG_AUDIO;
-				chans[ch.chan]->flags |= DAHDI_FLAG_CLEAR;
-			} else {
-				/* Set audio flag and not clear channel otherwise */
-				chans[ch.chan]->flags |= DAHDI_FLAG_AUDIO;
-				chans[ch.chan]->flags &= ~DAHDI_FLAG_CLEAR;
-			}
-			if ((ch.sigtype & DAHDI_SIG_HDLCRAW) == DAHDI_SIG_HDLCRAW) {
-				/* Set the HDLC flag */
-				chans[ch.chan]->flags |= DAHDI_FLAG_HDLC;
-			} else {
-				/* Clear the HDLC flag */
-				chans[ch.chan]->flags &= ~DAHDI_FLAG_HDLC;
-			}
-			if ((ch.sigtype & DAHDI_SIG_HDLCFCS) == DAHDI_SIG_HDLCFCS) {
-				/* Set FCS to be calculated if appropriate */
-				chans[ch.chan]->flags |= DAHDI_FLAG_FCS;
-			} else {
-				/* Clear FCS flag */
-				chans[ch.chan]->flags &= ~DAHDI_FLAG_FCS;
-			}
-			if ((ch.sigtype & __DAHDI_SIG_DACS) == __DAHDI_SIG_DACS) {
-				/* Setup conference properly */
-				chans[ch.chan]->confmode = DAHDI_CONF_DIGITALMON;
-				chans[ch.chan]->confna = ch.idlebits;
-				res = dahdi_chan_dacs(chans[ch.chan],
-						      chans[ch.idlebits]);
-			} else {
-				dahdi_disable_dacs(chans[ch.chan]);
-			}
-			chans[ch.chan]->master = newmaster;
-			/* Note new slave if we are not our own master */
-			if (newmaster != chans[ch.chan]) {
-				recalc_slaves(chans[ch.chan]->master);
-			}
-			if ((ch.sigtype & DAHDI_SIG_HARDHDLC) == DAHDI_SIG_HARDHDLC) {
-				chans[ch.chan]->flags &= ~DAHDI_FLAG_FCS;
-				chans[ch.chan]->flags &= ~DAHDI_FLAG_HDLC;
-				chans[ch.chan]->flags |= DAHDI_FLAG_NOSTDTXRX;
-			} else {
-				chans[ch.chan]->flags &= ~DAHDI_FLAG_NOSTDTXRX;
-			}
+		if ((ch.sigtype & DAHDI_SIG_MTP2) == DAHDI_SIG_MTP2)
+			chan->flags |= DAHDI_FLAG_MTP2;
+		else
+			chan->flags &= ~DAHDI_FLAG_MTP2;
+	}
 
-			if ((ch.sigtype & DAHDI_SIG_MTP2) == DAHDI_SIG_MTP2)
-				chans[ch.chan]->flags |= DAHDI_FLAG_MTP2;
-			else
-				chans[ch.chan]->flags &= ~DAHDI_FLAG_MTP2;
-		}
+	/* Chanconfig can block, do not call through the function pointer with
+	 * the channel lock held. */
+	spin_unlock_irqrestore(&chan->lock, flags);
+	if (!res && chan->span->ops->chanconfig)
+		res = chan->span->ops->chanconfig(file, chan, ch.sigtype);
+	spin_lock_irqsave(&chan->lock, flags);
 
-		if (!res && chans[ch.chan]->span->ops->chanconfig) {
-			res = chans[ch.chan]->span->ops->chanconfig(chans[ch.chan],
-							       ch.sigtype);
-		}
 
 #ifdef CONFIG_DAHDI_NET
-		if (!res &&
-		    (newmaster == chans[ch.chan]) &&
-		    (chans[ch.chan]->sig == DAHDI_SIG_HDLCNET)) {
-			chans[ch.chan]->hdlcnetdev = dahdi_hdlc_alloc();
-			if (chans[ch.chan]->hdlcnetdev) {
-/*				struct hdlc_device *hdlc = chans[ch.chan]->hdlcnetdev;
-				struct net_device *d = hdlc_to_dev(hdlc); mmm...get it right later --byg */
+	if (!res &&
+	    (newmaster == chan) &&
+	    (chan->sig == DAHDI_SIG_HDLCNET)) {
+		chan->hdlcnetdev = dahdi_hdlc_alloc();
+		if (chan->hdlcnetdev) {
+/*				struct hdlc_device *hdlc = chan->hdlcnetdev;
+			struct net_device *d = hdlc_to_dev(hdlc); mmm...get it right later --byg */
 
-				chans[ch.chan]->hdlcnetdev->netdev = alloc_hdlcdev(chans[ch.chan]->hdlcnetdev);
-				if (chans[ch.chan]->hdlcnetdev->netdev) {
-					chans[ch.chan]->hdlcnetdev->chan = chans[ch.chan];
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,23)
-					SET_MODULE_OWNER(chans[ch.chan]->hdlcnetdev->netdev);
+			chan->hdlcnetdev->netdev = alloc_hdlcdev(chan->hdlcnetdev);
+			if (chan->hdlcnetdev->netdev) {
+				chan->hdlcnetdev->chan = chan;
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2, 6, 23)
+				SET_MODULE_OWNER(chan->hdlcnetdev->netdev);
 #endif
-					chans[ch.chan]->hdlcnetdev->netdev->irq = chans[ch.chan]->span->irq;
-					chans[ch.chan]->hdlcnetdev->netdev->tx_queue_len = 50;
-					chans[ch.chan]->hdlcnetdev->netdev->do_ioctl = dahdi_net_ioctl;
-					chans[ch.chan]->hdlcnetdev->netdev->open = dahdi_net_open;
-					chans[ch.chan]->hdlcnetdev->netdev->stop = dahdi_net_stop;
-					dev_to_hdlc(chans[ch.chan]->hdlcnetdev->netdev)->attach = dahdi_net_attach;
-					dev_to_hdlc(chans[ch.chan]->hdlcnetdev->netdev)->xmit = dahdi_xmit;
-					spin_unlock_irqrestore(&chans[ch.chan]->lock, flags);
-					/* Briefly restore interrupts while we register the device */
-					res = dahdi_register_hdlc_device(chans[ch.chan]->hdlcnetdev->netdev, ch.netdev_name);
-					spin_lock_irqsave(&chans[ch.chan]->lock, flags);
-				} else {
-					module_printk(KERN_NOTICE, "Unable to allocate hdlc: *shrug*\n");
-					res = -1;
-				}
-				if (!res)
-					chans[ch.chan]->flags |= DAHDI_FLAG_NETDEV;
+				chan->hdlcnetdev->netdev->irq = chan->span->irq;
+				chan->hdlcnetdev->netdev->tx_queue_len = 50;
+#ifdef HAVE_NET_DEVICE_OPS
+				chan->hdlcnetdev->netdev->netdev_ops = &dahdi_netdev_ops;
+#else
+				chan->hdlcnetdev->netdev->do_ioctl = dahdi_net_ioctl;
+				chan->hdlcnetdev->netdev->open = dahdi_net_open;
+				chan->hdlcnetdev->netdev->stop = dahdi_net_stop;
+#endif
+				dev_to_hdlc(chan->hdlcnetdev->netdev)->attach = dahdi_net_attach;
+				dev_to_hdlc(chan->hdlcnetdev->netdev)->xmit = dahdi_xmit;
+				spin_unlock_irqrestore(&chan->lock, flags);
+				/* Briefly restore interrupts while we register the device */
+				res = dahdi_register_hdlc_device(chan->hdlcnetdev->netdev, ch.netdev_name);
+				spin_lock_irqsave(&chan->lock, flags);
 			} else {
-				module_printk(KERN_NOTICE, "Unable to allocate netdev: out of memory\n");
+				module_printk(KERN_NOTICE, "Unable to allocate hdlc: *shrug*\n");
 				res = -1;
 			}
+			if (!res)
+				set_bit(DAHDI_FLAGBIT_NETDEV, &chan->flags);
+		} else {
+			module_printk(KERN_NOTICE, "Unable to allocate netdev: out of memory\n");
+			res = -1;
 		}
+	}
 #elif defined(__FreeBSD__)
-		if (!res &&
-		    newmaster == chans[ch.chan] &&
-		    chans[ch.chan]->sig == DAHDI_SIG_HDLCNET) {
-			spin_unlock_irqrestore(&chans[ch.chan]->lock, flags);
-			/* Briefly restore interrupts while we register the device */
-			if ((res = dahdi_iface_create(chans[ch.chan])) == 0)
-				chans[ch.chan]->flags |= DAHDI_FLAG_NETDEV;
-			spin_lock_irqsave(&chans[ch.chan]->lock, flags);
-		}
+	if (!res &&
+	    (newmaster == chan) &&
+	    (chan->sig == DAHDI_SIG_HDLCNET) &&
+	    (res = dahdi_iface_create(chan)) == 0) {
+		set_bit(DAHDI_FLAGBIT_NETDEV, &chan->flags);
+	}
 #endif
-		if ((chans[ch.chan]->sig == DAHDI_SIG_HDLCNET) &&
-		    (chans[ch.chan] == newmaster) &&
-		    !(chans[ch.chan]->flags & DAHDI_FLAG_NETDEV))
-			module_printk(KERN_NOTICE, "Unable to register HDLC device for channel %s\n", chans[ch.chan]->name);
-		if (!res) {
-			/* Setup default law */
-			chans[ch.chan]->deflaw = ch.deflaw;
-			/* Copy back any modified settings */
-			spin_unlock_irqrestore(&chans[ch.chan]->lock, flags);
-			if (copy_to_user(user_data, &ch, sizeof(ch)))
-				return -EFAULT;
-			spin_lock_irqsave(&chans[ch.chan]->lock, flags);
-			/* And hangup */
-			dahdi_hangup(chans[ch.chan]);
-			y = dahdi_q_sig(chans[ch.chan]) & 0xff;
-			if (y >= 0)
-				chans[ch.chan]->rxsig = (unsigned char) y;
-			chans[ch.chan]->rxhooksig = DAHDI_RXSIG_INITIAL;
-		}
+	if ((chan->sig == DAHDI_SIG_HDLCNET) &&
+	    (chan == newmaster) &&
+	    !dahdi_have_netdev(chan))
+		module_printk(KERN_NOTICE, "Unable to register HDLC device for channel %s\n", chan->name);
+	if (!res) {
+		/* Setup default law */
+		chan->deflaw = ch.deflaw;
+		/* Copy back any modified settings */
+		spin_unlock_irqrestore(&chan->lock, flags);
+		if (copy_to_user((void __user *)data, &ch, sizeof(ch)))
+			return -EFAULT;
+		spin_lock_irqsave(&chan->lock, flags);
+		/* And hangup */
+		dahdi_hangup(chan);
+		y = dahdi_q_sig(chan) & 0xff;
+		if (y >= 0)
+			chan->rxsig = (unsigned char) y;
+		chan->rxhooksig = DAHDI_RXSIG_INITIAL;
+	}
 #ifdef CONFIG_DAHDI_DEBUG
-		module_printk(KERN_NOTICE, "Configured channel %s, flags %04lx, sig %04x\n", chans[ch.chan]->name, chans[ch.chan]->flags, chans[ch.chan]->sig);
+	module_printk(KERN_NOTICE, "Configured channel %s, flags %04lx, sig %04x\n", chan->name, chan->flags, chan->sig);
 #endif
-		spin_unlock_irqrestore(&chans[ch.chan]->lock, flags);
+	spin_unlock_irqrestore(&chan->lock, flags);
 
-		return res;
+	return res;
+}
+
+/**
+ * dahdi_ioctl_set_dialparms - Set the global dial parameters.
+ * @data:	Pointer to user space that contains dahdi_dialparams.
+ */
+static int dahdi_ioctl_set_dialparams(unsigned long data)
+{
+	unsigned int i;
+	struct dahdi_dialparams tdp;
+	struct dahdi_zone *z;
+	struct dahdi_dialparams *const gdp = &global_dialparams;
+
+	if (copy_from_user(&tdp, (void __user *)data, sizeof(tdp)))
+		return -EFAULT;
+
+	mutex_lock(&global_dialparamslock);
+
+	if ((tdp.dtmf_tonelen >= 10) && (tdp.dtmf_tonelen <= 4000))
+		gdp->dtmf_tonelen = tdp.dtmf_tonelen;
+
+	if ((tdp.mfv1_tonelen >= 10) && (tdp.mfv1_tonelen <= 4000))
+		gdp->mfv1_tonelen = tdp.mfv1_tonelen;
+
+	if ((tdp.mfr2_tonelen >= 10) && (tdp.mfr2_tonelen <= 4000))
+		gdp->mfr2_tonelen = tdp.mfr2_tonelen;
+
+	/* update the lengths in all currently loaded zones */
+	spin_lock(&zone_lock);
+	list_for_each_entry(z, &tone_zones, node) {
+
+		for (i = 0; i < ARRAY_SIZE(z->dtmf); i++) {
+			z->dtmf[i].tonesamples =
+				gdp->dtmf_tonelen * DAHDI_CHUNKSIZE;
+		}
+
+		/* for MFR1, we only adjust the length of the digits */
+		for (i = DAHDI_TONE_MFR1_0; i <= DAHDI_TONE_MFR1_9; i++) {
+			z->mfr1[i - DAHDI_TONE_MFR1_BASE].tonesamples =
+				gdp->mfv1_tonelen * DAHDI_CHUNKSIZE;
+		}
+
+		for (i = 0; i < ARRAY_SIZE(z->mfr2_fwd); i++) {
+			z->mfr2_fwd[i].tonesamples =
+				gdp->mfr2_tonelen * DAHDI_CHUNKSIZE;
+		}
+
+		for (i = 0; i < ARRAY_SIZE(z->mfr2_rev); i++) {
+			z->mfr2_rev[i].tonesamples =
+				gdp->mfr2_tonelen * DAHDI_CHUNKSIZE;
+		}
 	}
-	case DAHDI_SFCONFIG:
-	{
-		struct dahdi_sfconfig sf;
+	spin_unlock(&zone_lock);
 
-		if (copy_from_user(&sf, user_data, sizeof(sf)))
-			return -EFAULT;
-		VALID_CHANNEL(sf.chan);
-		if (chans[sf.chan]->sig != DAHDI_SIG_SF) return -EINVAL;
-		spin_lock_irqsave(&chans[sf.chan]->lock, flags);
-		chans[sf.chan]->rxp1 = sf.rxp1;
-		chans[sf.chan]->rxp2 = sf.rxp2;
-		chans[sf.chan]->rxp3 = sf.rxp3;
-		chans[sf.chan]->txtone = sf.txtone;
-		chans[sf.chan]->tx_v2 = sf.tx_v2;
-		chans[sf.chan]->tx_v3 = sf.tx_v3;
-		chans[sf.chan]->toneflags = sf.toneflag;
-		if (sf.txtone) /* if set to make tone for tx */
-		{
-			if ((chans[sf.chan]->txhooksig && !(sf.toneflag & DAHDI_REVERSE_TXTONE)) ||
-			 ((!chans[sf.chan]->txhooksig) && (sf.toneflag & DAHDI_REVERSE_TXTONE)))
-			{
-				set_txtone(chans[sf.chan],sf.txtone,sf.tx_v2,sf.tx_v3);
-			}
-			else
-			{
-				set_txtone(chans[sf.chan],0,0,0);
-			}
-		}
-		spin_unlock_irqrestore(&chans[sf.chan]->lock, flags);
-		return res;
+	dtmf_silence.tonesamples = gdp->dtmf_tonelen * DAHDI_CHUNKSIZE;
+	mfr1_silence.tonesamples = gdp->mfv1_tonelen * DAHDI_CHUNKSIZE;
+	mfr2_silence.tonesamples = gdp->mfr2_tonelen * DAHDI_CHUNKSIZE;
+
+	mutex_unlock(&global_dialparamslock);
+
+	return 0;
+}
+
+static int dahdi_ioctl_get_dialparams(unsigned long data)
+{
+	struct dahdi_dialparams tdp;
+
+	mutex_lock(&global_dialparamslock);
+	tdp = global_dialparams;
+	mutex_unlock(&global_dialparamslock);
+	if (copy_to_user((void __user *)data, &tdp, sizeof(tdp)))
+		return -EFAULT;
+	return 0;
+}
+
+static int dahdi_ioctl_indirect(struct file *file, unsigned long data)
+{
+	int res;
+	struct dahdi_indirect_data ind;
+	void *old;
+	static bool warned;
+	struct dahdi_chan *chan;
+
+	if (copy_from_user(&ind, (void __user *)data, sizeof(ind)))
+		return -EFAULT;
+
+	chan = chan_from_num(ind.chan);
+	if (!chan)
+		return -EINVAL;
+
+	if (!warned) {
+		warned = true;
+		module_printk(KERN_WARNING, "Using deprecated " \
+			      "DAHDI_INDIRECT.  Please update " \
+			      "dahdi-tools.\n");
 	}
-	case DAHDI_DEFAULTZONE:
-		if (get_user(j, (int __user *)data))
-			return -EFAULT;
-		return dahdi_set_default_zone(j);
-	case DAHDI_LOADZONE:
-#if defined(__FreeBSD__)
-		if (copy_from_user(&data, (void *) data, sizeof(data)))
-			return -EFAULT;
-#endif /* __FreeBSD__ */
-		return ioctl_load_zone(data);
-	case DAHDI_FREEZONE:
-		get_user(j, (int __user *) data);
-		return free_tone_zone(j);
-	case DAHDI_SET_DIALPARAMS:
-	{
-		struct dahdi_dialparams tdp;
 
-		if (copy_from_user(&tdp, user_data, sizeof(tdp)))
-			return -EFAULT;
+	/* Since dahdi_chan_ioctl expects to be called on file handles
+	 * associated with channels, we'll temporarily set the
+	 * private_data pointer on the ctl file handle just for this
+	 * call. */
+	old = file->private_data;
+	file->private_data = chan;
+	res = dahdi_chan_ioctl(file, ind.op, (unsigned long) ind.data);
+	file->private_data = old;
+	return res;
+}
 
-		if ((tdp.dtmf_tonelen >= 10) && (tdp.dtmf_tonelen <= 4000)) {
-			global_dialparams.dtmf_tonelen = tdp.dtmf_tonelen;
-		}
-		if ((tdp.mfv1_tonelen >= 10) && (tdp.mfv1_tonelen <= 4000)) {
-			global_dialparams.mfv1_tonelen = tdp.mfv1_tonelen;
-		}
-		if ((tdp.mfr2_tonelen >= 10) && (tdp.mfr2_tonelen <= 4000)) {
-			global_dialparams.mfr2_tonelen = tdp.mfr2_tonelen;
-		}
+static int dahdi_ioctl_spanconfig(struct file *file, unsigned long data)
+{
+	int res = 0;
+	struct dahdi_lineconfig lc;
+	struct dahdi_span *s;
 
-		/* update the lengths in all currently loaded zones */
-		write_lock(&zone_lock);
-		for (j = 0; j < ARRAY_SIZE(tone_zones); j++) {
-			struct dahdi_zone *z = tone_zones[j];
+	if (copy_from_user(&lc, (void __user *)data, sizeof(lc)))
+		return -EFAULT;
+	s = span_find_and_get(lc.span);
+	if (!s)
+		return -ENXIO;
 
-			if (!z)
-				continue;
-
-			for (i = 0; i < ARRAY_SIZE(z->dtmf); i++) {
-				z->dtmf[i].tonesamples = global_dialparams.dtmf_tonelen * DAHDI_CHUNKSIZE;
-			}
-
-			/* for MFR1, we only adjust the length of the digits */
-			for (i = DAHDI_TONE_MFR1_0; i <= DAHDI_TONE_MFR1_9; i++) {
-				z->mfr1[i - DAHDI_TONE_MFR1_BASE].tonesamples = global_dialparams.mfv1_tonelen * DAHDI_CHUNKSIZE;
-			}
-
-			for (i = 0; i < ARRAY_SIZE(z->mfr2_fwd); i++) {
-				z->mfr2_fwd[i].tonesamples = global_dialparams.mfr2_tonelen * DAHDI_CHUNKSIZE;
-			}
-
-			for (i = 0; i < ARRAY_SIZE(z->mfr2_rev); i++) {
-				z->mfr2_rev[i].tonesamples = global_dialparams.mfr2_tonelen * DAHDI_CHUNKSIZE;
-			}
-		}
-		write_unlock(&zone_lock);
-
-		dtmf_silence.tonesamples = global_dialparams.dtmf_tonelen * DAHDI_CHUNKSIZE;
-		mfr1_silence.tonesamples = global_dialparams.mfv1_tonelen * DAHDI_CHUNKSIZE;
-		mfr2_silence.tonesamples = global_dialparams.mfr2_tonelen * DAHDI_CHUNKSIZE;
-
-		break;
+	if ((lc.lineconfig & 0x1ff0 & s->linecompat) !=
+	    (lc.lineconfig & 0x1ff0)) {
+		put_span(s);
+		return -EINVAL;
 	}
-	case DAHDI_GET_DIALPARAMS:
-	{
-		struct dahdi_dialparams tdp;
+	if (s->ops->spanconfig) {
+		s->lineconfig = lc.lineconfig;
+		s->lbo = lc.lbo;
+		s->txlevel = lc.lbo;
+		s->rxlevel = 0;
 
-		tdp = global_dialparams;
-		if (copy_to_user(user_data, &tdp, sizeof(tdp)))
-			return -EFAULT;
-		break;
+		res = s->ops->spanconfig(file, s, &lc);
 	}
-	case DAHDI_GETVERSION:
-	{
-		struct dahdi_versioninfo vi;
-		struct ecfactory *cur;
-		size_t space = sizeof(vi.echo_canceller) - 1;
+	put_span(s);
+	return res;
+}
 
-		memset(&vi, 0, sizeof(vi));
-		dahdi_copy_string(vi.version, DAHDI_VERSION, sizeof(vi.version));
-		read_lock(&ecfactory_list_lock);
-		list_for_each_entry(cur, &ecfactory_list, list) {
-			strncat(vi.echo_canceller + strlen(vi.echo_canceller), cur->ec->name, space);
-			space -= strlen(cur->ec->name);
-			if (space < 1) {
-				break;
-			}
-			if (cur->list.next && (cur->list.next != &ecfactory_list)) {
-				strncat(vi.echo_canceller + strlen(vi.echo_canceller), ", ", space);
-				space -= 2;
-				if (space < 1) {
-					break;
-				}
-			}
+static int dahdi_ioctl_startup(struct file *file, unsigned long data)
+{
+	/* I/O CTL's for control interface */
+	int j;
+	int res = 0;
+	int x, y;
+	unsigned long flags;
+	struct dahdi_span *s;
+
+	if (get_user(j, (int __user *)data))
+		return -EFAULT;
+	s = span_find_and_get(j);
+	if (!s)
+		return -ENXIO;
+
+	if (s->flags & DAHDI_FLAG_RUNNING) {
+		put_span(s);
+		return 0;
+	}
+
+	if (s->ops->startup)
+		res = s->ops->startup(file, s);
+
+	if (!res) {
+		/* Mark as running and hangup any channels */
+		s->flags |= DAHDI_FLAG_RUNNING;
+		for (x = 0; x < s->channels; x++) {
+			y = dahdi_q_sig(s->chans[x]) & 0xff;
+			if (y >= 0)
+				s->chans[x]->rxsig = (unsigned char)y;
+			spin_lock_irqsave(&s->chans[x]->lock, flags);
+			dahdi_hangup(s->chans[x]);
+			spin_unlock_irqrestore(&s->chans[x]->lock, flags);
+			/*
+			 * Set the rxhooksig back to
+			 * DAHDI_RXSIG_INITIAL so that new events are
+			 * queued on the channel with the actual
+			 * received hook state.
+			 *
+			 */
+			s->chans[x]->rxhooksig = DAHDI_RXSIG_INITIAL;
 		}
-		read_unlock(&ecfactory_list_lock);
-		if (copy_to_user(user_data, &vi, sizeof(vi)))
-			return -EFAULT;
-		break;
+
+		/* Now that this span is running, it might be selected as the
+		 * master span */
+		__dahdi_find_master_span();
 	}
-	case DAHDI_MAINT:  /* do maintenance stuff */
-	{
-		struct dahdi_maintinfo maint;
-		  /* get struct from user */
-		if (copy_from_user(&maint, user_data, sizeof(maint)))
-			return -EFAULT;
-		/* must be valid span number */
-		if ((maint.spanno < 1) || (maint.spanno > DAHDI_MAX_SPANS) || (!spans[maint.spanno]))
+	put_span(s);
+	return res;
+}
+
+static int dahdi_ioctl_shutdown(unsigned long data)
+{
+	/* I/O CTL's for control interface */
+	int j;
+	int x;
+	struct dahdi_span *s;
+
+	if (get_user(j, (int __user *)data))
+		return -EFAULT;
+	s = span_find_and_get(j);
+	if (!s)
+		return -ENXIO;
+
+	/* Unconfigure channels */
+	for (x = 0; x < s->channels; x++)
+		s->chans[x]->sig = 0;
+
+	if (s->ops->shutdown) {
+		int res = s->ops->shutdown(s);
+		if (res) {
+			put_span(s);
+			return res;
+		}
+	}
+
+	s->flags &= ~DAHDI_FLAG_RUNNING;
+	put_span(s);
+	return 0;
+}
+
+/**
+ * dahdi_is_hwec_available - Is hardware echocan available on a channel?
+ * @chan: The channel to check
+ *
+ * Returns true if there is a hardware echocan available for the attached
+ * channel, or false otherwise.
+ *
+ */
+static bool dahdi_is_hwec_available(const struct dahdi_chan *chan)
+{
+	if (!chan->span || !chan->span->ops->echocan_name ||
+	    !hwec_factory.get_name(chan))
+		return false;
+
+	return true;
+}
+
+static int dahdi_ioctl_attach_echocan(unsigned long data)
+{
+	unsigned long flags;
+	struct dahdi_chan *chan;
+	struct dahdi_attach_echocan ae;
+	const struct dahdi_echocan_factory *new = NULL, *old;
+
+	if (copy_from_user(&ae, (void __user *)data, sizeof(ae)))
+		return -EFAULT;
+
+	chan = chan_from_num(ae.chan);
+	if (!chan)
+		return -EINVAL;
+
+	ae.echocan[sizeof(ae.echocan) - 1] = '\0';
+	if (dahdi_is_hwec_available(chan)) {
+		if (hwec_overrides_swec) {
+			chan_dbg(GENERAL, chan,
+				"Using echocan '%s' instead of requested " \
+				"'%s'.\n", hwec_def_name, ae.echocan);
+			/* If there is a hardware echocan available we'll
+			 * always use it instead of any configured software
+			 * echocan. This matches the behavior in dahdi 2.4.1.2
+			 * and earlier releases. */
+			strlcpy(ae.echocan, hwec_def_name, sizeof(ae.echocan));
+
+		} else if (strcasecmp(ae.echocan, hwec_def_name) != 0) {
+			chan_dbg(GENERAL, chan,
+				"Using '%s' on channel even though '%s' is " \
+				"available.\n", ae.echocan, hwec_def_name);
+		}
+	}
+
+	if (ae.echocan[0]) {
+		new = find_echocan(ae.echocan);
+		if (!new)
 			return -EINVAL;
-		if (!spans[maint.spanno]->ops->maint)
-			return -ENOSYS;
-		spin_lock_irqsave(&spans[maint.spanno]->lock, flags);
-		  /* save current maint state */
-		i = spans[maint.spanno]->maintstat;
-		  /* set maint mode */
-		spans[maint.spanno]->maintstat = maint.command;
-		switch(maint.command) {
-		case DAHDI_MAINT_NONE:
-		case DAHDI_MAINT_LOCALLOOP:
-		case DAHDI_MAINT_NETWORKLINELOOP:
-		case DAHDI_MAINT_NETWORKPAYLOADLOOP:
-			/* if same, ignore it */
-			if (i == maint.command)
-				break;
-			rv = spans[maint.spanno]->ops->maint(spans[maint.spanno], maint.command);
-			spin_unlock_irqrestore(&spans[maint.spanno]->lock, flags);
-			if (rv)
-				return rv;
-			spin_lock_irqsave(&spans[maint.spanno]->lock, flags);
-			break;
-		case DAHDI_MAINT_LOOPUP:
-		case DAHDI_MAINT_LOOPDOWN:
-			spans[maint.spanno]->mainttimer = DAHDI_LOOPCODE_TIME * DAHDI_CHUNKSIZE;
-			rv = spans[maint.spanno]->ops->maint(spans[maint.spanno], maint.command);
-			spin_unlock_irqrestore(&spans[maint.spanno]->lock, flags);
-			if (rv)
-				return rv;
-			rv = dahdi_schluffen(&spans[maint.spanno]->maintq);
-			if (rv)
-				return rv;
-			spin_lock_irqsave(&spans[maint.spanno]->lock, flags);
-			break;
-		case DAHDI_MAINT_FAS_DEFECT:
-		case DAHDI_MAINT_MULTI_DEFECT:
-		case DAHDI_MAINT_CRC_DEFECT:
-		case DAHDI_MAINT_CAS_DEFECT:
-		case DAHDI_MAINT_PRBS_DEFECT:
-		case DAHDI_MAINT_BIPOLAR_DEFECT:
-		case DAHDI_MAINT_PRBS:
-		case DAHDI_RESET_COUNTERS:
-		case DAHDI_MAINT_ALARM_SIM:
-			/* Prevent notifying an alarm state for generic
-			   maintenance functions, unless the driver is
-			   already in a maint state */
-			if(!i)
-				spans[maint.spanno]->maintstat = 0;
 
-			rv = spans[maint.spanno]->ops->maint(spans[maint.spanno],
-							     maint.command);
-			spin_unlock_irqrestore(&spans[maint.spanno]->lock,
-					       flags);
-			if (rv)
-				return rv;
-			spin_lock_irqsave(&spans[maint.spanno]->lock, flags);
-			break;
-		default:
-			spin_unlock_irqrestore(&spans[maint.spanno]->lock,
-					       flags);
-			module_printk(KERN_NOTICE,
-				      "Unknown maintenance event: %d\n",
-				      maint.command);
-			return -ENOSYS;
+		if (!new->get_name(chan)) {
+			release_echocan(new);
+			return -EINVAL;
 		}
-		dahdi_alarm_notify(spans[maint.spanno]);  /* process alarm-related events */
-		spin_unlock_irqrestore(&spans[maint.spanno]->lock, flags);
-		break;
 	}
+
+	spin_lock_irqsave(&chan->lock, flags);
+	old = chan->ec_factory;
+	chan->ec_factory = new;
+	spin_unlock_irqrestore(&chan->lock, flags);
+
+	if (old)
+		release_echocan(old);
+
+	return 0;
+}
+
+static int dahdi_ioctl_sfconfig(unsigned long data)
+{
+	int res = 0;
+	unsigned long flags;
+	struct dahdi_chan *chan;
+	struct dahdi_sfconfig sf;
+
+	if (copy_from_user(&sf, (void __user *)data, sizeof(sf)))
+		return -EFAULT;
+	chan = chan_from_num(sf.chan);
+	if (!chan)
+		return -EINVAL;
+
+	if (chan->sig != DAHDI_SIG_SF)
+		return -EINVAL;
+
+	spin_lock_irqsave(&chan->lock, flags);
+	chan->rxp1 = sf.rxp1;
+	chan->rxp2 = sf.rxp2;
+	chan->rxp3 = sf.rxp3;
+	chan->txtone = sf.txtone;
+	chan->tx_v2 = sf.tx_v2;
+	chan->tx_v3 = sf.tx_v3;
+	chan->toneflags = sf.toneflag;
+	if (sf.txtone) { /* if set to make tone for tx */
+		if ((chan->txhooksig &&
+		     !(sf.toneflag & DAHDI_REVERSE_TXTONE)) ||
+		     ((!chan->txhooksig) &&
+		       (sf.toneflag & DAHDI_REVERSE_TXTONE))) {
+			set_txtone(chan, sf.txtone, sf.tx_v2, sf.tx_v3);
+		} else {
+			set_txtone(chan, 0, 0, 0);
+		}
+	}
+	spin_unlock_irqrestore(&chan->lock, flags);
+	return res;
+}
+
+static int dahdi_ioctl_get_version(unsigned long data)
+{
+	struct dahdi_versioninfo vi;
+	struct ecfactory *cur;
+	size_t space = sizeof(vi.echo_canceller) - 1;
+
+	memset(&vi, 0, sizeof(vi));
+	strlcpy(vi.version, dahdi_version, sizeof(vi.version));
+	spin_lock(&ecfactory_list_lock);
+	list_for_each_entry(cur, &ecfactory_list, list) {
+		strncat(vi.echo_canceller + strlen(vi.echo_canceller),
+			cur->ec->get_name(NULL), space);
+		space -= strlen(cur->ec->get_name(NULL));
+		if (space < 1)
+			break;
+		if (cur->list.next && (cur->list.next != &ecfactory_list)) {
+			strncat(vi.echo_canceller + strlen(vi.echo_canceller),
+				", ", space);
+			space -= 2;
+			if (space < 1)
+				break;
+		}
+	}
+	spin_unlock(&ecfactory_list_lock);
+	if (copy_to_user((void __user *)data, &vi, sizeof(vi)))
+		return -EFAULT;
+
+	return 0;
+}
+
+static int dahdi_ioctl_maint(unsigned long data)
+{
+	int i;
+	unsigned long flags;
+	int rv;
+	struct dahdi_span *s;
+	struct dahdi_maintinfo maint;
+
+	  /* get struct from user */
+	if (copy_from_user(&maint, (void __user *)data, sizeof(maint)))
+		return -EFAULT;
+	s = span_find_and_get(maint.spanno);
+	if (!s)
+		return -EINVAL;
+	if (!s->ops->maint) {
+		put_span(s);
+		return -ENOSYS;
+	}
+	spin_lock_irqsave(&s->lock, flags);
+	  /* save current maint state */
+	i = s->maintstat;
+	  /* set maint mode */
+	s->maintstat = maint.command;
+	switch (maint.command) {
+	case DAHDI_MAINT_NONE:
+	case DAHDI_MAINT_LOCALLOOP:
+	case DAHDI_MAINT_NETWORKLINELOOP:
+	case DAHDI_MAINT_NETWORKPAYLOADLOOP:
+		/* if same, ignore it */
+		if (i == maint.command)
+			break;
+		rv = s->ops->maint(s, maint.command);
+		spin_unlock_irqrestore(&s->lock, flags);
+		if (rv) {
+			put_span(s);
+			return rv;
+		}
+		spin_lock_irqsave(&s->lock, flags);
+		break;
+	case DAHDI_MAINT_LOOPUP:
+	case DAHDI_MAINT_LOOPDOWN:
+		s->mainttimer = DAHDI_LOOPCODE_TIME * DAHDI_CHUNKSIZE;
+		rv = s->ops->maint(s, maint.command);
+		spin_unlock_irqrestore(&s->lock, flags);
+		if (rv) {
+			put_span(s);
+			return rv;
+		}
+		spin_lock_irqsave(&s->lock, flags);
+		break;
+	case DAHDI_MAINT_FAS_DEFECT:
+	case DAHDI_MAINT_MULTI_DEFECT:
+	case DAHDI_MAINT_CRC_DEFECT:
+	case DAHDI_MAINT_CAS_DEFECT:
+	case DAHDI_MAINT_PRBS_DEFECT:
+	case DAHDI_MAINT_BIPOLAR_DEFECT:
+	case DAHDI_MAINT_PRBS:
+	case DAHDI_RESET_COUNTERS:
+	case DAHDI_MAINT_ALARM_SIM:
+		/* Prevent notifying an alarm state for generic
+		   maintenance functions, unless the driver is
+		   already in a maint state */
+		if (!i)
+			s->maintstat = 0;
+
+		rv = s->ops->maint(s, maint.command);
+		spin_unlock_irqrestore(&s->lock, flags);
+		if (rv) {
+			put_span(s);
+			return rv;
+		}
+		spin_lock_irqsave(&s->lock, flags);
+		break;
+	default:
+		spin_unlock_irqrestore(&s->lock, flags);
+		module_printk(KERN_NOTICE,
+			      "Unknown maintenance event: %d\n",
+			      maint.command);
+		put_span(s);
+		return -ENOSYS;
+	}
+	dahdi_alarm_notify(s);  /* process alarm-related events */
+	spin_unlock_irqrestore(&s->lock, flags);
+	put_span(s);
+
+	return 0;
+}
+
+static int
+dahdi_ctl_ioctl(struct file *file, unsigned int cmd, unsigned long data)
+{
+	switch (cmd) {
+	case DAHDI_INDIRECT:
+		return dahdi_ioctl_indirect(file, data);
+	case DAHDI_SPANCONFIG:
+		return dahdi_ioctl_spanconfig(file, data);
+	case DAHDI_STARTUP:
+		return dahdi_ioctl_startup(file, data);
+	case DAHDI_SHUTDOWN:
+		return dahdi_ioctl_shutdown(data);
+	case DAHDI_ATTACH_ECHOCAN:
+		return dahdi_ioctl_attach_echocan(data);
+	case DAHDI_CHANCONFIG:
+		return dahdi_ioctl_chanconfig(file, data);
+	case DAHDI_SFCONFIG:
+		return dahdi_ioctl_sfconfig(data);
+	case DAHDI_DEFAULTZONE:
+		return dahdi_ioctl_defaultzone(data);
+	case DAHDI_LOADZONE:
+		return dahdi_ioctl_loadzone(data);
+	case DAHDI_FREEZONE:
+		return dahdi_ioctl_freezone(data);
+	case DAHDI_SET_DIALPARAMS:
+		return dahdi_ioctl_set_dialparams(data);
+	case DAHDI_GET_DIALPARAMS:
+		return dahdi_ioctl_get_dialparams(data);
+	case DAHDI_GETVERSION:
+		return dahdi_ioctl_get_version(data);
+	case DAHDI_MAINT:
+		return dahdi_ioctl_maint(data);
 	case DAHDI_DYNAMIC_CREATE:
 	case DAHDI_DYNAMIC_DESTROY:
 		if (dahdi_dynamic_ioctl) {
@@ -5027,10 +5378,9 @@ static int dahdi_ctl_ioctl(struct file *file, unsigned int cmd, unsigned long da
 				return dahdi_hpec_ioctl(cmd, data);
 		}
 		return -ENOSYS;
-	default:
-		return dahdi_common_ioctl(file, cmd, data, 0);
 	}
-	return 0;
+
+	return dahdi_common_ioctl(file, cmd, data);
 }
 
 static int ioctl_dahdi_dial(struct dahdi_chan *chan, unsigned long data)
@@ -5078,7 +5428,8 @@ static int ioctl_dahdi_dial(struct dahdi_chan *chan, unsigned long data)
 			rv = -EBUSY;
 			break;
 		}
-		dahdi_copy_string(chan->txdialbuf + strlen(chan->txdialbuf), tdo->dialstr, DAHDI_MAX_DTMF_BUF - strlen(chan->txdialbuf));
+		strlcpy(chan->txdialbuf + strlen(chan->txdialbuf), tdo->dialstr,
+			DAHDI_MAX_DTMF_BUF - strlen(chan->txdialbuf));
 		if (!chan->dialing) {
 			chan->dialing = 1;
 			__do_dtmf(chan);
@@ -5091,24 +5442,428 @@ static int ioctl_dahdi_dial(struct dahdi_chan *chan, unsigned long data)
 	return rv;
 }
 
+static int dahdi_ioctl_setconf(struct file *file, unsigned long data)
+{
+	struct dahdi_confinfo conf;
+	struct dahdi_chan *chan;
+	struct dahdi_chan *conf_chan = NULL;
+	unsigned long flags;
+	unsigned int confmode;
+	int oldconf;
+	enum {NONE, ENABLE_HWPREEC, DISABLE_HWPREEC} preec = NONE;
+
+	if (copy_from_user(&conf, (void __user *)data, sizeof(conf)))
+		return -EFAULT;
+
+	confmode = conf.confmode & DAHDI_CONF_MODE_MASK;
+
+	chan = (conf.chan) ? chan_from_num(conf.chan) :
+			     chan_from_file(file);
+	if (!chan)
+		return -EINVAL;
+
+	if (!(chan->flags & DAHDI_FLAG_AUDIO))
+		return -EINVAL;
+
+	if ((DAHDI_CONF_DIGITALMON == confmode) ||
+	    is_monitor_mode(conf.confmode)) {
+		conf_chan = chan_from_num(conf.confno);
+		if (!conf_chan)
+			return -EINVAL;
+	} else {
+		/* make sure conf number makes sense, too */
+		if ((conf.confno < -1) || (conf.confno > DAHDI_MAX_CONF))
+			return -EINVAL;
+	}
+
+	/* if taking off of any conf, must have 0 mode */
+	if ((!conf.confno) && conf.confmode)
+		return -EINVAL;
+	/* likewise if 0 mode must have no conf */
+	if ((!conf.confmode) && conf.confno)
+		return -EINVAL;
+	dahdi_check_conf(conf.confno);
+	conf.chan = chan->channo;  /* return with real channel # */
+	spin_lock_irqsave(&chan_lock, flags);
+	spin_lock(&chan->lock);
+	if (conf.confno == -1)
+		conf.confno = dahdi_first_empty_conference();
+	if ((conf.confno < 1) && (conf.confmode)) {
+		/* No more empty conferences */
+		spin_unlock(&chan->lock);
+		spin_unlock_irqrestore(&chan_lock, flags);
+		return -EBUSY;
+	}
+	  /* if changing confs, clear last added info */
+	if (conf.confno != chan->confna) {
+		memset(chan->conflast, 0, DAHDI_MAX_CHUNKSIZE);
+		memset(chan->conflast1, 0, DAHDI_MAX_CHUNKSIZE);
+		memset(chan->conflast2, 0, DAHDI_MAX_CHUNKSIZE);
+	}
+	oldconf = chan->confna;  /* save old conference number */
+	chan->confna = conf.confno;   /* set conference number */
+	chan->conf_chan = conf_chan;
+	chan->confmode = conf.confmode;  /* set conference mode */
+	chan->_confn = 0;		     /* Clear confn */
+	if (chan->span && chan->span->ops->dacs) {
+		if ((confmode == DAHDI_CONF_DIGITALMON) &&
+		    (chan->txgain == defgain) &&
+		    (chan->rxgain == defgain) &&
+		    (conf_chan->txgain == defgain) &&
+		    (conf_chan->rxgain == defgain)) {
+			dahdi_chan_dacs(chan, conf_chan);
+		} else {
+			dahdi_disable_dacs(chan);
+		}
+	}
+	/* if we are going onto a conf */
+	if (conf.confno &&
+	    (confmode == DAHDI_CONF_CONF ||
+	     confmode == DAHDI_CONF_CONFANN ||
+	     confmode == DAHDI_CONF_CONFMON ||
+	     confmode == DAHDI_CONF_CONFANNMON ||
+	     confmode == DAHDI_CONF_REALANDPSEUDO)) {
+		/* Get alias */
+		chan->_confn = dahdi_get_conf_alias(conf.confno);
+	}
+
+	spin_unlock(&chan->lock);
+
+	if (conf_chan) {
+		if ((confmode == DAHDI_CONF_MONITOR_RX_PREECHO) ||
+		    (confmode == DAHDI_CONF_MONITOR_TX_PREECHO) ||
+		    (confmode == DAHDI_CONF_MONITORBOTH_PREECHO)) {
+			if (!conf_chan->readchunkpreec) {
+				void *temp = kmalloc(sizeof(short) *
+						DAHDI_CHUNKSIZE, GFP_ATOMIC);
+				if (temp) {
+					preec = ENABLE_HWPREEC;
+
+					spin_lock(&conf_chan->lock);
+					conf_chan->readchunkpreec = temp;
+					spin_unlock(&conf_chan->lock);
+				}
+			}
+		} else {
+			preec = DISABLE_HWPREEC;
+
+			spin_lock(&conf_chan->lock);
+			kfree(conf_chan->readchunkpreec);
+			conf_chan->readchunkpreec = NULL;
+			spin_unlock(&conf_chan->lock);
+		}
+	}
+
+	spin_unlock_irqrestore(&chan_lock, flags);
+
+	if (ENABLE_HWPREEC == preec) {
+		int res = dahdi_enable_hw_preechocan(conf_chan);
+		if (res) {
+			spin_lock_irqsave(&chan_lock, flags);
+			spin_lock(&conf_chan->lock);
+			kfree(conf_chan->readchunkpreec);
+			conf_chan->readchunkpreec = NULL;
+			spin_unlock(&conf_chan->lock);
+			spin_unlock_irqrestore(&chan_lock, flags);
+		}
+		return res;
+	} else if (DISABLE_HWPREEC == preec) {
+		dahdi_disable_hw_preechocan(conf_chan);
+	}
+
+	dahdi_check_conf(oldconf);
+	if (copy_to_user((void __user *)data, &conf, sizeof(conf)))
+		return -EFAULT;
+	return 0;
+}
+
+/**
+ * dahdi_ioctl_confdiag() - Output debug info about conferences to console.
+ *
+ * This is a pure debugging aide since the only result is to the console.
+ *
+ * TODO: Does anyone use this anymore?  Should it be hidden behind a debug
+ * compile time option?
+ */
+static int dahdi_ioctl_confdiag(struct file *file, unsigned long data)
+{
+	struct dahdi_chan *chan;
+	unsigned long flags;
+	int i;
+	int j;
+	int c;
+
+	chan = chan_from_file(file);
+	if (!chan)
+		return -EINVAL;
+
+	if (!(chan->flags & DAHDI_FLAG_AUDIO))
+		return -EINVAL;
+
+	get_user(j, (int __user *)data);  /* get conf # */
+
+	/* loop thru the interesting ones */
+	for (i = ((j) ? j : 1); i <= ((j) ? j : DAHDI_MAX_CONF); i++) {
+		struct dahdi_span *s;
+		struct pseudo_chan *pseudo;
+		c = 0;
+		spin_lock_irqsave(&chan_lock, flags);
+		list_for_each_entry(s, &span_list, spans_node) {
+			int k;
+			for (k = 0; k < s->channels; k++) {
+				chan = s->chans[k];
+				if (chan->confna != i)
+					continue;
+				if (!c)
+					module_printk(KERN_NOTICE, "Conf #%d:\n", i);
+				c = 1;
+				module_printk(KERN_NOTICE, "chan %d, mode %x\n",
+					      chan->channo, chan->confmode);
+			}
+		}
+		list_for_each_entry(pseudo, &pseudo_chans, node) {
+			/* skip if not in this conf */
+			if (pseudo->chan.confna != i)
+				continue;
+			if (!c)
+				module_printk(KERN_NOTICE, "Conf #%d:\n", i);
+			c = 1;
+			module_printk(KERN_NOTICE, "chan %d, mode %x\n",
+				      pseudo->chan.channo, pseudo->chan.confmode);
+		}
+		spin_unlock_irqrestore(&chan_lock, flags);
+		if (c)
+			module_printk(KERN_NOTICE, "\n");
+	}
+	return 0;
+}
+
+static int dahdi_ioctl_getconf(struct file *file, unsigned long data)
+{
+	struct dahdi_confinfo conf;
+	struct dahdi_chan *chan;
+
+	if (copy_from_user(&conf, (void __user *)data, sizeof(conf)))
+		return -EFAULT;
+
+	chan = (!conf.chan) ? chan_from_file(file) :
+			      chan_from_num(conf.chan);
+	if (!chan)
+		return -EINVAL;
+
+	if (!(chan->flags & DAHDI_FLAG_AUDIO))
+		return -EINVAL;
+	conf.chan = chan->channo;  /* get channel number */
+	conf.confno = chan->confna;  /* get conference number */
+	conf.confmode = chan->confmode; /* get conference mode */
+	if (copy_to_user((void __user *)data, &conf, sizeof(conf)))
+		return -EFAULT;
+
+	return 0;
+}
+
+/**
+ * dahdi_ioctl_iomux() - Wait for *something* to happen.
+ *
+ * This is now basically like the wait_event_interruptible function, but with
+ * a much more involved wait condition.
+ */
+static int dahdi_ioctl_iomux(struct file *file, unsigned long data)
+{
+	struct dahdi_chan *const chan = chan_from_file(file);
+	unsigned long flags;
+	unsigned int iomask;
+	int ret = 0;
+#if !defined(__FreeBSD__)
+	DEFINE_WAIT(wait);
+#endif
+
+	if (get_user(iomask, (int __user *)data))
+		return -EFAULT;
+
+	if (unlikely(!iomask || !chan))
+		return -EINVAL;
+
+	while (1) {
+		unsigned int wait_result;
+
+		wait_result = 0;
+#if !defined(__FreeBSD__)
+		prepare_to_wait(&chan->waitq, &wait, TASK_INTERRUPTIBLE);
+#endif
+		if (unlikely(!chan->file->private_data)) {
+			/*
+			 * This should never happen. Surprise device removal
+			 * should lead us to the nodev_* file_operations
+			 */
+			msleep(5);
+			module_printk(KERN_ERR, "%s: NODEV\n", __func__);
+			ret = -ENODEV;
+			break;
+		}
+
+		spin_lock_irqsave(&chan->lock, flags);
+		chan->iomask = iomask;
+		if (iomask & DAHDI_IOMUX_READ) {
+			if ((chan->outreadbuf > -1)  && !chan->rxdisable)
+				wait_result |= DAHDI_IOMUX_READ;
+		}
+		if (iomask & DAHDI_IOMUX_WRITE) {
+			if (chan->inwritebuf > -1)
+				wait_result |= DAHDI_IOMUX_WRITE;
+		}
+		if (iomask & DAHDI_IOMUX_WRITEEMPTY) {
+			/* if everything empty -- be sure the transmitter is
+			 * enabled */
+			chan->txdisable = 0;
+			if (chan->outwritebuf < 0)
+				wait_result |= DAHDI_IOMUX_WRITEEMPTY;
+		}
+		if (iomask & DAHDI_IOMUX_SIGEVENT) {
+			if (chan->eventinidx != chan->eventoutidx)
+				wait_result |= DAHDI_IOMUX_SIGEVENT;
+		}
+		spin_unlock_irqrestore(&chan->lock, flags);
+
+		if (wait_result || (iomask & DAHDI_IOMUX_NOWAIT)) {
+			put_user(wait_result, (int __user *)data);
+			break;
+		}
+
+#if defined(__FreeBSD__)
+		wait_event_interruptible(chan->waitq, 1);
+#else /* !__FreeBSD__ */
+		if (signal_pending(current)) {
+			finish_wait(&chan->waitq, &wait);
+			return -ERESTARTSYS;
+		}
+
+		schedule();
+#endif /* !__FreeBSD__ */
+	}
+
+#if !defined(__FreeBSD__)
+	finish_wait(&chan->waitq, &wait);
+#endif
+	spin_lock_irqsave(&chan->lock, flags);
+	chan->iomask = 0;
+	spin_unlock_irqrestore(&chan->lock, flags);
+	return ret;
+}
+
+#ifdef CONFIG_DAHDI_MIRROR
+static int dahdi_ioctl_rxmirror(struct file *file, unsigned long data)
+{
+	int res;
+	int i;
+	unsigned long flags;
+	struct dahdi_chan *const chan = chan_from_file(file);
+	struct dahdi_chan *srcmirror;
+
+	if (!chan || chan->srcmirror)
+		return -ENODEV;
+
+	res = get_user(i, (int __user *)data);
+	if (res)
+		return res;
+
+	srcmirror = chan_from_num(i);
+	if (!srcmirror)
+		return -EINVAL;
+
+	module_printk(KERN_INFO, "Chan %d rx mirrored to %d\n",
+		      srcmirror->channo, chan->channo);
+
+	spin_lock_irqsave(&srcmirror->lock, flags);
+	if (srcmirror->rxmirror == NULL)
+		srcmirror->rxmirror = chan;
+
+	spin_unlock_irqrestore(&srcmirror->lock, flags);
+	if (srcmirror->rxmirror != chan) {
+		module_printk(KERN_INFO, "Chan %d cannot be rxmirrored, " \
+			      "already in use\n", srcmirror->channo);
+		return -EFAULT;
+	}
+
+	spin_lock_irqsave(&chan->lock, flags);
+	chan->srcmirror = srcmirror;
+	chan->flags = srcmirror->flags;
+	chan->sig =  srcmirror->sig;
+	clear_bit(DAHDI_FLAGBIT_OPEN, &chan->flags);
+	spin_unlock_irqrestore(&chan->lock, flags);
+
+	return 0;
+}
+
+static int dahdi_ioctl_txmirror(struct file *file, unsigned long data)
+{
+	int res;
+	int i;
+	unsigned long flags;
+	struct dahdi_chan *const chan = chan_from_file(file);
+	struct dahdi_chan *srcmirror;
+
+	if (!chan || chan->srcmirror)
+		return -ENODEV;
+
+	res = get_user(i, (int __user *)data);
+	if (res)
+		return res;
+
+	srcmirror = chan_from_num(i);
+	if (!srcmirror)
+		return -EINVAL;
+
+	module_printk(KERN_INFO, "Chan %d tx mirrored to %d\n",
+		      srcmirror->channo, chan->channo);
+
+	spin_lock_irqsave(&srcmirror->lock, flags);
+	srcmirror->txmirror = chan;
+	if (srcmirror->txmirror == NULL)
+		srcmirror->txmirror = chan;
+	spin_unlock_irqrestore(&srcmirror->lock, flags);
+
+	if (srcmirror->txmirror != chan) {
+		module_printk(KERN_INFO, "Chan %d cannot be txmirrored, " \
+			      "already in use\n", i);
+		return -EFAULT;
+	}
+
+	spin_lock_irqsave(&chan->lock, flags);
+	chan->srcmirror = srcmirror;
+	chan->flags = srcmirror->flags;
+	chan->sig =  srcmirror->sig;
+	clear_bit(DAHDI_FLAGBIT_OPEN, &chan->flags);
+	spin_unlock_irqrestore(&chan->lock, flags);
+
+	return 0;
+}
+#endif /* CONFIG_DAHDI_MIRROR */
+
 static int
 dahdi_chanandpseudo_ioctl(struct file *file, unsigned int cmd,
-			  unsigned long data, int unit)
+			  unsigned long data)
 {
-	struct dahdi_chan *chan = chans[unit];
+	struct dahdi_chan *chan = chan_from_file(file);
 	union {
 		struct dahdi_bufferinfo bi;
-		struct dahdi_confinfo conf;
 		struct dahdi_ring_cadence cad;
 	} stack;
 	unsigned long flags;
-	int i, j, k, rv;
-	int ret, c;
+	int i, j, rv;
 	void __user * const user_data = (void __user *)data;
 
 	if (!chan)
 		return -EINVAL;
 	switch(cmd) {
+#ifdef CONFIG_DAHDI_MIRROR
+	case DAHDI_RXMIRROR:
+		return dahdi_ioctl_rxmirror(file, data);
+
+	case DAHDI_TXMIRROR:
+		return dahdi_ioctl_txmirror(file, data);
+#endif /* CONFIG_DAHDI_MIRROR */
+
 	case DAHDI_DIALING:
 		spin_lock_irqsave(&chan->lock, flags);
 		j = chan->dialing;
@@ -5177,8 +5932,7 @@ dahdi_chanandpseudo_ioctl(struct file *file, unsigned int cmd,
 				chan->readn[j] = 0;
 				chan->readidx[j] = 0;
 			}
-			wake_up_interruptible(&chan->readbufq);  /* wake_up_interruptible waiting on read */
-			dahdi_poll_wakeup(&chan->sel);	/* wake up waiting on select */
+			dahdi_wake_up_chan(chan);  /* wake_up_interruptible waiting on read */
 		   }
 		if (i & DAHDI_FLUSH_WRITE) /* if for write (output) */
 		   {
@@ -5190,12 +5944,7 @@ dahdi_chanandpseudo_ioctl(struct file *file, unsigned int cmd,
 				chan->writen[j] = 0;
 				chan->writeidx[j] = 0;
 			}
-			wake_up_interruptible(&chan->writebufq); /* wake_up_interruptible waiting on write */
-			dahdi_poll_wakeup(&chan->sel);	/* wake up waiting on select */
-			   /* if IO MUX wait on write empty, well, this
-				certainly *did* empty the write */
-			if (chan->iomask & DAHDI_IOMUX_WRITEEMPTY)
-				wake_up_interruptible(&chan->eventbufq); /* wake_up_interruptible waiting on IOMUX */
+			dahdi_wake_up_chan(chan); /* wake_up_interruptible waiting on write */
 		   }
 		if (i & DAHDI_FLUSH_EVENT) /* if for events */
 		   {
@@ -5211,61 +5960,19 @@ dahdi_chanandpseudo_ioctl(struct file *file, unsigned int cmd,
 			  /* Know if there is a write pending */
 			i = (chan->outwritebuf > -1);
 			spin_unlock_irqrestore(&chan->lock, flags);
-			if (!i) break; /* skip if none */
-			rv = dahdi_schluffen(&chan->writebufq);
-			if (rv) return(rv);
+			if (!i)
+				break; /* skip if none */
+			rv = wait_event_interruptible(chan->waitq,
+						      (!chan->file->private_data || chan->outwritebuf > -1));
+			if (rv)
+				return rv;
+			if (unlikely(!chan->file->private_data))
+				return -ENODEV;
 		   }
 		break;
 	case DAHDI_IOMUX: /* wait for something to happen */
-		get_user(chan->iomask, (int __user *)data);  /* save mask */
-		if (!chan->iomask) return(-EINVAL);  /* cant wait for nothing */
-		for(;;)  /* loop forever */
-		   {
-			  /* has to have SOME mask */
-			ret = 0;  /* start with empty return value */
-			spin_lock_irqsave(&chan->lock, flags);
-			  /* if looking for read */
-			if (chan->iomask & DAHDI_IOMUX_READ)
-			   {
-				/* if read available */
-				if ((chan->outreadbuf > -1)  && !chan->rxdisable)
-					ret |= DAHDI_IOMUX_READ;
-			   }
-			  /* if looking for write avail */
-			if (chan->iomask & DAHDI_IOMUX_WRITE)
-			   {
-				if (chan->inwritebuf > -1)
-					ret |= DAHDI_IOMUX_WRITE;
-			   }
-			  /* if looking for write empty */
-			if (chan->iomask & DAHDI_IOMUX_WRITEEMPTY)
-			   {
-				  /* if everything empty -- be sure the transmitter is enabled */
-				chan->txdisable = 0;
-				if (chan->outwritebuf < 0)
-					ret |= DAHDI_IOMUX_WRITEEMPTY;
-			   }
-			  /* if looking for signalling event */
-			if (chan->iomask & DAHDI_IOMUX_SIGEVENT)
-			   {
-				  /* if event */
-				if (chan->eventinidx != chan->eventoutidx)
-					ret |= DAHDI_IOMUX_SIGEVENT;
-			   }
-			spin_unlock_irqrestore(&chan->lock, flags);
-			  /* if something to return, or not to wait */
-			if (ret || (chan->iomask & DAHDI_IOMUX_NOWAIT))
-			   {
-				  /* set return value */
-				put_user(ret, (int __user *)data);
-				break; /* get out of loop */
-			   }
-			rv = dahdi_schluffen(&chan->eventbufq);
-			if (rv) return(rv);
-		   }
-		  /* clear IO MUX mask */
-		chan->iomask = 0;
-		break;
+		return dahdi_ioctl_iomux(file, data);
+
 	case DAHDI_GETEVENT:  /* Get event on queue */
 		  /* set up for no event */
 		j = DAHDI_EVENT_NONE;
@@ -5285,9 +5992,9 @@ dahdi_chanandpseudo_ioctl(struct file *file, unsigned int cmd,
 	case DAHDI_CONFMUTE:  /* set confmute flag */
 		get_user(j, (int __user *)data);  /* get conf # */
 		if (!(chan->flags & DAHDI_FLAG_AUDIO)) return (-EINVAL);
-		spin_lock_irqsave(&bigzaplock, flags);
+		spin_lock_irqsave(&chan_lock, flags);
 		chan->confmute = j;
-		spin_unlock_irqrestore(&bigzaplock, flags);
+		spin_unlock_irqrestore(&chan_lock, flags);
 		break;
 	case DAHDI_GETCONFMUTE:  /* get confmute flag */
 		if (!(chan->flags & DAHDI_FLAG_AUDIO)) return (-EINVAL);
@@ -5301,8 +6008,7 @@ dahdi_chanandpseudo_ioctl(struct file *file, unsigned int cmd,
 		return rv;
 	case DAHDI_GETTONEZONE:
 		spin_lock_irqsave(&chan->lock, flags);
-		if (chan->curzone)
-			j = chan->tonezone;
+		j = (chan->curzone) ? chan->curzone->num : 0;
 		spin_unlock_irqrestore(&chan->lock, flags);
 		put_user(j, (int __user *) data);
 		break;
@@ -5314,217 +6020,19 @@ dahdi_chanandpseudo_ioctl(struct file *file, unsigned int cmd,
 		return rv;
 	case DAHDI_GETCONF_V1: /* intentional drop through */
 	case DAHDI_GETCONF:  /* get conf stuff */
-		if (copy_from_user(&stack.conf, user_data, sizeof(stack.conf)))
-			return -EFAULT;
-		i = stack.conf.chan;  /* get channel no */
-		   /* if zero, use current channel no */
-		if (!i) i = chan->channo;
-		  /* make sure channel number makes sense */
-		if ((i < 0) || (i > DAHDI_MAX_CONF) || (!chans[i])) return(-EINVAL);
-		if (!(chans[i]->flags & DAHDI_FLAG_AUDIO)) return (-EINVAL);
-		stack.conf.chan = i;  /* get channel number */
-		stack.conf.confno = chans[i]->confna;  /* get conference number */
-		stack.conf.confmode = chans[i]->confmode; /* get conference mode */
-		if (copy_to_user(user_data, &stack.conf, sizeof(stack.conf)))
-			return -EFAULT;
-		break;
+		return dahdi_ioctl_getconf(file, data);
+
 	case DAHDI_SETCONF_V1: /* Intentional fall through. */
 	case DAHDI_SETCONF:  /* set conf stuff */
-		if (copy_from_user(&stack.conf, user_data, sizeof(stack.conf)))
-			return -EFAULT;
-		i = stack.conf.chan;  /* get channel no */
-		   /* if zero, use current channel no */
-		if (!i) i = chan->channo;
-		  /* make sure channel number makes sense */
-		if ((i < 1) || (i > DAHDI_MAX_CHANNELS) || (!chans[i])) return(-EINVAL);
-		if (!(chans[i]->flags & DAHDI_FLAG_AUDIO)) return (-EINVAL);
-		if ((stack.conf.confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_MONITOR ||
-			(stack.conf.confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_MONITORTX ||
-			(stack.conf.confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_MONITORBOTH ||
-			(stack.conf.confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_MONITOR_RX_PREECHO ||
-			(stack.conf.confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_MONITOR_TX_PREECHO ||
-			(stack.conf.confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_MONITORBOTH_PREECHO) {
-			/* Monitor mode -- it's a channel */
-			if ((stack.conf.confno < 0) || (stack.conf.confno >= DAHDI_MAX_CHANNELS) || !chans[stack.conf.confno]) return(-EINVAL);
-		} else {
-			  /* make sure conf number makes sense, too */
-			if ((stack.conf.confno < -1) || (stack.conf.confno > DAHDI_MAX_CONF)) return(-EINVAL);
-		}
+		return dahdi_ioctl_setconf(file, data);
 
-		  /* if taking off of any conf, must have 0 mode */
-		if ((!stack.conf.confno) && stack.conf.confmode) return(-EINVAL);
-		  /* likewise if 0 mode must have no conf */
-		if ((!stack.conf.confmode) && stack.conf.confno) return (-EINVAL);
-		stack.conf.chan = i;  /* return with real channel # */
-		spin_lock_irqsave(&bigzaplock, flags);
-		spin_lock(&chan->lock);
-		if (stack.conf.confno == -1)
-			stack.conf.confno = dahdi_first_empty_conference();
-		if ((stack.conf.confno < 1) && (stack.conf.confmode)) {
-			/* No more empty conferences */
-			spin_unlock(&chan->lock);
-			spin_unlock_irqrestore(&bigzaplock, flags);
-			return -EBUSY;
-		}
-		  /* if changing confs, clear last added info */
-		if (stack.conf.confno != chans[i]->confna) {
-			memset(chans[i]->conflast, 0, DAHDI_MAX_CHUNKSIZE);
-			memset(chans[i]->conflast1, 0, DAHDI_MAX_CHUNKSIZE);
-			memset(chans[i]->conflast2, 0, DAHDI_MAX_CHUNKSIZE);
-		}
-		j = chans[i]->confna;  /* save old conference number */
-		chans[i]->confna = stack.conf.confno;   /* set conference number */
-		chans[i]->confmode = stack.conf.confmode;  /* set conference mode */
-		chans[i]->_confn = 0;		     /* Clear confn */
-		dahdi_check_conf(j);
-		dahdi_check_conf(stack.conf.confno);
-		if (chans[i]->span && chans[i]->span->ops->dacs) {
-			if (((stack.conf.confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_DIGITALMON) &&
-			    chans[i]->txgain == defgain &&
-			    chans[i]->rxgain == defgain &&
-			    chans[stack.conf.confno]->txgain == defgain &&
-			    chans[stack.conf.confno]->rxgain == defgain) {
-				dahdi_chan_dacs(chans[i], chans[stack.conf.confno]);
-			} else {
-				dahdi_disable_dacs(chans[i]);
-			}
-		}
-		/* if we are going onto a conf */
-		if (stack.conf.confno &&
-			((stack.conf.confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_CONF ||
-			(stack.conf.confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_CONFANN ||
-			(stack.conf.confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_CONFMON ||
-			(stack.conf.confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_CONFANNMON ||
-			(stack.conf.confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_REALANDPSEUDO)) {
-			/* Get alias */
-			chans[i]->_confn = dahdi_get_conf_alias(stack.conf.confno);
-		}
-
-		if (chans[stack.conf.confno]) {
-			if ((stack.conf.confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_MONITOR_RX_PREECHO ||
-			    (stack.conf.confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_MONITOR_TX_PREECHO ||
-			    (stack.conf.confmode & DAHDI_CONF_MODE_MASK) == DAHDI_CONF_MONITORBOTH_PREECHO)
-				chans[stack.conf.confno]->readchunkpreec = kmalloc(sizeof(*chans[stack.conf.confno]->readchunkpreec) * DAHDI_CHUNKSIZE, GFP_ATOMIC);
-			else {
-				if (chans[stack.conf.confno]->readchunkpreec) {
-					kfree(chans[stack.conf.confno]->readchunkpreec);
-					chans[stack.conf.confno]->readchunkpreec = NULL;
-				}
-			}
-		}
-
-		spin_unlock(&chan->lock);
-		spin_unlock_irqrestore(&bigzaplock, flags);
-		if (copy_to_user(user_data, &stack.conf, sizeof(stack.conf)))
-			return -EFAULT;
-		break;
-	case DAHDI_CONFLINK:  /* do conf link stuff */
-		if (!(chan->flags & DAHDI_FLAG_AUDIO)) return (-EINVAL);
-		if (copy_from_user(&stack.conf, user_data, sizeof(stack.conf)))
-			return -EFAULT;
-		  /* check sanity of arguments */
-		if ((stack.conf.chan < 0) || (stack.conf.chan > DAHDI_MAX_CONF)) return(-EINVAL);
-		if ((stack.conf.confno < 0) || (stack.conf.confno > DAHDI_MAX_CONF)) return(-EINVAL);
-		  /* cant listen to self!! */
-		if (stack.conf.chan && (stack.conf.chan == stack.conf.confno)) return(-EINVAL);
-		spin_lock_irqsave(&bigzaplock, flags);
-		spin_lock(&chan->lock);
-		  /* if to clear all links */
-		if ((!stack.conf.chan) && (!stack.conf.confno))
-		   {
-			   /* clear all the links */
-			memset(conf_links,0,sizeof(conf_links));
-			recalc_maxlinks();
-			spin_unlock(&chan->lock);
-			spin_unlock_irqrestore(&bigzaplock, flags);
-			break;
-		   }
-		rv = 0;  /* clear return value */
-		/* look for already existant specified combination */
-		for(i = 1; i <= DAHDI_MAX_CONF; i++)
-		   {
-			  /* if found, exit */
-			if ((conf_links[i].src == stack.conf.chan) &&
-				(conf_links[i].dst == stack.conf.confno)) break;
-		   }
-		if (i <= DAHDI_MAX_CONF) /* if found */
-		   {
-			if (!stack.conf.confmode) /* if to remove link */
-			   {
-				conf_links[i].src = conf_links[i].dst = 0;
-			   }
-			else /* if to add and already there, error */
-			   {
-				rv = -EEXIST;
-			   }
-		   }
-		else  /* if not found */
-		   {
-			if (stack.conf.confmode) /* if to add link */
-			   {
-				/* look for empty location */
-				for(i = 1; i <= DAHDI_MAX_CONF; i++)
-				   {
-					  /* if empty, exit loop */
-					if ((!conf_links[i].src) &&
-						 (!conf_links[i].dst)) break;
-				   }
-				   /* if empty spot found */
-				if (i <= DAHDI_MAX_CONF)
-				   {
-					conf_links[i].src = stack.conf.chan;
-					conf_links[i].dst = stack.conf.confno;
-				   }
-				else /* if no empties -- error */
-				   {
-					rv = -ENOSPC;
-				   }
-			   }
-			else /* if to remove, and not found -- error */
-			   {
-				rv = -ENOENT;
-			   }
-		   }
-		recalc_maxlinks();
-		spin_unlock(&chan->lock);
-		spin_unlock_irqrestore(&bigzaplock, flags);
-		return(rv);
-	case DAHDI_CONFDIAG_V1: /* Intention fall-through */
+	case DAHDI_CONFDIAG_V1: /* Intentional fall-through */
 	case DAHDI_CONFDIAG:  /* output diagnostic info to console */
-		if (!(chan->flags & DAHDI_FLAG_AUDIO)) return (-EINVAL);
-		get_user(j, (int __user *)data);  /* get conf # */
- 		  /* loop thru the interesting ones */
-		for(i = ((j) ? j : 1); i <= ((j) ? j : DAHDI_MAX_CONF); i++)
-		   {
-			c = 0;
-			for(k = 1; k < DAHDI_MAX_CHANNELS; k++)
-			   {
-				  /* skip if no pointer */
-				if (!chans[k]) continue;
-				  /* skip if not in this conf */
-				if (chans[k]->confna != i) continue;
-				if (!c) module_printk(KERN_NOTICE, "Conf #%d:\n",i);
-				c = 1;
-				module_printk(KERN_NOTICE, "chan %d, mode %x\n", k,chans[k]->confmode);
-			   }
-			rv = 0;
-			for(k = 1; k <= DAHDI_MAX_CONF; k++)
-			   {
-				if (conf_links[k].dst == i)
-				   {
-					if (!c) module_printk(KERN_NOTICE, "Conf #%d:\n",i);
-					c = 1;
-					if (!rv) module_printk(KERN_NOTICE, "Snooping on:\n");
-					rv = 1;
-					module_printk(KERN_NOTICE, "conf %d\n",conf_links[k].src);
-				   }
-			   }
-			if (c) module_printk(KERN_NOTICE, "\n");
-		   }
-		break;
+		return dahdi_ioctl_confdiag(file, data);
+
 	case DAHDI_CHANNO:  /* get channel number of stream */
-		/* return unit/channel number */
-		put_user(unit, (int __user *)data);
+		/* return channel number */
+		put_user(chan->channo, (int __user *)data);
 		break;
 	case DAHDI_SETLAW:
 		get_user(j, (int __user *)data);
@@ -5582,7 +6090,7 @@ dahdi_chanandpseudo_ioctl(struct file *file, unsigned int cmd,
 		break;
 	default:
 		/* Check for common ioctl's and private ones */
-		rv = dahdi_common_ioctl(file, cmd, data, unit);
+		rv = dahdi_common_ioctl(file, cmd, data);
 		/* if no span, just return with value */
 		if (!chan->span) return rv;
 		if ((rv == -ENOTTY) && chan->span->ops->ioctl)
@@ -5627,7 +6135,7 @@ ioctl_echocancel(struct dahdi_chan *chan, struct dahdi_echocanparams *ecp,
 	struct dahdi_echocan_state *ec = NULL, *ec_state;
 	const struct dahdi_echocan_factory *ec_current;
 	struct dahdi_echocanparam *params;
-	int ret;
+	int ret = 0;
 	unsigned long flags;
 
 	if (ecp->param_count > DAHDI_MAX_ECHOCANPARAMS)
@@ -5688,15 +6196,13 @@ ioctl_echocancel(struct dahdi_chan *chan, struct dahdi_echocanparams *ecp,
 
 	ec_current = NULL;
 
-	/* attempt to use the span's echo canceler; fall back to built-in
-	   if it fails (but not if an error occurs) */
-	ret = dahdi_chan_echocan_create(chan, ecp, params, &ec);
-
-	if ((ret == -ENODEV) && chan->ec_factory) {
+	if (chan->ec_factory) {
 		/* try to get another reference to the module providing
 		   this channel's echo canceler */
 		if (!try_module_get(chan->ec_factory->owner)) {
-			module_printk(KERN_ERR, "Cannot get a reference to the '%s' echo canceler\n", chan->ec_factory->name);
+			module_printk(KERN_ERR, "Cannot get a reference to the"
+				      " '%s' echo canceler\n",
+				      chan->ec_factory->get_name(chan));
 			goto exit_with_free;
 		}
 
@@ -5713,7 +6219,7 @@ ioctl_echocancel(struct dahdi_chan *chan, struct dahdi_echocanparams *ecp,
 		if (!ec) {
 			module_printk(KERN_ERR, "%s failed to allocate an " \
 				      "dahdi_echocan_state instance.\n",
-				      ec_current->name);
+				      ec_current->get_name(chan));
 			ret = -EFAULT;
 			goto exit_with_free;
 		}
@@ -5789,27 +6295,44 @@ static void set_echocan_fax_mode(struct dahdi_chan *chan, unsigned int channo, c
 	}
 }
 
-static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long data, int unit)
+static inline bool
+is_txstate(struct dahdi_chan *const chan, const int txstate)
 {
-	struct dahdi_chan *chan = chans[unit];
+	bool ret;
 	unsigned long flags;
-	int j, rv;
+
+	spin_lock_irqsave(&chan->lock, flags);
+	ret = (txstate == chan->txstate);
+	spin_unlock_irqrestore(&chan->lock, flags);
+	return ret;
+}
+
+static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long data)
+{
+	struct dahdi_chan *const chan = chan_from_file(file);
+	unsigned long flags;
+	int j;
 	int ret;
 	int oldconf;
-	void *rxgain=NULL;
+	const void *rxgain = NULL;
 
-	WARN_ON(!chan->master);
 	if (!chan)
 		return -ENOSYS;
+
+	WARN_ON(!chan->master);
 
 	switch(cmd) {
 #if defined(__FreeBSD__)
 	case FIONBIO:
 		get_user(j, data);
-		if (j)
-			chan->file_flags |= O_NONBLOCK;
-		else
-			chan->file_flags &= ~O_NONBLOCK;
+		spin_lock_irqsave(&chan->lock, flags);
+		if (chan->file) {
+			if (j)
+				chan->file->f_flags |= O_NONBLOCK;
+			else
+				chan->file->f_flags &= ~O_NONBLOCK;
+		}
+		spin_unlock_irqrestore(&chan->lock, flags);
 		break;
 	case FIOASYNC:
 		break;
@@ -5856,6 +6379,7 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 			  /* initialize conference variables */
 			chan->_confn = 0;
 			chan->confna = 0;
+			chan->conf_chan = NULL;
 			dahdi_disable_dacs(chan);
 			chan->confmode = 0;
 			chan->confmute = 0;
@@ -5868,14 +6392,13 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 			chan->ec_current = NULL;
 			/* release conference resource, if any to release */
 			reset_conf(chan);
-			if (chan->gainalloc && chan->rxgain)
+			if (is_gain_allocated(chan))
 				rxgain = chan->rxgain;
 			else
 				rxgain = NULL;
 
 			chan->rxgain = defgain;
 			chan->txgain = defgain;
-			chan->gainalloc = 0;
 			spin_unlock_irqrestore(&chan->lock, flags);
 
 			if (ec_state) {
@@ -5927,11 +6450,10 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 					ec_current = chan->ec_current;
 					chan->ec_current = NULL;
 					/* Make sure there's no gain */
-					if (chan->gainalloc)
+					if (is_gain_allocated(chan))
 						kfree(chan->rxgain);
 					chan->rxgain = defgain;
 					chan->txgain = defgain;
-					chan->gainalloc = 0;
 					chan->flags &= ~DAHDI_FLAG_AUDIO;
 					chan->flags |= (DAHDI_FLAG_PPP | DAHDI_FLAG_HDLC | DAHDI_FLAG_FCS);
 
@@ -6125,10 +6647,6 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 				spin_unlock_irqrestore(&chan->lock, flags);
 				if (file->f_flags & O_NONBLOCK)
 					return -EINPROGRESS;
-#if 0
-				rv = dahdi_schluffen(&chan->txstateq);
-				if (rv) return rv;
-#endif
 				break;
 			case DAHDI_WINK:
 				spin_lock_irqsave(&chan->lock, flags);
@@ -6140,8 +6658,12 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 				spin_unlock_irqrestore(&chan->lock, flags);
 				if (file->f_flags & O_NONBLOCK)
 					return -EINPROGRESS;
-				rv = dahdi_schluffen(&chan->txstateq);
-				if (rv) return rv;
+				wait_event_interruptible(chan->waitq,
+					!chan->file->private_data || is_txstate(chan, DAHDI_TXSIG_ONHOOK));
+				if (unlikely(!chan->file->private_data))
+					return -ENODEV;
+				if (signal_pending(current))
+					return -ERESTARTSYS;
 				break;
 			case DAHDI_FLASH:
 				spin_lock_irqsave(&chan->lock, flags);
@@ -6153,8 +6675,12 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 				spin_unlock_irqrestore(&chan->lock, flags);
 				if (file->f_flags & O_NONBLOCK)
 					return -EINPROGRESS;
-				rv = dahdi_schluffen(&chan->txstateq);
-				if (rv) return rv;
+				wait_event_interruptible(chan->waitq,
+					!chan->file->private_data || is_txstate(chan, DAHDI_TXSIG_OFFHOOK));
+				if (unlikely(!chan->file->private_data))
+					return -ENODEV;
+				if (signal_pending(current))
+					return -ERESTARTSYS;
 				break;
 			case DAHDI_RINGOFF:
 				spin_lock_irqsave(&chan->lock, flags);
@@ -6190,36 +6716,38 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 		}
 		break;
 #endif
+	case DAHDI_BUFFER_EVENTS:
+		if (get_user(j, (int __user *)data))
+			return -EFAULT;
+		if (j)
+			set_bit(DAHDI_FLAGBIT_BUFEVENTS, &chan->flags);
+		else
+			clear_bit(DAHDI_FLAGBIT_BUFEVENTS, &chan->flags);
+
+		break;
 	default:
-		return dahdi_chanandpseudo_ioctl(file, cmd, data, unit);
+		return dahdi_chanandpseudo_ioctl(file, cmd, data);
 	}
 	return 0;
 }
 
-static int dahdi_prechan_ioctl(struct file *file, unsigned int cmd, unsigned long data, int unit)
+static int dahdi_prechan_ioctl(struct file *file, unsigned int cmd, unsigned long data)
 {
-	struct dahdi_chan *chan = dahdi_get_private_data(file);
 	int channo;
 	int res;
 
-	if (chan) {
+	if (file->private_data) {
 		module_printk(KERN_NOTICE, "Huh?  Prechan already has private data??\n");
 	}
 	switch(cmd) {
 	case DAHDI_SPECIFY:
 		get_user(channo, (int __user *)data);
-		if (channo < 1)
+		file->private_data = chan_from_num(channo);
+		if (!file->private_data)
 			return -EINVAL;
-		if (channo > DAHDI_MAX_CHANNELS)
-			return -EINVAL;
-		res = dahdi_specchan_open(file, channo);
-		if (!res) {
-			/* Setup the pointer for future stuff */
-			chan = chans[channo];
-			dahdi_set_private_data(file, chan);
-			/* Return success */
-			return 0;
-		}
+		res = dahdi_specchan_open(file);
+		if (res)
+			file->private_data = NULL;
 		return res;
 	default:
 		return -ENOSYS;
@@ -6227,34 +6755,23 @@ static int dahdi_prechan_ioctl(struct file *file, unsigned int cmd, unsigned lon
 	return 0;
 }
 
-#ifdef HAVE_UNLOCKED_IOCTL
-static long dahdi_ioctl(struct file *file, unsigned int cmd, unsigned long data)
-#else
-static int dahdi_ioctl(struct inode *inode, struct file *file,
-		unsigned int cmd, unsigned long data)
-#endif
+static long
+dahdi_unlocked_ioctl(struct file *file, unsigned int cmd, unsigned long data)
 {
 	int unit = UNIT(file);
-	struct dahdi_chan *chan;
 	struct dahdi_timer *timer;
 	int ret;
 
-#ifdef HAVE_UNLOCKED_IOCTL
+#if defined(HAVE_UNLOCKED_IOCTL) && defined(CONFIG_BKL)
 	lock_kernel();
 #endif
 
-	if (!unit) {
+	if (unit == DAHDI_CTL) {
 		ret = dahdi_ctl_ioctl(file, cmd, data);
 		goto unlock_exit;
 	}
 
-	if (unit == 250) {
-#if defined(__FreeBSD__)
-		if (dahdi_transcode_fops && dahdi_transcode_fops->ioctl) {
-			ret = dahdi_transcode_fops->ioctl(inode, file, cmd, data);
-			goto unlock_exit;
-		}
-#endif /* __FreeBSD__ */
+	if (unit == DAHDI_TRANSCODE) {
 		/* dahdi_transcode should have updated the file_operations on
 		 * this file object on open, so we shouldn't be here. */
 		WARN_ON(1);
@@ -6262,40 +6779,52 @@ static int dahdi_ioctl(struct inode *inode, struct file *file,
 		goto unlock_exit;
 	}
 
-	if (unit == 253) {
-		timer = dahdi_get_private_data(file);
+	if (unit == DAHDI_TIMER) {
+		timer = file->private_data;
 		if (timer)
 			ret = dahdi_timer_ioctl(file, cmd, data, timer);
 		else
 			ret = -EINVAL;
 		goto unlock_exit;
 	}
-	if (unit == 254) {
-		chan = dahdi_get_private_data(file);
-		if (chan)
-			ret = dahdi_chan_ioctl(file, cmd, data, chan->channo);
+	if (unit == DAHDI_CHANNEL) {
+		if (file->private_data)
+			ret = dahdi_chan_ioctl(file, cmd, data);
 		else
-			ret = dahdi_prechan_ioctl(file, cmd, data, unit);
+			ret = dahdi_prechan_ioctl(file, cmd, data);
 		goto unlock_exit;
 	}
-	if (unit == 255) {
-		chan = dahdi_get_private_data(file);
-		if (!chan) {
+	if (unit == DAHDI_PSEUDO) {
+		if (!file->private_data) {
 			module_printk(KERN_NOTICE, "No pseudo channel structure to read?\n");
 			ret = -EINVAL;
 			goto unlock_exit;
 		}
-		ret = dahdi_chanandpseudo_ioctl(file, cmd, data, chan->channo);
+		ret = dahdi_chanandpseudo_ioctl(file, cmd, data);
 		goto unlock_exit;
 	}
-	ret = dahdi_chan_ioctl(file, cmd, data, unit);
+
+	if (!file->private_data) {
+		ret = -ENXIO;
+		goto unlock_exit;
+	}
+
+	ret = dahdi_chan_ioctl(file, cmd, data);
 
 unlock_exit:
-#ifdef HAVE_UNLOCKED_IOCTL
+#if defined(HAVE_UNLOCKED_IOCTL) && defined(CONFIG_BKL)
 	unlock_kernel();
 #endif
 	return ret;
 }
+
+#ifndef HAVE_UNLOCKED_IOCTL
+static int dahdi_ioctl(struct inode *inode, struct file *file,
+		unsigned int cmd, unsigned long data)
+{
+	return dahdi_unlocked_ioctl(file, cmd, data);
+}
+#endif
 
 #ifdef HAVE_COMPAT_IOCTL
 static long dahdi_ioctl_compat(struct file *file, unsigned int cmd,
@@ -6304,68 +6833,286 @@ static long dahdi_ioctl_compat(struct file *file, unsigned int cmd,
 	if (cmd == DAHDI_SFCONFIG)
 		return -ENOTTY; /* Not supported yet */
 
-	return dahdi_ioctl(file, cmd, data);
+	return dahdi_unlocked_ioctl(file, cmd, data);
 }
 #endif
 
 /**
- * dahdi_register() - unregister a new DAHDI span
- * @span:	the DAHDI span
- * @prefmaster:	will the new span be preffered as a master?
+ * _get_next_channo - Return the next taken channel number from the span list.
+ * @span:	The span with which to start the search.
  *
- * Registers a span for usage with DAHDI. All the channel numbers in it
- * will get the lowest available channel numbers.
+ * Returns -1 if there aren't any channels on span or any of the following
+ * spans, otherwise, returns the channel number of the first channel.
+ *
+ * Must be callled with registration_mutex held.
+ *
+ */
+static unsigned int _get_next_channo(const struct dahdi_span *span)
+{
+	const struct list_head *pos = &span->spans_node;
+	while (pos != &span_list) {
+		span = list_entry(pos, struct dahdi_span, spans_node);
+		if (span->channels)
+			return span->chans[0]->channo;
+		pos = pos->next;
+	}
+	return -1;
+}
+
+static void
+set_spanno_and_basechan(struct dahdi_span *span, u32 spanno, u32 basechan)
+{
+	int i;
+	dahdi_dev_dbg(ASSIGN, span_device(span),
+		"set: spanno=%d, basechan=%d (span->channels=%d)\n",
+		spanno, basechan, span->channels);
+	span->spanno = spanno;
+	for (i = 0; i < span->channels; ++i)
+		span->chans[i]->channo = basechan + i;
+}
+
+/**
+ * _assign_spanno_and_basechan - Assign next available span and channel numbers.
+ *
+ * This function will set span->spanno and channo for all the member channels.
+ * It will assign the first available location.
+ *
+ * Must be called with registration_mutex held.
+ *
+ */
+static int _assign_spanno_and_basechan(struct dahdi_span *span)
+{
+	struct dahdi_span *pos;
+	unsigned int next_channo;
+	unsigned int spanno = 1;
+	unsigned int basechan = 1;
+
+	dahdi_dev_dbg(ASSIGN, span_device(span),
+		"assign: channels=%d\n", span->channels);
+	list_for_each_entry(pos, &span_list, spans_node) {
+
+		if (pos->spanno <= spanno) {
+			spanno = pos->spanno + 1;
+			basechan = pos->chans[0]->channo + pos->channels;
+			continue;
+		}
+
+		next_channo = _get_next_channo(pos);
+		if ((basechan + span->channels) >= next_channo)
+			break;
+
+		/* We can't fit here, let's look at the next location. */
+		spanno = pos->spanno + 1;
+		if (pos->channels)
+			basechan = pos->chans[0]->channo + pos->channels;
+	}
+
+	dahdi_dev_dbg(ASSIGN, span_device(span),
+		"good: spanno=%d, basechan=%d (span->channels=%d)\n",
+		spanno, basechan, span->channels);
+	set_spanno_and_basechan(span, spanno, basechan);
+	return 0;
+}
+
+static inline struct dahdi_span *span_from_node(struct list_head *node)
+{
+	return container_of(node, struct dahdi_span, spans_node);
+}
+
+/*
+ * Call with registration_mutex held.  Make sure all the spans are on the list
+ * ordered by span.
+ *
+ */
+static void _dahdi_add_span_to_span_list(struct dahdi_span *span)
+{
+	unsigned long flags;
+	struct dahdi_span *pos;
+
+	if (list_empty(&span_list)) {
+		list_add_tail(&span->spans_node, &span_list);
+		return;
+	}
+
+	list_for_each_entry(pos, &span_list, spans_node) {
+		WARN_ON(0 == pos->spanno);
+		if (pos->spanno > span->spanno)
+			break;
+	}
+
+	spin_lock_irqsave(&chan_lock, flags);
+	list_add(&span->spans_node, pos->spans_node.prev);
+	spin_unlock_irqrestore(&chan_lock, flags);
+}
+
+/**
+ * _check_spanno_and_basechan - Check if we can fit the new span in the requested location.
+ *
+ * Must be called with registration_mutex held.
+ *
+ */
+static int
+_check_spanno_and_basechan(struct dahdi_span *span, u32 spanno, u32 basechan)
+{
+	struct dahdi_span *pos;
+	unsigned int next_channo;
+
+	dahdi_dev_dbg(ASSIGN, span_device(span),
+		"check: spanno=%d, basechan=%d (span->channels=%d)\n",
+		spanno, basechan, span->channels);
+	list_for_each_entry(pos, &span_list, spans_node) {
+
+		next_channo = _get_next_channo(pos);
+		dahdi_dev_dbg(ASSIGN, span_device(span),
+			"pos: spanno=%d channels=%d (next_channo=%d)\n",
+			pos->spanno, pos->channels, next_channo);
+
+		if (pos->spanno <= spanno) {
+			if (basechan < next_channo + pos->channels) {
+				/* Requested basechan breaks channel sorting */
+				dev_notice(span_device(span),
+					"[%d] basechan (%d) is too low for wanted span %d\n",
+					local_spanno(span), basechan, spanno);
+				return -EINVAL;
+			}
+			continue;
+		}
+
+		if (next_channo == -1)
+			break;
+
+		if ((basechan + span->channels) <= next_channo)
+			break;
+
+		/* Cannot fit the span into the requested location. Abort. */
+		dev_notice(span_device(span),
+			"cannot fit span %d (basechan=%d) into requested location\n",
+			spanno, basechan);
+		return -EINVAL;
+	}
+
+	dahdi_dev_dbg(ASSIGN, span_device(span),
+		"good: spanno=%d, basechan=%d (span->channels=%d)\n",
+		spanno, basechan, span->channels);
+	set_spanno_and_basechan(span, spanno, basechan);
+	return 0;
+}
+
+
+struct dahdi_device *dahdi_create_device(struct pci_dev *pdev)
+{
+	struct dahdi_device *ddev;
+	ddev = kzalloc(sizeof(*ddev), GFP_KERNEL);
+	if (!ddev)
+		return NULL;
+	INIT_LIST_HEAD(&ddev->spans);
+#ifdef CONFIG_DAHDI_SYSFS
+	dahdi_sysfs_init_device(ddev);
+#endif
+#if defined(__FreeBSD__)
+	if (pdev)
+		ddev->dev = pdev->dev;
+#endif
+	return ddev;
+}
+EXPORT_SYMBOL(dahdi_create_device);
+
+void dahdi_free_device(struct dahdi_device *ddev)
+{
+#if !defined(__FreeBSD__)
+	put_device(&ddev->dev);
+#endif
+}
+EXPORT_SYMBOL(dahdi_free_device);
+
+/**
+ * __dahdi_init_span - Setup all the data structures for the span.
+ * @span:	The span of interest.
+ *
+ */
+static void __dahdi_init_span(struct dahdi_span *span)
+{
+	int x;
+
+	INIT_LIST_HEAD(&span->spans_node);
+	spin_lock_init(&span->lock);
+	clear_bit(DAHDI_FLAGBIT_REGISTERED, &span->flags);
+
+	if (!span->deflaw) {
+		module_printk(KERN_NOTICE, "Span %s didn't specify default "
+			      "law. Assuming mulaw, please fix driver!\n",
+			      span->name);
+		span->deflaw = DAHDI_LAW_MULAW;
+	}
+
+	for (x = 0; x < span->channels; ++x) {
+		span->chans[x]->span = span;
+		__dahdi_init_chan(span->chans[x]);
+	}
+}
+
+/**
+ * dahdi_init_span - (Re)Initializes a dahdi span.
+ * @span:		The span to initialize.
+ *
+ * Reinitializing a device span might be necessary if a span has been changed
+ * (channels added / removed) between when the dahdi_device it is on was first
+ * registered and when the spans are actually assigned.
+ *
+ */
+void dahdi_init_span(struct dahdi_span *span)
+{
+	mutex_lock(&registration_mutex);
+	__dahdi_init_span(span);
+	mutex_unlock(&registration_mutex);
+}
+EXPORT_SYMBOL(dahdi_init_span);
+
+/**
+ * _dahdi_assign_span() - Assign a new DAHDI span
+ * @span:	the DAHDI span
+ * @spanno:	The span number we would like assigned. If 0, the first
+ *		available spanno/basechan will be used.
+ * @basechan:	The base channel number we would like. Ignored if spanno is 0.
+ * @prefmaster:	will the new span be preferred as a master?
+ *
+ * Assigns a span for usage with DAHDI. All the channel numbers in it will
+ * have their numbering started at basechan.
  *
  * If prefmaster is set to anything > 0, span will attempt to become the
  * master DAHDI span at registration time. If 0: it will only become
  * master if no other span is currently the master (i.e.: it is the
  * first one).
+ *
+ * Must be called with registration_mutex held, and the span must have already
+ * been initialized ith the __dahdi_init_span call.
+ *
  */
-int dahdi_register(struct dahdi_span *span, int prefmaster)
+static int _dahdi_assign_span(struct dahdi_span *span, unsigned int spanno,
+			      unsigned int basechan, int prefmaster)
 {
-	int x;
 	int res = 0;
+	unsigned int x;
 
-	if (!span)
-		return -EINVAL;
-
-	if (!span->ops)
-		return -EINVAL;
-
-	if (!span->ops->owner)
-		return -EINVAL;
-
+	if (!span || !span->ops || !span->ops->owner)
+		return -EFAULT;
 
 	if (test_bit(DAHDI_FLAGBIT_REGISTERED, &span->flags)) {
-		module_printk(KERN_ERR, "Span %s already appears to be registered\n", span->name);
-		return -EBUSY;
+		dev_notice(span_device(span),
+			 "local span %d is already assigned span %d\n",
+			 local_spanno(span), span->spanno);
+		return -EINVAL;
 	}
 
-	for (x = 1; x < maxspans; x++) {
-		if (spans[x] == span) {
-			module_printk(KERN_ERR, "Span %s already in list\n", span->name);
-			return -EBUSY;
+	if (span->ops->enable_hw_preechocan ||
+	    span->ops->disable_hw_preechocan) {
+		if ((NULL == span->ops->enable_hw_preechocan) ||
+		    (NULL == span->ops->disable_hw_preechocan)) {
+			dev_notice(span_device(span),
+				"span with inconsistent enable/disable hw_preechocan");
+			return -EFAULT;
 		}
 	}
-
-	for (x = 1; x < DAHDI_MAX_SPANS; x++) {
-		if (!spans[x])
-			break;
-	}
-
-	if (x < DAHDI_MAX_SPANS) {
-		spans[x] = span;
-		if (maxspans < x + 1)
-			maxspans = x + 1;
-	} else {
-		module_printk(KERN_ERR, "Too many DAHDI spans registered\n");
-		return -EBUSY;
-	}
-
-	set_bit(DAHDI_FLAGBIT_REGISTERED, &span->flags);
-	span->spanno = x;
-
-	spin_lock_init(&span->lock);
 
 	if (!span->deflaw) {
 		module_printk(KERN_NOTICE, "Span %s didn't specify default law.  "
@@ -6373,140 +7120,338 @@ int dahdi_register(struct dahdi_span *span, int prefmaster)
 		span->deflaw = DAHDI_LAW_MULAW;
 	}
 
-	for (x = 0; x < span->channels; x++) {
-		span->chans[x]->span = span;
-		res = dahdi_chan_reg(span->chans[x]);
-		if (res) {
-			for (x--; x >= 0; x--)
-				dahdi_chan_unreg(span->chans[x]);
-			goto unreg_channels;
-		}
-	}
+	/* Look through the span list to find the first available span number.
+	 * The spans are kept on this list in sorted order. We'll also save
+	 * off the next available channel number to use. */
+
+	if (0 == spanno)
+		res = _assign_spanno_and_basechan(span);
+	else
+		res = _check_spanno_and_basechan(span, spanno, basechan);
+
+	if (res)
+		return res;
+
+	for (x = 0; x < span->channels; x++)
+		dahdi_chan_reg(span->chans[x]);
 
 #ifdef CONFIG_PROC_FS
 	{
 		char tempfile[17];
-		snprintf(tempfile, sizeof(tempfile), "dahdi/%d", span->spanno);
-		proc_entries[span->spanno] = create_proc_read_entry(tempfile, 0444,
-				NULL, dahdi_proc_read, (int *) (long) span->spanno);
+		snprintf(tempfile, sizeof(tempfile), "%d", span->spanno);
+		span->proc_entry = create_proc_entry(tempfile, 0444,
+					root_proc_entry);
+		if (!span->proc_entry) {
+			res = -EFAULT;
+			span_err(span, "Error creating procfs entry\n");
+			goto cleanup;
+		}
+		span->proc_entry->data = (void *)(long)span->spanno;
+		span->proc_entry->proc_fops = &dahdi_proc_ops;
 	}
 #endif
 
-	for (x = 0; x < span->channels; x++) {
-		if (span->chans[x]->channo < 250) {
+#ifdef CONFIG_DAHDI_SYSFS
+	res = span_sysfs_create(span);
+#endif
 #if defined(__FreeBSD__)
-			span->chans[x]->dev = make_dev(
-			    &dahdi_devsw, span->chans[x]->channo,
-			    UID_ROOT, GID_WHEEL, 0644,
-			    "dahdi/%d", span->chans[x]->channo);
-			dev_depends(dev_ctl, span->chans[x]->dev);
-#else /* !__FreeBSD__ */
-			char chan_name[32];
-			snprintf(chan_name, sizeof(chan_name), "dahdi!%d", 
-					span->chans[x]->channo);
-			CLASS_DEV_CREATE(dahdi_class, MKDEV(DAHDI_MAJOR, 
-					span->chans[x]->channo), NULL, chan_name);
-#endif /* !__FreeBSD__ */
-		}
-	}
+	res = dahdi_span_register_chardev(span);
+#endif
+	if (res)
+		goto cleanup;
 
-	if (debug) {
+	if (debug & DEBUG_MAIN) {
 		module_printk(KERN_NOTICE, "Registered Span %d ('%s') with "
 				"%d channels\n", span->spanno, span->name, span->channels);
 	}
 
-	if (!master || prefmaster) {
-		master = span;
-		if (debug) {
-			module_printk(KERN_NOTICE, "Span ('%s') is new master\n", 
-					span->name);
-		}
-	}
+	_dahdi_add_span_to_span_list(span);
+
+	set_bit(DAHDI_FLAGBIT_REGISTERED, &span->flags);
+	if (span->ops->assigned)
+		span->ops->assigned(span);
+
+	__dahdi_find_master_span();
 
 	return 0;
 
-unreg_channels:
-	spans[span->spanno] = NULL;
+cleanup:
+#ifdef CONFIG_PROC_FS
+	if (span->proc_entry) {
+		char tempfile[17];
+
+		snprintf(tempfile, sizeof(tempfile), "dahdi/%d", span->spanno);
+		remove_proc_entry(tempfile, NULL);
+		span->proc_entry = NULL;
+	}
+#endif
+	for (x = 0; x < span->channels; x++) {
+		struct dahdi_chan *chan = span->chans[x];
+		if (test_bit(DAHDI_FLAGBIT_REGISTERED, &chan->flags))
+			dahdi_chan_unreg(chan);
+	}
 	return res;
 }
 
+int dahdi_assign_span(struct dahdi_span *span, unsigned int spanno,
+		      unsigned int basechan, int prefmaster)
+{
+	int ret;
+	mutex_lock(&registration_mutex);
+	ret = _dahdi_assign_span(span, spanno, basechan, prefmaster);
+	mutex_unlock(&registration_mutex);
+	return ret;
+}
+
+int dahdi_assign_device_spans(struct dahdi_device *ddev)
+{
+	struct dahdi_span *span;
+	mutex_lock(&registration_mutex);
+	list_for_each_entry(span, &ddev->spans, device_node)
+		_dahdi_assign_span(span, 0, 0, 1);
+	mutex_unlock(&registration_mutex);
+	return 0;
+}
+
+static int auto_assign_spans = 1;
+static const char *UNKNOWN = "";
 
 /**
- * dahdi_unregister() - unregister a DAHDI span
+ * _dahdi_register_device - Registers a DAHDI device and assign its spans.
+ * @ddev:	the DAHDI device
+ *
+ * If auto_assign_spans is 0, add the device to the device list and wait for
+ * userspace to finish registration. Otherwise, go ahead and register the
+ * spans in order as was done historically.
+ *
+ * Must hold registration_mutex when this function is called.
+ *
+ */
+static int _dahdi_register_device(struct dahdi_device *ddev,
+				  struct device *parent)
+{
+	struct dahdi_span *s;
+	int ret = 0;
+
+	ddev->manufacturer	= (ddev->manufacturer) ?: UNKNOWN;
+	ddev->location		= (ddev->location) ?: UNKNOWN;
+	ddev->devicetype	= (ddev->devicetype) ?: UNKNOWN;
+
+	list_for_each_entry(s, &ddev->spans, device_node) {
+		s->parent = ddev;
+		s->spanno = 0;
+		__dahdi_init_span(s);
+	}
+
+#ifdef CONFIG_DAHDI_SYSFS
+	ret = dahdi_sysfs_add_device(ddev, parent);
+	if (ret)
+		return ret;
+#endif
+
+	if (!auto_assign_spans)
+		return 0;
+
+	list_for_each_entry(s, &ddev->spans, device_node)
+		ret = _dahdi_assign_span(s, 0, 0, 1);
+
+#ifdef CONFIG_DAHDI_SYSFS
+	if (ret)
+		dahdi_sysfs_unregister_device(ddev);
+#endif
+
+	return ret;
+}
+
+/**
+ * dahdi_register_device() - unregister a new DAHDI device
+ * @ddev:	the DAHDI device
+ *
+ * Registers a device for usage with DAHDI.
+ *
+ */
+int dahdi_register_device(struct dahdi_device *ddev, struct device *parent)
+{
+	int ret;
+
+	if (!ddev)
+		return -EINVAL;
+
+	mutex_lock(&registration_mutex);
+	ret = _dahdi_register_device(ddev, parent);
+	mutex_unlock(&registration_mutex);
+
+	return ret;
+}
+EXPORT_SYMBOL(dahdi_register_device);
+
+static void disable_span(struct dahdi_span *span)
+{
+	int		x;
+	unsigned long	flags;
+
+	spin_lock_irqsave(&span->lock, flags);
+	span->alarms = DAHDI_ALARM_NOTOPEN;
+	for (x = 0; x < span->channels; x++) {
+		/*
+		 * This event may not make it to user space before the channel
+		 * is gone, but let's try.
+		 */
+		dahdi_qevent_lock(span->chans[x], DAHDI_EVENT_REMOVED);
+	}
+	dahdi_alarm_notify(span);
+	spin_unlock_irqrestore(&span->lock, flags);
+	module_printk(KERN_INFO, "%s: span %d\n", __func__, span->spanno);
+}
+
+/**
+ * _dahdi_unassign_span() - unassign a DAHDI span
  * @span:	the DAHDI span
  *
- * Unregisters a span that has been previously registered with
- * dahdi_register().
+ * Unassigns a span that has been previously assigned with
+ * dahdi_assign_span().
+ *
+ * Must be called with the registration_mutex held.
+ *
  */
-int dahdi_unregister(struct dahdi_span *span)
+static int _dahdi_unassign_span(struct dahdi_span *span)
 {
 	int x;
-	int new_maxspans;
-	static struct dahdi_span *new_master;
-
-#ifdef CONFIG_PROC_FS
-	char tempfile[17];
-#endif /* CONFIG_PROC_FS */
+	struct dahdi_span *new_master, *s;
+	unsigned long flags;
 
 	if (!test_bit(DAHDI_FLAGBIT_REGISTERED, &span->flags)) {
-		module_printk(KERN_ERR, "Span %s does not appear to be registered\n", span->name);
-		return -1;
+		dev_info(span_device(span),
+			"local span %d is already unassigned\n",
+			local_spanno(span));
+		return -EINVAL;
 	}
-	/* Shutdown the span if it's running */
-	if (span->flags & DAHDI_FLAG_RUNNING)
-		if (span->ops->shutdown)
-			span->ops->shutdown(span);
-
-	if (spans[span->spanno] != span) {
-		module_printk(KERN_ERR, "Span %s has spanno %d which is something else\n", span->name, span->spanno);
-		return -1;
-	}
-	if (debug)
-		module_printk(KERN_NOTICE, "Unregistering Span '%s' with %d channels\n", span->name, span->channels);
-#ifdef CONFIG_PROC_FS
-	snprintf(tempfile, sizeof(tempfile)-1, "dahdi/%d", span->spanno);
-        remove_proc_entry(tempfile, NULL);
-#endif /* CONFIG_PROC_FS */
-
-	for (x = 0; x < span->channels; x++) {
-		if (span->chans[x]->channo < 250) {
-#if defined(__FreeBSD__)
-			if (span->chans[x]->dev != NULL) {
-				destroy_dev(span->chans[x]->dev);
-				span->chans[x]->dev = NULL;
-			}
-#else /* !__FreeBSD__ */
-			CLASS_DEV_DESTROY(dahdi_class, MKDEV(DAHDI_MAJOR, span->chans[x]->channo));
-#endif /* !__FreeBSD__ */
-		}
-	}
-
-	spans[span->spanno] = NULL;
+	spin_lock_irqsave(&chan_lock, flags);
+	list_del_init(&span->spans_node);
+	spin_unlock_irqrestore(&chan_lock, flags);
 	span->spanno = 0;
 	clear_bit(DAHDI_FLAGBIT_REGISTERED, &span->flags);
+
+	/* Shutdown the span if it's running */
+	if ((span->flags & DAHDI_FLAG_RUNNING) && span->ops->shutdown)
+		span->ops->shutdown(span);
+
+	if (debug & DEBUG_MAIN)
+		module_printk(KERN_NOTICE, "Unassigning Span '%s' with %d channels\n", span->name, span->channels);
+#ifdef CONFIG_PROC_FS
+	if (span->proc_entry)
+		remove_proc_entry(span->proc_entry->name, root_proc_entry);
+#endif /* CONFIG_PROC_FS */
+
+#ifdef CONFIG_DAHDI_SYSFS
+	span_sysfs_remove(span);
+#endif
+#if defined(__FreeBSD__)
+	dahdi_span_unregister_chardev(span);
+#endif
+
 	for (x=0;x<span->channels;x++)
 		dahdi_chan_unreg(span->chans[x]);
-	new_maxspans = 0;
+
 	new_master = master; /* FIXME: locking */
 	if (master == span)
 		new_master = NULL;
-	for (x=1;x<DAHDI_MAX_SPANS;x++) {
-		if (spans[x]) {
-			new_maxspans = x+1;
-			if (!new_master)
-				new_master = spans[x];
-		}
+
+	spin_lock_irqsave(&chan_lock, flags);
+	list_for_each_entry(s, &span_list, spans_node) {
+		if ((s == new_master) || !can_provide_timing(s))
+			continue;
+		new_master = s;
+		break;
 	}
-	maxspans = new_maxspans;
-	if (master != new_master)
-		if (debug)
+	spin_unlock_irqrestore(&chan_lock, flags);
+	if (master != new_master) {
+		if (debug & DEBUG_MAIN) {
 			module_printk(KERN_NOTICE, "%s: Span ('%s') is new master\n", __FUNCTION__,
 				      (new_master)? new_master->name: "no master");
+		}
+	}
 	master = new_master;
-
 	spin_lock_destroy(&span->lock);
 	return 0;
 }
+
+static int open_channel_count(const struct dahdi_span *span)
+{
+	int i;
+	int open_channels = 0;
+	struct dahdi_chan *chan;
+
+	for (i = 0; i < span->channels; ++i) {
+		chan = span->chans[i];
+		if (test_bit(DAHDI_FLAGBIT_OPEN, &chan->flags))
+			++open_channels;
+	}
+	return open_channels;
+}
+
+int dahdi_unassign_span(struct dahdi_span *span)
+{
+	int ret;
+
+	module_printk(KERN_NOTICE, "%s: %s\n", __func__, span->name);
+	disable_span(span);
+	if (open_channel_count(span) > 0)
+		msleep(1000);	/* Give user space a chance to read this */
+	mutex_lock(&registration_mutex);
+	ret = _dahdi_unassign_span(span);
+	mutex_unlock(&registration_mutex);
+	return ret;
+}
+
+/**
+ * dahdi_unregister_device() - unregister a DAHDI device
+ * @span:	the DAHDI span
+ *
+ * Unregisters a device that has been previously registered with
+ * dahdi_register_device().
+ *
+ */
+void dahdi_unregister_device(struct dahdi_device *ddev)
+{
+	struct dahdi_span *s;
+	struct dahdi_span *next;
+	unsigned int spans_with_open_channels = 0;
+
+	WARN_ON(!ddev);
+	might_sleep();
+	if (unlikely(!ddev))
+		return;
+
+	list_for_each_entry_safe(s, next, &ddev->spans, device_node) {
+		disable_span(s);
+		if (open_channel_count(s) > 0)
+			++spans_with_open_channels;
+	}
+
+	if (spans_with_open_channels > 0)
+		msleep(1000); /* give user space a chance to read this */
+
+	mutex_lock(&registration_mutex);
+	list_for_each_entry_safe(s, next, &ddev->spans, device_node) {
+		_dahdi_unassign_span(s);
+		list_del_init(&s->device_node);
+	}
+	mutex_unlock(&registration_mutex);
+
+#ifdef CONFIG_DAHDI_SYSFS
+	dahdi_sysfs_unregister_device(ddev);
+#endif
+
+	if (UNKNOWN == ddev->location)
+		ddev->location = NULL;
+	if (UNKNOWN == ddev->manufacturer)
+		ddev->manufacturer = NULL;
+	if (UNKNOWN == ddev->devicetype)
+		ddev->devicetype = NULL;
+
+}
+EXPORT_SYMBOL(dahdi_unregister_device);
 
 /*
 ** This routine converts from linear to ulaw
@@ -6688,7 +7633,8 @@ static inline void __dahdi_process_getaudio_chunk(struct dahdi_chan *ss, unsigne
 	}
 #endif
 
-	if ((!ms->confmute && !ms->dialing) || (ms->flags & DAHDI_FLAG_PSEUDO)) {
+	if ((!ms->confmute && !ms->dialing) || (is_pseudo_chan(ms))) {
+		struct dahdi_chan *const conf_chan = ms->conf_chan;
 		/* Handle conferencing on non-clear channel and non-HDLC channels */
 		switch(ms->confmode & DAHDI_CONF_MODE_MASK) {
 		case DAHDI_CONF_NORMAL:
@@ -6696,77 +7642,79 @@ static inline void __dahdi_process_getaudio_chunk(struct dahdi_chan *ss, unsigne
 			break;
 		case DAHDI_CONF_MONITOR:	/* Monitor a channel's rx mode */
 			  /* if a pseudo-channel, ignore */
-			if (ms->flags & DAHDI_FLAG_PSEUDO) break;
+			if (is_pseudo_chan(ms))
+				break;
 			/* Add monitored channel */
-			if (chans[ms->confna]->flags & DAHDI_FLAG_PSEUDO) {
-				ACSS(getlin, chans[ms->confna]->getlin);
-			} else {
-				ACSS(getlin, chans[ms->confna]->putlin);
-			}
+			if (is_pseudo_chan(conf_chan))
+				ACSS(getlin, conf_chan->getlin);
+			else
+				ACSS(getlin, conf_chan->putlin);
+
 			for (x=0;x<DAHDI_CHUNKSIZE;x++)
 				txb[x] = DAHDI_LIN2X(getlin[x], ms);
 			break;
 		case DAHDI_CONF_MONITORTX: /* Monitor a channel's tx mode */
 			  /* if a pseudo-channel, ignore */
-			if (ms->flags & DAHDI_FLAG_PSEUDO) break;
+			if (is_pseudo_chan(ms))
+				break;
 			/* Add monitored channel */
-			if (chans[ms->confna]->flags & DAHDI_FLAG_PSEUDO) {
-				ACSS(getlin, chans[ms->confna]->putlin);
-			} else {
-				ACSS(getlin, chans[ms->confna]->getlin);
-			}
+			if (is_pseudo_chan(conf_chan))
+				ACSS(getlin, conf_chan->putlin);
+			else
+				ACSS(getlin, conf_chan->getlin);
 
 			for (x=0;x<DAHDI_CHUNKSIZE;x++)
 				txb[x] = DAHDI_LIN2X(getlin[x], ms);
 			break;
 		case DAHDI_CONF_MONITORBOTH: /* monitor a channel's rx and tx mode */
 			  /* if a pseudo-channel, ignore */
-			if (ms->flags & DAHDI_FLAG_PSEUDO) break;
-			ACSS(getlin, chans[ms->confna]->putlin);
-			ACSS(getlin, chans[ms->confna]->getlin);
+			if (is_pseudo_chan(ms))
+				break;
+			ACSS(getlin, conf_chan->putlin);
+			ACSS(getlin, conf_chan->getlin);
 			for (x=0;x<DAHDI_CHUNKSIZE;x++)
 				txb[x] = DAHDI_LIN2X(getlin[x], ms);
 			break;
 		case DAHDI_CONF_MONITOR_RX_PREECHO:	/* Monitor a channel's rx mode */
 			  /* if a pseudo-channel, ignore */
-			if (ms->flags & DAHDI_FLAG_PSEUDO)
+			if (is_pseudo_chan(ms))
 				break;
 
-			if (!chans[ms->confna]->readchunkpreec)
+			if (!conf_chan->readchunkpreec)
 				break;
 
 			/* Add monitored channel */
-			ACSS(getlin, chans[ms->confna]->flags & DAHDI_FLAG_PSEUDO ?
-			     chans[ms->confna]->readchunkpreec : chans[ms->confna]->putlin);
+			ACSS(getlin, is_pseudo_chan(conf_chan) ?
+			     conf_chan->readchunkpreec : conf_chan->putlin);
 			for (x = 0; x < DAHDI_CHUNKSIZE; x++)
 				txb[x] = DAHDI_LIN2X(getlin[x], ms);
 
 			break;
 		case DAHDI_CONF_MONITOR_TX_PREECHO: /* Monitor a channel's tx mode */
 			  /* if a pseudo-channel, ignore */
-			if (ms->flags & DAHDI_FLAG_PSEUDO)
+			if (is_pseudo_chan(ms))
 				break;
 
-			if (!chans[ms->confna]->readchunkpreec)
+			if (!conf_chan->readchunkpreec)
 				break;
 
 			/* Add monitored channel */
-			ACSS(getlin, chans[ms->confna]->flags & DAHDI_FLAG_PSEUDO ?
-			     chans[ms->confna]->putlin : chans[ms->confna]->readchunkpreec);
+			ACSS(getlin, is_pseudo_chan(conf_chan) ?
+			     conf_chan->putlin : conf_chan->readchunkpreec);
 			for (x = 0; x < DAHDI_CHUNKSIZE; x++)
 				txb[x] = DAHDI_LIN2X(getlin[x], ms);
 
 			break;
 		case DAHDI_CONF_MONITORBOTH_PREECHO: /* monitor a channel's rx and tx mode */
 			  /* if a pseudo-channel, ignore */
-			if (ms->flags & DAHDI_FLAG_PSEUDO)
+			if (is_pseudo_chan(ms))
 				break;
 
-			if (!chans[ms->confna]->readchunkpreec)
+			if (!conf_chan->readchunkpreec)
 				break;
 
-			ACSS(getlin, chans[ms->confna]->putlin);
-			ACSS(getlin, chans[ms->confna]->readchunkpreec);
+			ACSS(getlin, conf_chan->putlin);
+			ACSS(getlin, conf_chan->readchunkpreec);
 
 			for (x = 0; x < DAHDI_CHUNKSIZE; x++)
 				txb[x] = DAHDI_LIN2X(getlin[x], ms);
@@ -6799,7 +7747,7 @@ static inline void __dahdi_process_getaudio_chunk(struct dahdi_chan *ss, unsigne
 			memset(txb + 1, txb[0], DAHDI_CHUNKSIZE - 1);
 			/* fall through to normal conf mode */
 		case DAHDI_CONF_CONF:	/* Normal conference mode */
-			if (ms->flags & DAHDI_FLAG_PSEUDO) /* if pseudo-channel */
+			if (is_pseudo_chan(ms)) /* if pseudo-channel */
 			   {
 				  /* if to talk on conf */
 				if (ms->confmode & DAHDI_CONF_TALKER) {
@@ -6849,25 +7797,27 @@ static inline void __dahdi_process_getaudio_chunk(struct dahdi_chan *ss, unsigne
 				txb[x] = DAHDI_LIN2X(getlin[x], ms);
 			break;
 		case DAHDI_CONF_DIGITALMON:
-			/* Real digital monitoring, but still echo cancel if desired */
-			if (!chans[ms->confna])
+			/* Real digital monitoring, but still echo cancel if
+			 * desired */
+			if (!conf_chan)
 				break;
-			if (chans[ms->confna]->flags & DAHDI_FLAG_PSEUDO) {
+			if (is_pseudo_chan(conf_chan)) {
 				if (ms->ec_state) {
-					for (x=0;x<DAHDI_CHUNKSIZE;x++)
-						txb[x] = DAHDI_LIN2X(chans[ms->confna]->getlin[x], ms);
+					for (x = 0; x < DAHDI_CHUNKSIZE; x++)
+						txb[x] = DAHDI_LIN2X(conf_chan->getlin[x], ms);
 				} else {
-					memcpy(txb, chans[ms->confna]->getraw, DAHDI_CHUNKSIZE);
+					memcpy(txb, conf_chan->getraw, DAHDI_CHUNKSIZE);
 				}
 			} else {
 				if (ms->ec_state) {
-					for (x=0;x<DAHDI_CHUNKSIZE;x++)
-						txb[x] = DAHDI_LIN2X(chans[ms->confna]->putlin[x], ms);
+					for (x = 0; x < DAHDI_CHUNKSIZE; x++)
+						txb[x] = DAHDI_LIN2X(conf_chan->putlin[x], ms);
 				} else {
-					memcpy(txb, chans[ms->confna]->putraw, DAHDI_CHUNKSIZE);
+					memcpy(txb, conf_chan->putraw,
+					       DAHDI_CHUNKSIZE);
 				}
 			}
-			for (x=0;x<DAHDI_CHUNKSIZE;x++)
+			for (x = 0; x < DAHDI_CHUNKSIZE; x++)
 				getlin[x] = DAHDI_XLAW(txb[x], ms);
 			break;
 		}
@@ -6901,8 +7851,17 @@ static inline void __dahdi_process_getaudio_chunk(struct dahdi_chan *ss, unsigne
 		txb[x] = ms->txgain[txb[x]];
 }
 
+static void __putbuf_chunk(struct dahdi_chan *ss, unsigned char *rxb,
+			   int bytes);
+
 static inline void __dahdi_getbuf_chunk(struct dahdi_chan *ss, unsigned char *txb)
 {
+
+
+#ifdef CONFIG_DAHDI_MIRROR
+	unsigned char *orig_txb = txb;
+#endif /* CONFIG_DAHDI_MIRROR */
+
 	/* Called with ss->lock held */
 	/* We transmit data from our master channel */
 	struct dahdi_chan *ms = ss->master;
@@ -6914,6 +7873,7 @@ static inline void __dahdi_getbuf_chunk(struct dahdi_chan *ss, unsigned char *tx
 	int getlin;
 	/* How many bytes we need to process */
 	int bytes = DAHDI_CHUNKSIZE, left;
+	bool needtxunderrun = false;
 	int x;
 
 	/* Let's pick something to transmit.  First source to
@@ -6957,7 +7917,7 @@ static inline void __dahdi_getbuf_chunk(struct dahdi_chan *ss, unsigned char *tx
 						there is something to write */
 						ms->outwritebuf = -1;
 						if (ms->iomask & (DAHDI_IOMUX_WRITE | DAHDI_IOMUX_WRITEEMPTY))
-							wake_up_interruptible(&ms->eventbufq);
+							dahdi_wake_up_chan(ms);
 						/* If we're only supposed to start when full, disable the transmitter */
 						if ((ms->txbufpolicy == DAHDI_POLICY_WHEN_FULL) ||
 							(ms->txbufpolicy == DAHDI_POLICY_HALF_FULL))
@@ -6967,7 +7927,7 @@ static inline void __dahdi_getbuf_chunk(struct dahdi_chan *ss, unsigned char *tx
 					if (ms->outwritebuf == ms->inwritebuf) {
 						ms->outwritebuf = oldbuf;
 						if (ms->iomask & (DAHDI_IOMUX_WRITE | DAHDI_IOMUX_WRITEEMPTY))
-							wake_up_interruptible(&ms->eventbufq);
+							dahdi_wake_up_chan(ms);
 						/* If we're only supposed to start when full, disable the transmitter */
 						if ((ms->txbufpolicy == DAHDI_POLICY_WHEN_FULL) ||
 							(ms->txbufpolicy == DAHDI_POLICY_HALF_FULL))
@@ -6989,20 +7949,18 @@ in the read or iomux call, etc). That is why the write and iomux calls start
 with an infinite loop that gets broken out of upon an active condition,
 otherwise keeps sleeping and looking. The part in this code got "optimized"
 out in the later versions, and is put back now. */
-				if (!(ms->flags & (DAHDI_FLAG_NETDEV | DAHDI_FLAG_PPP))) {
-					wake_up_interruptible(&ms->writebufq);
-					dahdi_poll_wakeup(&ms->sel);
-					if (ms->iomask & DAHDI_IOMUX_WRITE)
-						wake_up_interruptible(&ms->eventbufq);
+				if (!(ms->flags & DAHDI_FLAG_PPP) ||
+				    !dahdi_have_netdev(ms)) {
+					dahdi_wake_up_chan(ms);
 				}
 				/* Transmit a flag if this is an HDLC channel */
 				if (ms->flags & DAHDI_FLAG_HDLC)
 					fasthdlc_tx_frame_nocheck(&ms->txhdlc);
 #ifdef CONFIG_DAHDI_NET
-				if (ms->flags & DAHDI_FLAG_NETDEV)
-					netif_wake_queue(ztchan_to_dev(ms));
+				if (dahdi_have_netdev(ms))
+					netif_wake_queue(chan_to_netdev(ms));
 #elif defined(__FreeBSD__)
-				if (ms->flags & DAHDI_FLAG_NETDEV)
+				if (dahdi_have_netdev(ms))
 					dahdi_iface_wakeup_tx(ms);
 #endif
 #ifdef CONFIG_DAHDI_PPP
@@ -7012,7 +7970,7 @@ out in the later versions, and is put back now. */
 				}
 #endif
 			}
-		} else if (ms->curtone && !(ms->flags & DAHDI_FLAG_PSEUDO)) {
+		} else if (ms->curtone && !is_pseudo_chan(ms)) {
 			left = ms->curtone->tonesamples - ms->tonep;
 			if (left > bytes)
 				left = bytes;
@@ -7060,12 +8018,32 @@ out in the later versions, and is put back now. */
 			} else {
 				memset(txb, 0xFF, bytes);
 			}
+			needtxunderrun += bytes;
 			bytes = 0;
 		} else {
 			memset(txb, DAHDI_LIN2X(0, ms), bytes);	/* Lastly we use silence on telephony channels */
+			needtxunderrun += bytes;
 			bytes = 0;
 		}
 	}
+
+	if (needtxunderrun) {
+		if (!test_bit(DAHDI_FLAGBIT_TXUNDERRUN, &ms->flags)) {
+			if (test_bit(DAHDI_FLAGBIT_BUFEVENTS, &ms->flags))
+				__qevent(ms, DAHDI_EVENT_WRITE_UNDERRUN);
+			set_bit(DAHDI_FLAGBIT_TXUNDERRUN, &ms->flags);
+		}
+	} else {
+		clear_bit(DAHDI_FLAGBIT_TXUNDERRUN, &ms->flags);
+	}
+
+#ifdef CONFIG_DAHDI_MIRROR
+	if (ss->txmirror) {
+		spin_lock(&ss->txmirror->lock);
+		__putbuf_chunk(ss->txmirror, orig_txb, DAHDI_CHUNKSIZE);
+		spin_unlock(&ss->txmirror->lock);
+	}
+#endif /* CONFIG_DAHDI_MIRROR */
 }
 
 static inline void rbs_itimer_expire(struct dahdi_chan *chan)
@@ -7148,7 +8126,7 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 	case DAHDI_TXSTATE_START:
 		/* If we were starting, go off hook now ready to debounce */
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_AFTERSTART, DAHDI_AFTERSTART_TIME);
-		wake_up_interruptible(&chan->txstateq);
+		dahdi_wake_up_chan(chan);
 		break;
 
 	case DAHDI_TXSTATE_PREWINK:
@@ -7159,9 +8137,9 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 	case DAHDI_TXSTATE_WINK:
 		/* Wink complete, go on hook and stabalize */
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_ONHOOK, DAHDI_TXSTATE_ONHOOK, 0);
-		if (dahdi_chan_is_nonblocking(chan))
+		if (chan->file && (chan->file->f_flags & O_NONBLOCK))
 			__qevent(chan, DAHDI_EVENT_HOOKCOMPLETE);
-		wake_up_interruptible(&chan->txstateq);
+		dahdi_wake_up_chan(chan);
 		break;
 
 	case DAHDI_TXSTATE_PREFLASH:
@@ -7171,9 +8149,9 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 
 	case DAHDI_TXSTATE_FLASH:
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_OFFHOOK, 0);
-		if (dahdi_chan_is_nonblocking(chan))
+		if (chan->file && (chan->file->f_flags & O_NONBLOCK))
 			__qevent(chan, DAHDI_EVENT_HOOKCOMPLETE);
-		wake_up_interruptible(&chan->txstateq);
+		dahdi_wake_up_chan(chan);
 		break;
 
 	case DAHDI_TXSTATE_DEBOUNCE:
@@ -7181,21 +8159,21 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 		/* See if we've gone back on hook */
 		if ((chan->rxhooksig == DAHDI_RXSIG_ONHOOK) && (chan->rxflashtime > 2))
 			chan->itimerset = chan->itimer = chan->rxflashtime * DAHDI_CHUNKSIZE;
-		wake_up_interruptible(&chan->txstateq);
+		dahdi_wake_up_chan(chan);
 		break;
 
 	case DAHDI_TXSTATE_AFTERSTART:
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_OFFHOOK, 0);
-		if (dahdi_chan_is_nonblocking(chan))
+		if (chan->file && (chan->file->f_flags & O_NONBLOCK))
 			__qevent(chan, DAHDI_EVENT_HOOKCOMPLETE);
-		wake_up_interruptible(&chan->txstateq);
+		dahdi_wake_up_chan(chan);
 		break;
 
 	case DAHDI_TXSTATE_KEWL:
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_ONHOOK, DAHDI_TXSTATE_AFTERKEWL, DAHDI_AFTERKEWLTIME);
-		if (dahdi_chan_is_nonblocking(chan))
+		if (chan->file && (chan->file->f_flags & O_NONBLOCK))
 			__qevent(chan, DAHDI_EVENT_HOOKCOMPLETE);
-		wake_up_interruptible(&chan->txstateq);
+		dahdi_wake_up_chan(chan);
 		break;
 
 	case DAHDI_TXSTATE_AFTERKEWL:
@@ -7209,7 +8187,7 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 	case DAHDI_TXSTATE_PULSEBREAK:
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_PULSEMAKE,
 			chan->pulsemaketime);
-		wake_up_interruptible(&chan->txstateq);
+		dahdi_wake_up_chan(chan);
 		break;
 
 	case DAHDI_TXSTATE_PULSEMAKE:
@@ -7223,13 +8201,13 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 		}
 		chan->txstate = DAHDI_TXSTATE_PULSEAFTER;
 		chan->otimer = chan->pulseaftertime * DAHDI_CHUNKSIZE;
-		wake_up_interruptible(&chan->txstateq);
+		dahdi_wake_up_chan(chan);
 		break;
 
 	case DAHDI_TXSTATE_PULSEAFTER:
 		chan->txstate = DAHDI_TXSTATE_OFFHOOK;
 		__do_dtmf(chan);
-		wake_up_interruptible(&chan->txstateq);
+		dahdi_wake_up_chan(chan);
 		break;
 
 	default:
@@ -7492,6 +8470,10 @@ void dahdi_rbsbits(struct dahdi_chan *chan, int cursig)
 	/* Keep track of signalling for next time */
 	chan->rxsig = cursig;
 	spin_unlock_irqrestore(&chan->lock, flags);
+
+	if ((debug & DEBUG_RBS) && printk_ratelimit()) {
+		chan_notice(chan, "Detected sigbits change to %04x\n", cursig);
+	}
 }
 
 static void process_echocan_events(struct dahdi_chan *chan)
@@ -7535,19 +8517,33 @@ static void process_echocan_events(struct dahdi_chan *chan)
 	}
 }
 
-static inline void __dahdi_ec_chunk(struct dahdi_chan *ss, unsigned char *rxchunk, const unsigned char *txchunk)
+/**
+ * __dahdi_ec_chunk() - process echo for a single channel
+ * @ss:		DAHDI channel
+ * @rxchunk:	buffer to store audio with cancelled audio
+ * @preecchunk: chunk of audio on which to cancel echo
+ * @txchunk:	reference chunk from the other direction
+ *
+ * The echo canceller function fixes received (from device to userspace)
+ * audio. In order to fix it it uses the transmitted audio as a
+ * reference. This call updates the echo canceller for a single chunk (8
+ * bytes).
+ *
+ * Call with local interrupts disabled.
+ */
+void __dahdi_ec_chunk(struct dahdi_chan *ss, u8 *rxchunk,
+		      const u8 *preecchunk, const u8 *txchunk)
 {
-	short rxlin, txlin;
+	short rxlin;
 	int x;
-	unsigned long flags;
 
-	spin_lock_irqsave(&ss->lock, flags);
+	spin_lock(&ss->lock);
 
 	if (ss->readchunkpreec) {
 		/* Save a copy of the audio before the echo can has its way with it */
 		for (x = 0; x < DAHDI_CHUNKSIZE; x++)
 			/* We only ever really need to deal with signed linear - let's just convert it now */
-			ss->readchunkpreec[x] = DAHDI_XLAW(rxchunk[x], ss);
+			ss->readchunkpreec[x] = DAHDI_XLAW(preecchunk[x], ss);
 	}
 
 	/* Perform echo cancellation on a chunk if necessary */
@@ -7558,8 +8554,7 @@ static inline void __dahdi_ec_chunk(struct dahdi_chan *ss, unsigned char *rxchun
 		if (ss->ec_state->status.mode & __ECHO_MODE_MUTE) {
 			/* Special stuff for training the echo can */
 			for (x=0;x<DAHDI_CHUNKSIZE;x++) {
-				rxlin = DAHDI_XLAW(rxchunk[x], ss);
-				txlin = DAHDI_XLAW(txchunk[x], ss);
+				rxlin = DAHDI_XLAW(preecchunk[x], ss);
 				if (ss->ec_state->status.mode == ECHO_MODE_PRETRAINING) {
 					if (--ss->ec_state->status.pretrain_timer <= 0) {
 						ss->ec_state->status.pretrain_timer = 0;
@@ -7573,9 +8568,6 @@ static inline void __dahdi_ec_chunk(struct dahdi_chan *ss, unsigned char *rxchun
 				if ((ss->ec_state->status.mode == ECHO_MODE_TRAINING) &&
 				    (ss->ec_state->ops->echocan_traintap)) {
 					if (ss->ec_state->ops->echocan_traintap(ss->ec_state, ss->ec_state->status.last_train_tap++, rxlin)) {
-#if 0
-						module_printk(KERN_NOTICE, "Finished training (%d taps trained)!\n", ss->ec_state->status.last_train_tap);
-#endif
 						ss->ec_state->status.mode = ECHO_MODE_ACTIVE;
 					}
 				}
@@ -7589,7 +8581,8 @@ static inline void __dahdi_ec_chunk(struct dahdi_chan *ss, unsigned char *rxchun
 				short rxlins[DAHDI_CHUNKSIZE], txlins[DAHDI_CHUNKSIZE];
 
 				for (x = 0; x < DAHDI_CHUNKSIZE; x++) {
-					rxlins[x] = DAHDI_XLAW(rxchunk[x], ss);
+					rxlins[x] = DAHDI_XLAW(preecchunk[x],
+							       ss);
 					txlins[x] = DAHDI_XLAW(txchunk[x], ss);
 				}
 				ss->ec_state->ops->echocan_process(ss->ec_state, rxlins, txlins, DAHDI_CHUNKSIZE);
@@ -7607,24 +8600,10 @@ static inline void __dahdi_ec_chunk(struct dahdi_chan *ss, unsigned char *rxchun
 		dahdi_kernel_fpu_end();
 #endif
 	}
-	spin_unlock_irqrestore(&ss->lock, flags);
-}
 
-/**
- * dahdi_ec_chunk() - process echo for a single channel
- * @ss:		DAHDI channel
- * @rxchunk:	chunk of audio on which to cancel echo
- * @txchunk:	reference chunk from the other direction
- *
- * The echo canceller function fixes received (from device to userspace)
- * audio. In order to fix it it uses the transmitted audio as a
- * reference. This call updates the echo canceller for a single chunk (8
- * bytes).
- */
-void dahdi_ec_chunk(struct dahdi_chan *ss, unsigned char *rxchunk, const unsigned char *txchunk)
-{
-	__dahdi_ec_chunk(ss, rxchunk, txchunk);
+	spin_unlock(&ss->lock);
 }
+EXPORT_SYMBOL(__dahdi_ec_chunk);
 
 /**
  * dahdi_ec_span() - process echo for all channels in a span.
@@ -7634,14 +8613,17 @@ void dahdi_ec_chunk(struct dahdi_chan *ss, unsigned char *rxchunk, const unsigne
  * span. Uses dahdi_chunk.write_chunk for the rxchunk (the chunk to fix)
  * and dahdi_chan.readchunk as the txchunk (the reference chunk).
  */
-void dahdi_ec_span(struct dahdi_span *span)
+void _dahdi_ec_span(struct dahdi_span *span)
 {
 	int x;
 	for (x = 0; x < span->channels; x++) {
-		if (span->chans[x]->ec_current)
-			__dahdi_ec_chunk(span->chans[x], span->chans[x]->readchunk, span->chans[x]->writechunk);
+		struct dahdi_chan *const chan = span->chans[x];
+		if (!chan->ec_current)
+			continue;
+		_dahdi_ec_chunk(chan, chan->readchunk, chan->writechunk);
 	}
 }
+EXPORT_SYMBOL(_dahdi_ec_span);
 
 /* return 0 if nothing detected, 1 if lack of tone, 2 if presence of tone */
 /* modifies buffer pointed to by 'amp' with notched-out values */
@@ -7703,7 +8685,7 @@ static inline void __dahdi_process_putaudio_chunk(struct dahdi_chan *ss, unsigne
 
 	if (ms->dialing) ms->afterdialingtimer = 50;
 	else if (ms->afterdialingtimer) ms->afterdialingtimer--;
-	if (ms->afterdialingtimer && (!(ms->flags & DAHDI_FLAG_PSEUDO))) {
+	if (ms->afterdialingtimer && !is_pseudo_chan(ms)) {
 		/* Be careful since memset is likely a macro */
 		rxb[0] = DAHDI_LIN2X(0, ms);
 		memset(&rxb[1], rxb[0], DAHDI_CHUNKSIZE - 1);  /* receive as silence if dialing */
@@ -7751,102 +8733,103 @@ static inline void __dahdi_process_putaudio_chunk(struct dahdi_chan *ss, unsigne
 		}
 	}
 
-	if (!(ms->flags &  DAHDI_FLAG_PSEUDO)) {
+	if (!is_pseudo_chan(ms)) {
 		memcpy(ms->putlin, putlin, DAHDI_CHUNKSIZE * sizeof(short));
 		memcpy(ms->putraw, rxb, DAHDI_CHUNKSIZE);
 	}
 
 	/* Take the rxc, twiddle it for conferencing if appropriate and put it
 	   back */
-	if ((!ms->confmute && !ms->afterdialingtimer) ||
-	    (ms->flags & DAHDI_FLAG_PSEUDO)) {
+	if ((!ms->confmute && !ms->afterdialingtimer) || is_pseudo_chan(ms)) {
+		struct dahdi_chan *const conf_chan = ms->conf_chan;
 		switch(ms->confmode & DAHDI_CONF_MODE_MASK) {
 		case DAHDI_CONF_NORMAL:		/* Normal mode */
 			/* Do nothing.  rx goes output */
 			break;
 		case DAHDI_CONF_MONITOR:		/* Monitor a channel's rx mode */
 			  /* if not a pseudo-channel, ignore */
-			if (!(ms->flags & DAHDI_FLAG_PSEUDO)) break;
+			if (!is_pseudo_chan(ms))
+				break;
 			/* Add monitored channel */
-			if (chans[ms->confna]->flags & DAHDI_FLAG_PSEUDO) {
-				ACSS(putlin, chans[ms->confna]->getlin);
-			} else {
-				ACSS(putlin, chans[ms->confna]->putlin);
-			}
+			if (is_pseudo_chan(conf_chan))
+				ACSS(putlin, conf_chan->getlin);
+			else
+				ACSS(putlin, conf_chan->putlin);
 			/* Convert back */
 			for(x=0;x<DAHDI_CHUNKSIZE;x++)
 				rxb[x] = DAHDI_LIN2X(putlin[x], ms);
 			break;
 		case DAHDI_CONF_MONITORTX:	/* Monitor a channel's tx mode */
 			  /* if not a pseudo-channel, ignore */
-			if (!(ms->flags & DAHDI_FLAG_PSEUDO)) break;
+			if (!is_pseudo_chan(ms))
+				break;
 			/* Add monitored channel */
-			if (chans[ms->confna]->flags & DAHDI_FLAG_PSEUDO) {
-				ACSS(putlin, chans[ms->confna]->putlin);
-			} else {
-				ACSS(putlin, chans[ms->confna]->getlin);
-			}
+			if (is_pseudo_chan(conf_chan))
+				ACSS(putlin, conf_chan->putlin);
+			else
+				ACSS(putlin, conf_chan->getlin);
 			/* Convert back */
 			for(x=0;x<DAHDI_CHUNKSIZE;x++)
 				rxb[x] = DAHDI_LIN2X(putlin[x], ms);
 			break;
 		case DAHDI_CONF_MONITORBOTH:	/* Monitor a channel's tx and rx mode */
 			  /* if not a pseudo-channel, ignore */
-			if (!(ms->flags & DAHDI_FLAG_PSEUDO)) break;
+			if (!is_pseudo_chan(ms))
+				break;
 			/* Note: Technically, saturation should be done at
 			   the end of the whole addition, but for performance
 			   reasons, we don't do that.  Besides, it only matters
 			   when you're so loud you're clipping anyway */
-			ACSS(putlin, chans[ms->confna]->getlin);
-			ACSS(putlin, chans[ms->confna]->putlin);
+			ACSS(putlin, conf_chan->getlin);
+			ACSS(putlin, conf_chan->putlin);
 			/* Convert back */
 			for(x=0;x<DAHDI_CHUNKSIZE;x++)
 				rxb[x] = DAHDI_LIN2X(putlin[x], ms);
 			break;
 		case DAHDI_CONF_MONITOR_RX_PREECHO:		/* Monitor a channel's rx mode */
 			  /* if not a pseudo-channel, ignore */
-			if (!(ms->flags & DAHDI_FLAG_PSEUDO))
+			if (!is_pseudo_chan(ms))
 				break;
 
-			if (!chans[ms->confna]->readchunkpreec)
+			if (!conf_chan->readchunkpreec)
 				break;
 
 			/* Add monitored channel */
-			ACSS(putlin, chans[ms->confna]->flags & DAHDI_FLAG_PSEUDO ?
-			     chans[ms->confna]->getlin : chans[ms->confna]->readchunkpreec);
+			ACSS(putlin, is_pseudo_chan(conf_chan) ?
+			     conf_chan->getlin : conf_chan->readchunkpreec);
 			for (x = 0; x < DAHDI_CHUNKSIZE; x++)
 				rxb[x] = DAHDI_LIN2X(putlin[x], ms);
 
 			break;
 		case DAHDI_CONF_MONITOR_TX_PREECHO:	/* Monitor a channel's tx mode */
 			  /* if not a pseudo-channel, ignore */
-			if (!(ms->flags & DAHDI_FLAG_PSEUDO))
+			if (!is_pseudo_chan(ms))
 				break;
 
-			if (!chans[ms->confna]->readchunkpreec)
+			if (!conf_chan->readchunkpreec)
 				break;
 
 			/* Add monitored channel */
-			ACSS(putlin, chans[ms->confna]->flags & DAHDI_FLAG_PSEUDO ?
-			     chans[ms->confna]->readchunkpreec : chans[ms->confna]->getlin);
+			ACSS(putlin, is_pseudo_chan(conf_chan) ?
+			     conf_chan->readchunkpreec : conf_chan->getlin);
 			for (x = 0; x < DAHDI_CHUNKSIZE; x++)
 				rxb[x] = DAHDI_LIN2X(putlin[x], ms);
 
 			break;
 		case DAHDI_CONF_MONITORBOTH_PREECHO:	/* Monitor a channel's tx and rx mode */
 			  /* if not a pseudo-channel, ignore */
-			if (!(ms->flags & DAHDI_FLAG_PSEUDO))
+			if (!is_pseudo_chan(ms))
 				break;
 
-			if (!chans[ms->confna]->readchunkpreec)
+			if (!conf_chan->readchunkpreec)
 				break;
 
 			/* Note: Technically, saturation should be done at
 			   the end of the whole addition, but for performance
 			   reasons, we don't do that.  Besides, it only matters
 			   when you're so loud you're clipping anyway */
-			ACSS(putlin, chans[ms->confna]->getlin);
-			ACSS(putlin, chans[ms->confna]->readchunkpreec);
+			ACSS(putlin, conf_chan->getlin);
+			ACSS(putlin, conf_chan->readchunkpreec);
 			for (x = 0; x < DAHDI_CHUNKSIZE; x++)
 				rxb[x] = DAHDI_LIN2X(putlin[x], ms);
 
@@ -7877,7 +8860,7 @@ static inline void __dahdi_process_putaudio_chunk(struct dahdi_chan *ss, unsigne
 				rxb[x] = DAHDI_LIN2X(putlin[x], ms);
 			break;
 		case DAHDI_CONF_CONF:	/* Normal conference mode */
-			if (ms->flags & DAHDI_FLAG_PSEUDO) /* if a pseudo-channel */
+			if (is_pseudo_chan(ms)) /* if a pseudo-channel */
 			   {
 				if (ms->confmode & DAHDI_CONF_LISTENER) {
 					/* Subtract out last sample written to conf */
@@ -7928,20 +8911,20 @@ static inline void __dahdi_process_putaudio_chunk(struct dahdi_chan *ss, unsigne
 			break;
 		case DAHDI_CONF_DIGITALMON:
 			  /* if not a pseudo-channel, ignore */
-			if (!(ms->flags & DAHDI_FLAG_PSEUDO)) break;
+			if (!is_pseudo_chan(ms))
+				break;
 			/* Add monitored channel */
-			if (chans[ms->confna]->flags & DAHDI_FLAG_PSEUDO) {
-				memcpy(rxb, chans[ms->confna]->getraw, DAHDI_CHUNKSIZE);
-			} else {
-				memcpy(rxb, chans[ms->confna]->putraw, DAHDI_CHUNKSIZE);
-			}
+			if (is_pseudo_chan(conf_chan))
+				memcpy(rxb, conf_chan->getraw, DAHDI_CHUNKSIZE);
+			else
+				memcpy(rxb, conf_chan->putraw, DAHDI_CHUNKSIZE);
 			break;
 		}
 	}
 }
 
 /* HDLC (or other) receiver buffer functions for read side */
-static inline void __putbuf_chunk(struct dahdi_chan *ss, unsigned char *rxb, int bytes)
+static void __putbuf_chunk(struct dahdi_chan *ss, unsigned char *rxb, int bytes)
 {
 	/* We transmit data from our master channel */
 	/* Called with ss->lock held */
@@ -7957,7 +8940,6 @@ static inline void __putbuf_chunk(struct dahdi_chan *ss, unsigned char *rxb, int
 	int abort=0;
 	int res;
 	int left, x;
-
 
 	while(bytes) {
 #if defined(CONFIG_DAHDI_NET)  || defined(CONFIG_DAHDI_PPP)
@@ -8038,7 +9020,8 @@ static inline void __putbuf_chunk(struct dahdi_chan *ss, unsigned char *rxb, int
 				module_printk(KERN_NOTICE, "EOF, len is %d\n", ms->readn[ms->inreadbuf]);
 #endif
 #if defined(CONFIG_DAHDI_NET) || defined(CONFIG_DAHDI_PPP)
-				if (ms->flags & (DAHDI_FLAG_NETDEV | DAHDI_FLAG_PPP)) {
+				if ((ms->flags & DAHDI_FLAG_PPP) ||
+				    dahdi_have_netdev(ms)) {
 #ifdef CONFIG_DAHDI_NET
 #endif /* CONFIG_DAHDI_NET */
 					/* Our network receiver logic is MUCH
@@ -8051,13 +9034,16 @@ static inline void __putbuf_chunk(struct dahdi_chan *ss, unsigned char *rxb, int
 #ifdef CONFIG_DAHDI_PPP
 						if (!ms->do_ppp_error)
 #endif
-							skb = dev_alloc_skb(ms->readn[ms->inreadbuf]);
+							skb = dev_alloc_skb(ms->readn[ms->inreadbuf] + 2);
 						if (skb) {
+							unsigned char cisco_addr = *(ms->readbuf[ms->inreadbuf]);
+							if (cisco_addr != 0x0f && cisco_addr != 0x8f)
+								skb_reserve(skb, 2);
 							/* XXX Get rid of this memcpy XXX */
 							memcpy(skb->data, ms->readbuf[ms->inreadbuf], ms->readn[ms->inreadbuf]);
 							skb_put(skb, ms->readn[ms->inreadbuf]);
 #ifdef CONFIG_DAHDI_NET
-							if (ms->flags & DAHDI_FLAG_NETDEV) {
+							if (dahdi_have_netdev(ms)) {
 								struct net_device_stats *stats = hdlc_stats(ms->hdlcnetdev->netdev);
 								stats->rx_packets++;
 								stats->rx_bytes += ms->readn[ms->inreadbuf];
@@ -8066,7 +9052,7 @@ static inline void __putbuf_chunk(struct dahdi_chan *ss, unsigned char *rxb, int
 
 						} else {
 #ifdef CONFIG_DAHDI_NET
-							if (ms->flags & DAHDI_FLAG_NETDEV) {
+							if (dahdi_have_netdev(ms)) {
 								struct net_device_stats *stats = hdlc_stats(ms->hdlcnetdev->netdev);
 								stats->rx_dropped++;
 							}
@@ -8090,7 +9076,7 @@ static inline void __putbuf_chunk(struct dahdi_chan *ss, unsigned char *rxb, int
 					ms->readidx[ms->inreadbuf] = 0;
 				} else
 #elif defined(__FreeBSD__)
-				if (ms->flags & DAHDI_FLAG_NETDEV) {
+				if (dahdi_have_netdev(ms)) {
 					dahdi_iface_rx(ms);
 				} else
 #endif
@@ -8133,7 +9119,7 @@ static inline void __putbuf_chunk(struct dahdi_chan *ss, unsigned char *rxb, int
 							/* if there are processes waiting in poll() on this channel,
 							   wake them up */
 							if (!ms->rxdisable) {
-								dahdi_poll_wakeup(&ms->sel);
+								dahdi_wake_up_chan(ms);
 							}
 						}
 /* In the very orignal driver, it was quite well known to me (Jim) that there
@@ -8155,9 +9141,7 @@ that the waitqueue is empty. */
 #ifdef CONFIG_DAHDI_DEBUG
 							module_printk(KERN_NOTICE, "Notifying reader data in block %d\n", oldbuf);
 #endif
-							wake_up_interruptible(&ms->readbufq);
-							if (ms->iomask & DAHDI_IOMUX_READ)
-								wake_up_interruptible(&ms->eventbufq);
+							dahdi_wake_up_chan(ms);
 						}
 					}
 				}
@@ -8168,7 +9152,7 @@ that the waitqueue is empty. */
 				ms->infcs = PPP_INITFCS;
 
 #ifdef CONFIG_DAHDI_NET
-				if (ms->flags & DAHDI_FLAG_NETDEV) {
+				if (dahdi_have_netdev(ms)) {
 					struct net_device_stats *stats = hdlc_stats(ms->hdlcnetdev->netdev);
 					stats->rx_errors++;
 					if (abort == DAHDI_EVENT_OVERRUN)
@@ -8179,7 +9163,7 @@ that the waitqueue is empty. */
 						stats->rx_frame_errors++;
 				} else
 #elif defined(__FreeBSD__)
-				if (ms->flags & DAHDI_FLAG_NETDEV) {
+				if (dahdi_have_netdev(ms)) {
 					dahdi_iface_abort(ms, abort);
 				} else
 #endif
@@ -8193,33 +9177,26 @@ that the waitqueue is empty. */
 						/* Notify the receiver... */
 						__qevent(ss->master, abort);
 					}
-#if 0
-				module_printk(KERN_NOTICE, "torintr_receive: Aborted %d bytes of frame on %d\n", amt, ss->master);
-#endif
-
 			}
 		} else /* No place to receive -- drop on the floor */
 			break;
 #ifdef CONFIG_DAHDI_NET
-		if (skb && (ms->flags & DAHDI_FLAG_NETDEV))
-#ifdef NEW_HDLC_INTERFACE
+		if (skb && dahdi_have_netdev(ms))
 		{
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,22)
 			skb->mac.raw = skb->data;
 #else
 			skb_reset_mac_header(skb);
 #endif
-			skb->dev = ztchan_to_dev(ms);
+			skb->dev = chan_to_netdev(ms);
 #ifdef DAHDI_HDLC_TYPE_TRANS
-			skb->protocol = hdlc_type_trans(skb, ztchan_to_dev(ms));
+			skb->protocol = hdlc_type_trans(skb,
+							chan_to_netdev(ms));
 #else
 			skb->protocol = htons (ETH_P_HDLC);
 #endif
 			netif_rx(skb);
 		}
-#else
-			hdlc_netif_rx(&ms->hdlcnetdev->netdev, skb);
-#endif
 #endif
 #ifdef CONFIG_DAHDI_PPP
 		if (skb && (ms->flags & DAHDI_FLAG_PPP)) {
@@ -8239,11 +9216,29 @@ that the waitqueue is empty. */
 		}
 #endif
 	}
+
+	if (bytes) {
+		if (!test_bit(DAHDI_FLAGBIT_RXOVERRUN, &ms->flags)) {
+			if (test_bit(DAHDI_FLAGBIT_BUFEVENTS, &ms->flags))
+				__qevent(ms, DAHDI_EVENT_READ_OVERRUN);
+			set_bit(DAHDI_FLAGBIT_RXOVERRUN, &ms->flags);
+		}
+	} else {
+		clear_bit(DAHDI_FLAGBIT_RXOVERRUN, &ms->flags);
+	}
 }
 
 static inline void __dahdi_putbuf_chunk(struct dahdi_chan *ss, unsigned char *rxb)
 {
 	__putbuf_chunk(ss, rxb, DAHDI_CHUNKSIZE);
+
+#ifdef CONFIG_DAHDI_MIRROR
+	if (ss->rxmirror) {
+		spin_lock(&ss->rxmirror->lock);
+		__putbuf_chunk(ss->rxmirror, rxb, DAHDI_CHUNKSIZE);
+		spin_unlock(&ss->rxmirror->lock);
+	}
+#endif /* CONFIG_DAHDI_MIRROR */
 }
 
 static void __dahdi_hdlc_abort(struct dahdi_chan *ss, int event)
@@ -8265,7 +9260,6 @@ void dahdi_hdlc_abort(struct dahdi_chan *ss, int event)
 void dahdi_hdlc_putbuf(struct dahdi_chan *ss, unsigned char *rxb, int bytes)
 {
 	unsigned long flags;
-	int res;
 	int left;
 
 	spin_lock_irqsave(&ss->lock, flags);
@@ -8293,7 +9287,6 @@ void dahdi_hdlc_putbuf(struct dahdi_chan *ss, unsigned char *rxb, int bytes)
 #endif
 		__dahdi_hdlc_abort(ss, DAHDI_EVENT_OVERRUN);
 	}
-	res = left;
 	spin_unlock_irqrestore(&ss->lock, flags);
 }
 
@@ -8333,12 +9326,8 @@ void dahdi_hdlc_finish(struct dahdi_chan *ss)
 		ss->outreadbuf = oldreadbuf;
 	}
 
-	if (!ss->rxdisable) {
-		wake_up_interruptible(&ss->readbufq);
-		dahdi_poll_wakeup(&ss->sel);
-		if (ss->iomask & DAHDI_IOMUX_READ)
-			wake_up_interruptible(&ss->eventbufq);
-	}
+	if (!ss->rxdisable)
+		dahdi_wake_up_chan(ss);
 	spin_unlock_irqrestore(&ss->lock, flags);
 }
 
@@ -8375,7 +9364,7 @@ int dahdi_hdlc_getbuf(struct dahdi_chan *ss, unsigned char *bufptr, unsigned int
 			if (ss->outwritebuf == ss->inwritebuf) {
 				ss->outwritebuf = -1;
 				if (ss->iomask & (DAHDI_IOMUX_WRITE | DAHDI_IOMUX_WRITEEMPTY))
-					wake_up_interruptible(&ss->eventbufq);
+					dahdi_wake_up_chan(ss);
 				/* If we're only supposed to start when full, disable the transmitter */
 				if ((ss->txbufpolicy == DAHDI_POLICY_WHEN_FULL) || (ss->txbufpolicy == DAHDI_POLICY_HALF_FULL))
 					ss->txdisable = 1;
@@ -8385,11 +9374,9 @@ int dahdi_hdlc_getbuf(struct dahdi_chan *ss, unsigned char *bufptr, unsigned int
 			if (ss->inwritebuf < 0)
 				ss->inwritebuf = oldbuf;
 
-			if (!(ss->flags & (DAHDI_FLAG_NETDEV | DAHDI_FLAG_PPP))) {
-				wake_up_interruptible(&ss->writebufq);
-				dahdi_poll_wakeup(&ss->sel);
-				if ((ss->iomask & DAHDI_IOMUX_WRITE) && (res >= 0))
-					wake_up_interruptible(&ss->eventbufq);
+			if (!(ss->flags & DAHDI_FLAG_PPP) ||
+			    !dahdi_have_netdev(ss)) {
+				dahdi_wake_up_chan(ss);
 			}
 		}
 	} else {
@@ -8404,115 +9391,90 @@ int dahdi_hdlc_getbuf(struct dahdi_chan *ss, unsigned char *bufptr, unsigned int
 
 static void process_timers(void)
 {
-	unsigned long flags;
 	struct dahdi_timer *cur;
 
-	spin_lock_irqsave(&zaptimerlock, flags);
+	if (list_empty(&dahdi_timers))
+		return;
 
-	list_for_each_entry(cur, &zaptimers, list) {
+	spin_lock(&dahdi_timer_lock);
+	list_for_each_entry(cur, &dahdi_timers, list) {
 		if (cur->ms) {
 			cur->pos -= DAHDI_CHUNKSIZE;
 			if (cur->pos <= 0) {
 				cur->tripped++;
 				cur->pos = cur->ms;
-				dahdi_poll_wakeup(&cur->sel);
+				wake_up_interruptible(&cur->sel);
+#if defined(__FreeBSD__)
+				selwakeup(&cur->selinfo);
+#endif
 			}
 		}
 	}
-
-	spin_unlock_irqrestore(&zaptimerlock, flags);
+	spin_unlock(&dahdi_timer_lock);
 }
 
 static unsigned int dahdi_timer_poll(struct file *file, struct poll_table_struct *wait_table)
 {
-	struct dahdi_timer *timer = dahdi_get_private_data(file);
+	struct dahdi_timer *timer = file->private_data;
 	unsigned long flags;
 	int ret = 0;
 	if (timer) {
-		dahdi_poll_wait(file, &timer->sel, wait_table);
-		spin_lock_irqsave(&zaptimerlock, flags);
+		poll_wait(file, &timer->sel, wait_table);
+		spin_lock_irqsave(&dahdi_timer_lock, flags);
 		if (timer->tripped || timer->ping)
 			ret |= POLLPRI;
-		spin_unlock_irqrestore(&zaptimerlock, flags);
-	} else
-		ret = -EINVAL;
+		spin_unlock_irqrestore(&dahdi_timer_lock, flags);
+	} else {
+		/*
+		 * This should never happen. Surprise device removal
+		 * should lead us to the nodev_* file_operations
+		 */
+		msleep(5);
+		module_printk(KERN_ERR, "%s: NODEV\n", __func__);
+		return POLLERR | POLLHUP | POLLRDHUP | POLLNVAL | POLLPRI;
+	}
 	return ret;
 }
 
 /* device poll routine */
 static unsigned int
-dahdi_chan_poll(struct file *file, struct poll_table_struct *wait_table, int unit)
+dahdi_chan_poll(struct file *file, struct poll_table_struct *wait_table)
 {
-
-	struct dahdi_chan *chan = chans[unit];
-	int	ret;
+	struct dahdi_chan *const c = file->private_data;
+	int ret = 0;
 	unsigned long flags;
 
-	  /* do the poll wait */
-	if (chan) {
-		dahdi_poll_wait(file, &chan->sel, wait_table);
-		ret = 0; /* start with nothing to return */
-		spin_lock_irqsave(&chan->lock, flags);
-		   /* if at least 1 write buffer avail */
-		if (chan->inwritebuf > -1) {
-			ret |= POLLOUT | POLLWRNORM;
-		}
-		if ((chan->outreadbuf > -1) && !chan->rxdisable) {
-			ret |= POLLIN | POLLRDNORM;
-		}
-		if (chan->eventoutidx != chan->eventinidx)
-		   {
-			/* Indicate an exception */
-			ret |= POLLPRI;
-		   }
-		spin_unlock_irqrestore(&chan->lock, flags);
-	} else
-		ret = -EINVAL;
-	return(ret);  /* return what we found */
-}
-
-static int dahdi_mmap(struct file *file, struct vm_area_struct *vm)
-{
-	int unit = UNIT(file);
-	if (unit == 250) {
-		if (dahdi_transcode_fops && dahdi_transcode_fops->mmap)
-			return dahdi_transcode_fops->mmap(file, vm);
+	if (unlikely(!c)) {
+		/*
+		 * This should never happen. Surprise device removal
+		 * should lead us to the nodev_* file_operations
+		 */
+		msleep(5);
+		module_printk(KERN_ERR, "%s: NODEV\n", __func__);
+		return POLLERR | POLLHUP | POLLRDHUP | POLLNVAL | POLLPRI;
 	}
-	return -ENOSYS;
+
+	poll_wait(file, &c->waitq, wait_table);
+
+	spin_lock_irqsave(&c->lock, flags);
+	ret |= (c->inwritebuf > -1) ? POLLOUT|POLLWRNORM : 0;
+	ret |= ((c->outreadbuf > -1) && !c->rxdisable) ?  POLLIN|POLLRDNORM : 0;
+	ret |= (c->eventoutidx != c->eventinidx) ? POLLPRI : 0;
+	spin_unlock_irqrestore(&c->lock, flags);
+
+	return ret;
 }
 
 static unsigned int dahdi_poll(struct file *file, struct poll_table_struct *wait_table)
 {
-	int unit = UNIT(file);
-	struct dahdi_chan *chan;
+	const int unit = UNIT(file);
 
-	if (!unit)
-		return -EINVAL;
-
-	if (unit == 250) {
-		if (dahdi_transcode_fops && dahdi_transcode_fops->poll)
-			return dahdi_transcode_fops->poll(file, wait_table);
-		return -ENOSYS;
-	}
-
-	if (unit == 253)
+	if (likely(unit == DAHDI_TIMER))
 		return dahdi_timer_poll(file, wait_table);
 
-	if (unit == 254) {
-		chan = dahdi_get_private_data(file);
-		if (!chan)
-			return -EINVAL;
-		return dahdi_chan_poll(file, wait_table,chan->channo);
-	}
-	if (unit == 255) {
-		chan = dahdi_get_private_data(file);
-		if (!chan) {
-			module_printk(KERN_NOTICE, "No pseudo channel structure to read?\n");
-			return -EINVAL;
-		}
-		return dahdi_chan_poll(file, wait_table, chan->channo);
-	}
-	return dahdi_chan_poll(file, wait_table, unit);
+	/* transcoders and channels should have updated their file_operations
+	 * before poll is ever called. */
+	return -EINVAL;
 }
 
 static void __dahdi_transmit_chunk(struct dahdi_chan *chan, unsigned char *buf)
@@ -8547,7 +9509,7 @@ static inline void __dahdi_real_transmit(struct dahdi_chan *chan)
 #endif
 	if (chan->confmode) {
 		/* Pull queued data off the conference */
-		__buf_pull(&chan->confout, chan->writechunk, chan, "dahdi_real_transmit");
+		__buf_pull(&chan->confout, chan->writechunk, chan);
 	} else {
 		__dahdi_transmit_chunk(chan, chan->writechunk);
 	}
@@ -8633,180 +9595,222 @@ static inline void __dahdi_real_receive(struct dahdi_chan *chan)
 #endif
 	if (chan->confmode) {
 		/* Load into queue if we have space */
-		__buf_push(&chan->confin, chan->readchunk, "dahdi_real_receive");
+		__buf_push(&chan->confin, chan->readchunk);
 	} else {
 		__dahdi_receive_chunk(chan, chan->readchunk);
 	}
 }
 
-int dahdi_transmit(struct dahdi_span *span)
+/**
+ * __transmit_to_slaves() - Distribute the tx data to all the slave channels.
+ *
+ */
+static void __transmit_to_slaves(struct dahdi_chan *const chan)
 {
-	int x,y,z;
-	unsigned long flags;
+	u_char data[DAHDI_CHUNKSIZE];
+	int i;
+	int pos = DAHDI_CHUNKSIZE;
+	struct dahdi_chan *slave;
+	for (i = 0; i < DAHDI_CHUNKSIZE; i++) {
+		for (slave = chan; (NULL != slave); slave = slave->nextslave) {
+			if (pos == DAHDI_CHUNKSIZE) {
+				__dahdi_transmit_chunk(chan, data);
+				pos = 0;
+			}
+			slave->writechunk[i] = data[pos++];
+		}
+	}
+}
 
-#if 1
+int _dahdi_transmit(struct dahdi_span *span)
+{
+	unsigned int x;
+
 	for (x=0;x<span->channels;x++) {
-		spin_lock_irqsave(&span->chans[x]->lock, flags);
-		if (span->chans[x]->flags & DAHDI_FLAG_NOSTDTXRX) {
-			spin_unlock_irqrestore(&span->chans[x]->lock, flags);
+		struct dahdi_chan *const chan = span->chans[x];
+		spin_lock(&chan->lock);
+		if (unlikely(chan->flags & DAHDI_FLAG_NOSTDTXRX)) {
+			spin_unlock(&chan->lock);
 			continue;
 		}
-		if (span->chans[x] == span->chans[x]->master) {
-			if (span->chans[x]->otimer) {
-				span->chans[x]->otimer -= DAHDI_CHUNKSIZE;
-				if (span->chans[x]->otimer <= 0) {
-					__rbs_otimer_expire(span->chans[x]);
+		if (chan == chan->master) {
+			if (is_chan_dacsed(chan)) {
+				struct dahdi_chan *const src = chan->dacs_chan;
+				memcpy(chan->writechunk, src->readchunk,
+				       DAHDI_CHUNKSIZE);
+				if (chan->sig == DAHDI_SIG_DACS_RBS) {
+					/* Just set bits for our destination */
+					if (chan->txsig != src->rxsig) {
+						chan->txsig = src->rxsig;
+						span->ops->rbsbits(chan, src->rxsig);
+					}
 				}
-			}
-			if (span->chans[x]->flags & DAHDI_FLAG_AUDIO) {
-				__dahdi_real_transmit(span->chans[x]);
+				/* there is no further processing to do for
+				 * DACS channels, so jump to the next channel
+				 * in the span */
+				spin_unlock(&chan->lock);
+				continue;
+			} else if (chan->nextslave) {
+				__transmit_to_slaves(chan);
 			} else {
-				if (span->chans[x]->nextslave) {
-					u_char data[DAHDI_CHUNKSIZE];
-					int pos=DAHDI_CHUNKSIZE;
-					/* Process master/slaves one way */
-					for (y=0;y<DAHDI_CHUNKSIZE;y++) {
-						/* Process slaves for this byte too */
-						z = x;
-						do {
-							if (pos==DAHDI_CHUNKSIZE) {
-								/* Get next chunk */
-								__dahdi_transmit_chunk(span->chans[x], data);
-								pos = 0;
-							}
-							span->chans[z]->writechunk[y] = data[pos++];
-							z = span->chans[z]->nextslave;
-						} while(z);
-					}
-				} else {
-					/* Process independents elsewise */
-					__dahdi_real_transmit(span->chans[x]);
-				}
+				/* Process a normal channel */
+				__dahdi_real_transmit(chan);
 			}
-			if (span->chans[x]->sig == DAHDI_SIG_DACS_RBS) {
-				if (chans[span->chans[x]->confna]) {
-				    	/* Just set bits for our destination */
-					if (span->chans[x]->txsig != chans[span->chans[x]->confna]->rxsig) {
-						span->chans[x]->txsig = chans[span->chans[x]->confna]->rxsig;
-						span->ops->rbsbits(span->chans[x], chans[span->chans[x]->confna]->rxsig);
-					}
-				}
+			if (chan->otimer) {
+				chan->otimer -= DAHDI_CHUNKSIZE;
+				if (chan->otimer <= 0)
+					__rbs_otimer_expire(chan);
 			}
-
 		}
-		spin_unlock_irqrestore(&span->chans[x]->lock, flags);
+		spin_unlock(&chan->lock);
 	}
+
 	if (span->mainttimer) {
 		span->mainttimer -= DAHDI_CHUNKSIZE;
 		if (span->mainttimer <= 0) {
 			span->mainttimer = 0;
-			if (span->ops->maint)
-				span->ops->maint(span, DAHDI_MAINT_LOOPSTOP);
 			span->maintstat = 0;
-			wake_up_interruptible(&span->maintq);
 		}
 	}
-#endif
 	return 0;
 }
+EXPORT_SYMBOL(_dahdi_transmit);
 
-static void process_masterspan(void)
+static inline void __pseudo_rx_audio(struct dahdi_chan *chan)
 {
-	unsigned long flags;
-	int x, y, z;
+	unsigned char tmp[DAHDI_CHUNKSIZE];
+	spin_lock(&chan->lock);
+	__dahdi_getempty(chan, tmp);
+	__dahdi_receive_chunk(chan, tmp);
+	spin_unlock(&chan->lock);
+}
+
+#ifdef CONFIG_DAHDI_MIRROR
+static inline void pseudo_rx_audio(struct dahdi_chan *chan)
+{
+	if (!chan->srcmirror)
+		__pseudo_rx_audio(chan);
+}
+#else
+static inline void pseudo_rx_audio(struct dahdi_chan *chan)
+{
+	__pseudo_rx_audio(chan);
+}
+#endif /* CONFIG_DAHDI_MIRROR */
+
+#ifdef DAHDI_SYNC_TICK
+static inline void dahdi_sync_tick(struct dahdi_span *const s)
+{
+	if (s->ops->sync_tick)
+		s->ops->sync_tick(s, dahdi_is_sync_master(s));
+}
+#else
+#define dahdi_sync_tick(x) do { ; } while (0)
+#endif
+
+/**
+ * _process_masterspan - Handle conferencing and timers.
+ *
+ * There are three sets of conference sum accumulators. One for the current
+ * sample chunk (conf_sums), one for the next sample chunk (conf_sums_next), and
+ * one for the previous sample chunk (conf_sums_prev). The following routine
+ * (rotate_sums) "rotates" the pointers to these accululator arrays as part
+ * of the events of sample chink processing as follows:
+ *
+ * 1. All (real span) receive chunks are processed (with putbuf). The last one
+ * to be processed is the master span. The data received is loaded into the
+ * accumulators for the next chunk (conf_sums_next), to be in alignment with
+ * current data after rotate_sums() is called (which immediately follows).
+ * Keep in mind that putbuf is *also* a transmit routine for the pseudo parts
+ * of channels that are in the REALANDPSEUDO conference mode. These channels
+ * are processed from data in the current sample chunk (conf_sums), being
+ * that this is a "transmit" function (for the pseudo part).
+ *
+ * 2. rotate_sums() is called.
+ *
+ * 3. All pseudo channel receive chunks are processed. This data is loaded into
+ * the current sample chunk accumulators (conf_sums).
+ *
+ * 4. All conference links are processed (being that all receive data for this
+ * chunk has already been processed by now).
+ *
+ * 5. All pseudo channel transmit chunks are processed. This data is loaded from
+ * the current sample chunk accumulators (conf_sums).
+ *
+ * 6. All (real span) transmit chunks are processed (with getbuf).  This data is
+ * loaded from the current sample chunk accumulators (conf_sums). Keep in mind
+ * that getbuf is *also* a receive routine for the pseudo part of channels that
+ * are in the REALANDPSEUDO conference mode. These samples are loaded into
+ * the next sample chunk accumulators (conf_sums_next) to be processed as part
+ * of the next sample chunk's data (next time around the world).
+ *
+ */
+static void _process_masterspan(void)
+{
+	int x;
+	struct pseudo_chan *pseudo;
+	struct dahdi_span *s;
+	u_char *data;
 
 #ifdef CONFIG_DAHDI_CORE_TIMER
 	/* We increment the calls since start here, so that if we switch over
 	 * to the core timer, we know how many times we need to call
 	 * process_masterspan in order to catch up since this function needs
-	 * to be called 1000 times per second. */
+	 * to be called (1000 / (DAHDI_CHUNKSIZE / 8)) times per second. */
 	atomic_inc(&core_timer.count);
 #endif
-	/* Hold the big zap lock for the duration of major
+	/* Hold the chan_lock for the duration of major
 	   activities which touch all sorts of channels */
-	spin_lock_irqsave(&bigzaplock, flags);
-	read_lock(&chan_lock);
+	spin_lock(&chan_lock);
+
 	/* Process any timers */
 	process_timers();
-	/* If we have dynamic stuff, call the ioctl with 0,0 parameters to
-	   make it run */
-	if (dahdi_dynamic_ioctl)
-		dahdi_dynamic_ioctl(0, 0);
 
-	for (x = 1; x < maxchans; x++) {
-		if (chans[x] && chans[x]->confmode &&
-		    !(chans[x]->flags & DAHDI_FLAG_PSEUDO)) {
-			u_char *data;
-			spin_lock(&chans[x]->lock);
-			data = __buf_peek(&chans[x]->confin);
-			__dahdi_receive_chunk(chans[x], data);
-			if (data) {
-				__buf_pull(&chans[x]->confin, NULL, chans[x],
-					   "confreceive");
-			}
-			spin_unlock(&chans[x]->lock);
+	list_for_each_entry(s, &span_list, spans_node) {
+		for (x = 0; x < s->channels; ++x) {
+			struct dahdi_chan *const chan = s->chans[x];
+			if (!chan->confmode)
+				continue;
+			spin_lock(&chan->lock);
+			data = __buf_peek(&chan->confin);
+			__dahdi_receive_chunk(chan, data);
+			if (data)
+				__buf_pull(&chan->confin, NULL, chan);
+			spin_unlock(&chan->lock);
 		}
 	}
+
 	/* This is the master channel, so make things switch over */
 	rotate_sums();
+
 	/* do all the pseudo and/or conferenced channel receives (getbuf's) */
-	for (x = 1; x < maxchans; x++) {
-		if (chans[x] && (chans[x]->flags & DAHDI_FLAG_PSEUDO)) {
-			spin_lock(&chans[x]->lock);
-			__dahdi_transmit_chunk(chans[x], NULL);
-			spin_unlock(&chans[x]->lock);
-		}
+	list_for_each_entry(pseudo, &pseudo_chans, node) {
+		spin_lock(&pseudo->chan.lock);
+		__dahdi_transmit_chunk(&pseudo->chan, NULL);
+		spin_unlock(&pseudo->chan.lock);
 	}
-	if (maxlinks) {
-#ifdef CONFIG_DAHDI_MMX
-		dahdi_kernel_fpu_begin();
-#endif
-		/* process all the conf links */
-		for (x = 1; x <= maxlinks; x++) {
-			/* if we have a destination conf */
-			z = confalias[conf_links[x].dst];
-			if (z) {
-				y = confalias[conf_links[x].src];
-				if (y)
-					ACSS(conf_sums[z], conf_sums[y]);
-			}
-		}
-#ifdef CONFIG_DAHDI_MMX
-		dahdi_kernel_fpu_end();
-#endif
-	}
+
 	/* do all the pseudo/conferenced channel transmits (putbuf's) */
-	for (x = 1; x < maxchans; x++) {
-		if (chans[x] && (chans[x]->flags & DAHDI_FLAG_PSEUDO)) {
-			unsigned char tmp[DAHDI_CHUNKSIZE];
-			spin_lock(&chans[x]->lock);
-			__dahdi_getempty(chans[x], tmp);
-			__dahdi_receive_chunk(chans[x], tmp);
-			spin_unlock(&chans[x]->lock);
-		}
+	list_for_each_entry(pseudo, &pseudo_chans, node) {
+		pseudo_rx_audio(&pseudo->chan);
 	}
-	for (x = 1; x < maxchans; x++) {
-		if (chans[x] && chans[x]->confmode &&
-		    !(chans[x]->flags & DAHDI_FLAG_PSEUDO)) {
-			u_char *data;
-			spin_lock(&chans[x]->lock);
-			data = __buf_pushpeek(&chans[x]->confout);
-			__dahdi_transmit_chunk(chans[x], data);
+
+	list_for_each_entry(s, &span_list, spans_node) {
+		for (x = 0; x < s->channels; x++) {
+			struct dahdi_chan *const chan = s->chans[x];
+			if (!chan->confmode)
+				continue;
+			spin_lock(&chan->lock);
+			data = __buf_pushpeek(&chan->confout);
+			__dahdi_transmit_chunk(chan, data);
 			if (data)
-				__buf_push(&chans[x]->confout, NULL,
-					   "conftransmit");
-			spin_unlock(&chans[x]->lock);
+				__buf_push(&chan->confout, NULL);
+			spin_unlock(&chan->lock);
 		}
+
+		dahdi_sync_tick(s);
 	}
-#ifdef	DAHDI_SYNC_TICK
-	for (x = 0; x < maxspans; x++) {
-		struct dahdi_span *const s = spans[x];
-		if (s && s->ops->sync_tick)
-			s->ops->sync_tick(s, s == master);
-	}
-#endif
-	read_unlock(&chan_lock);
-	spin_unlock_irqrestore(&bigzaplock, flags);
+	spin_unlock(&chan_lock);
 }
 
 #ifndef CONFIG_DAHDI_CORE_TIMER
@@ -8822,10 +9826,6 @@ static void coretimer_cleanup(void)
 }
 
 #else
-
-#ifndef NSEC_PER_SEC
-#define NSEC_PER_SEC	1000000000L
-#endif
 
 static unsigned long core_diff_ms(struct timespec *t0, struct timespec *t1)
 {
@@ -8845,16 +9845,22 @@ static unsigned long core_diff_ms(struct timespec *t0, struct timespec *t1)
 	return ms;
 }
 
+static inline unsigned long msecs_processed(const struct core_timer *const ct)
+{
+	return atomic_read(&ct->count) * DAHDI_MSECS_PER_CHUNK;
+}
+
 static void coretimer_func(unsigned long param)
 {
+	unsigned long flags;
 	unsigned long ms_since_start;
 	struct timespec now;
 	const unsigned long MAX_INTERVAL = 100000L;
-	const unsigned long FOURMS_INTERVAL = max(HZ/250, 1);
 	const unsigned long ONESEC_INTERVAL = HZ;
-	const unsigned long MS_LIMIT = 3000;
+	const long MS_LIMIT = 3000;
+	long difference;
 
-	dahdi_get_current_time(&now);
+	ktime_get_ts(&now);
 
 	if (atomic_read(&core_timer.count) ==
 	    atomic_read(&core_timer.last_count)) {
@@ -8862,30 +9868,41 @@ static void coretimer_func(unsigned long param)
 		/* This is the code path if a board driver is not calling
 		 * dahdi_receive, and therefore the core of dahdi needs to
 		 * perform the master span processing itself. */
+		if (core_timer.dahdi_receive_used) {
+			core_timer.dahdi_receive_used = 0;
+			dahdi_dbg(GENERAL, "Master changed to core_timer\n");
+		}
 
-		if (!atomic_read(&core_timer.shutdown))
-			mod_timer(&core_timer.timer, jiffies + FOURMS_INTERVAL);
+		if (!atomic_read(&core_timer.shutdown)) {
+			mod_timer(&core_timer.timer, jiffies +
+				  core_timer.interval);
+		}
 
 		ms_since_start = core_diff_ms(&core_timer.start_interval, &now);
 
 		/*
 		 * If the system time has changed, it is possible for us to be
 		 * far behind.  If we are more than MS_LIMIT milliseconds
-		 * behind, just reset our time base and continue so that we do
-		 * not hang the system here.
+		 * behind (or ahead in time), just reset our time base and
+		 * continue so that we do not hang the system here.
 		 *
 		 */
-		if (unlikely((ms_since_start - atomic_read(&core_timer.count)) > MS_LIMIT)) {
-			if (printk_ratelimit())
-				module_printk(KERN_INFO, "Detected time shift.\n");
+		difference = ms_since_start - msecs_processed(&core_timer);
+		if (unlikely((difference >  MS_LIMIT) || (difference < 0))) {
+			if (printk_ratelimit()) {
+				module_printk(KERN_INFO,
+					      "Detected time shift.\n");
+			}
 			atomic_set(&core_timer.count, 0);
 			atomic_set(&core_timer.last_count, 0);
 			core_timer.start_interval = now;
 			return;
 		}
 
-		while (ms_since_start > atomic_read(&core_timer.count))
-			process_masterspan();
+		local_irq_save(flags);
+		while (ms_since_start > msecs_processed(&core_timer))
+			_process_masterspan();
+		local_irq_restore(flags);
 
 		if (ms_since_start > MAX_INTERVAL) {
 			atomic_set(&core_timer.count, 0);
@@ -8900,6 +9917,10 @@ static void coretimer_func(unsigned long param)
 
 		/* It looks like a board driver is calling dahdi_receive. We
 		 * will just check again in a second. */
+		if (!core_timer.dahdi_receive_used) {
+			core_timer.dahdi_receive_used = 1;
+			dahdi_dbg(GENERAL, "Master is no longer core_timer\n");
+		}
 		atomic_set(&core_timer.count, 0);
 		atomic_set(&core_timer.last_count, 0);
 		core_timer.start_interval = now;
@@ -8912,10 +9933,13 @@ static void coretimer_init(void)
 {
 	init_timer(&core_timer.timer);
 	core_timer.timer.function = coretimer_func;
-	dahdi_get_current_time(&core_timer.start_interval);
-	core_timer.timer.expires = jiffies + HZ;
+	ktime_get_ts(&core_timer.start_interval);
 	atomic_set(&core_timer.count, 0);
 	atomic_set(&core_timer.shutdown, 0);
+	core_timer.interval = max(msecs_to_jiffies(DAHDI_MSECS_PER_CHUNK), 1UL);
+	if (core_timer.interval < (HZ/250))
+		core_timer.interval = (HZ/250);
+	core_timer.timer.expires = jiffies + core_timer.interval;
 	add_timer(&core_timer.timer);
 }
 
@@ -8927,215 +9951,247 @@ static void coretimer_cleanup(void)
 
 #endif /* CONFIG_DAHDI_CORE_TIMER */
 
-
-int dahdi_receive(struct dahdi_span *span)
+/**
+ * __receive_from_slaves() - Collect the rx data from all the slave channels.
+ *
+ */
+static void __receive_from_slaves(struct dahdi_chan *const chan)
 {
-	int x,y,z;
-	unsigned long flags;
+	u_char data[DAHDI_CHUNKSIZE];
+	int i;
+	int pos = 0;
+	struct dahdi_chan *slave;
+
+	for (i = 0; i < DAHDI_CHUNKSIZE; ++i) {
+		for (slave = chan; (NULL != slave); slave = slave->nextslave) {
+			data[pos++] = slave->readchunk[i];
+			if (pos == DAHDI_CHUNKSIZE) {
+				__dahdi_receive_chunk(chan, data);
+				pos = 0;
+			}
+		}
+	}
+}
+
+static inline bool should_skip_receive(const struct dahdi_chan *const chan)
+{
+	return (unlikely(chan->flags & DAHDI_FLAG_NOSTDTXRX) ||
+		(chan->master != chan) ||
+		is_chan_dacsed(chan));
+}
+
+int _dahdi_receive(struct dahdi_span *span)
+{
+	unsigned int x;
 
 #ifdef CONFIG_DAHDI_WATCHDOG
 	span->watchcounter--;
 #endif
-	for (x=0;x<span->channels;x++) {
-		if (span->chans[x]->master == span->chans[x]) {
-			spin_lock_irqsave(&span->chans[x]->lock, flags);
-			if (span->chans[x]->nextslave) {
-				/* Must process each slave at the same time */
-				u_char data[DAHDI_CHUNKSIZE];
-				int pos = 0;
-				for (y=0;y<DAHDI_CHUNKSIZE;y++) {
-					/* Put all its slaves, too */
-					z = x;
-					do {
-						data[pos++] = span->chans[z]->readchunk[y];
-						if (pos == DAHDI_CHUNKSIZE) {
-							if(!(span->chans[x]->flags & DAHDI_FLAG_NOSTDTXRX))
-								__dahdi_receive_chunk(span->chans[x], data);
-							pos = 0;
-						}
-						z=span->chans[z]->nextslave;
-					} while(z);
-				}
-			} else {
-				/* Process a normal channel */
-				if (!(span->chans[x]->flags & DAHDI_FLAG_NOSTDTXRX))
-					__dahdi_real_receive(span->chans[x]);
-			}
-			if (span->chans[x]->itimer) {
-				span->chans[x]->itimer -= DAHDI_CHUNKSIZE;
-				if (span->chans[x]->itimer <= 0) {
-					rbs_itimer_expire(span->chans[x]);
-				}
-			}
-			if (span->chans[x]->ringdebtimer)
-				span->chans[x]->ringdebtimer--;
-			if (span->chans[x]->sig & __DAHDI_SIG_FXS) {
-				if (span->chans[x]->rxhooksig == DAHDI_RXSIG_RING)
-					span->chans[x]->ringtrailer = DAHDI_RINGTRAILER;
-				else if (span->chans[x]->ringtrailer) {
-					span->chans[x]->ringtrailer-= DAHDI_CHUNKSIZE;
-					/* See if RING trailer is expired */
-					if (!span->chans[x]->ringtrailer && !span->chans[x]->ringdebtimer)
-						__qevent(span->chans[x],DAHDI_EVENT_RINGOFFHOOK);
-				}
-			}
-			if (span->chans[x]->pulsetimer)
-			{
-				span->chans[x]->pulsetimer--;
-				if (span->chans[x]->pulsetimer <= 0)
-				{
-					if (span->chans[x]->pulsecount)
-					{
-						if (span->chans[x]->pulsecount > 12) {
-
-							module_printk(KERN_NOTICE, "Got pulse digit %d on %s???\n",
-						    span->chans[x]->pulsecount,
-							span->chans[x]->name);
-						} else if (span->chans[x]->pulsecount > 11) {
-							__qevent(span->chans[x], DAHDI_EVENT_PULSEDIGIT | '#');
-						} else if (span->chans[x]->pulsecount > 10) {
-							__qevent(span->chans[x], DAHDI_EVENT_PULSEDIGIT | '*');
-						} else if (span->chans[x]->pulsecount > 9) {
-							__qevent(span->chans[x], DAHDI_EVENT_PULSEDIGIT | '0');
-						} else {
-							__qevent(span->chans[x], DAHDI_EVENT_PULSEDIGIT | ('0' +
-								span->chans[x]->pulsecount));
-						}
-						span->chans[x]->pulsecount = 0;
-					}
-				}
-			}
-#ifdef BUFFER_DEBUG
-			span->chans[x]->statcount -= DAHDI_CHUNKSIZE;
-#endif
-			spin_unlock_irqrestore(&span->chans[x]->lock, flags);
+	for (x = 0; x < span->channels; x++) {
+		struct dahdi_chan *const chan = span->chans[x];
+		spin_lock(&chan->lock);
+		if (should_skip_receive(chan)) {
+			spin_unlock(&chan->lock);
+			continue;
 		}
+
+		if (chan->nextslave) {
+			__receive_from_slaves(chan);
+		} else {
+			/* Process a normal channel */
+			__dahdi_real_receive(chan);
+		}
+		if (chan->itimer) {
+			chan->itimer -= DAHDI_CHUNKSIZE;
+			if (chan->itimer <= 0)
+				rbs_itimer_expire(chan);
+		}
+		if (chan->ringdebtimer)
+			chan->ringdebtimer--;
+		if (chan->sig & __DAHDI_SIG_FXS) {
+			if (chan->rxhooksig == DAHDI_RXSIG_RING)
+				chan->ringtrailer = DAHDI_RINGTRAILER;
+			else if (chan->ringtrailer) {
+				chan->ringtrailer -= DAHDI_CHUNKSIZE;
+				/* See if RING trailer is expired */
+				if (!chan->ringtrailer && !chan->ringdebtimer)
+					__qevent(chan, DAHDI_EVENT_RINGOFFHOOK);
+			}
+		}
+		if (chan->pulsetimer) {
+			chan->pulsetimer--;
+			if (chan->pulsetimer <= 0) {
+				if (chan->pulsecount) {
+					if (chan->pulsecount > 12) {
+
+						module_printk(KERN_NOTICE, "Got pulse digit %d on %s???\n",
+					    chan->pulsecount,
+						chan->name);
+					} else if (chan->pulsecount > 11) {
+						__qevent(chan, DAHDI_EVENT_PULSEDIGIT | '#');
+					} else if (chan->pulsecount > 10) {
+						__qevent(chan, DAHDI_EVENT_PULSEDIGIT | '*');
+					} else if (chan->pulsecount > 9) {
+						__qevent(chan, DAHDI_EVENT_PULSEDIGIT | '0');
+					} else {
+						__qevent(chan, DAHDI_EVENT_PULSEDIGIT | ('0' +
+							chan->pulsecount));
+					}
+					chan->pulsecount = 0;
+				}
+			}
+		}
+#ifdef BUFFER_DEBUG
+		chan->statcount -= DAHDI_CHUNKSIZE;
+#endif
+		spin_unlock(&chan->lock);
 	}
 
-	if (span == master)
-		process_masterspan();
+	if (dahdi_is_sync_master(span))
+		_process_masterspan();
 
 	return 0;
 }
+EXPORT_SYMBOL(_dahdi_receive);
 
-module_param(debug, int, 0644);
-module_param(deftaps, int, 0644);
+MODULE_AUTHOR("Mark Spencer <markster@digium.com>");
+MODULE_DESCRIPTION("DAHDI Telephony Interface");
+MODULE_LICENSE("GPL v2");
 
 #if defined(__FreeBSD__)
-static void
-init_file(struct file *file, struct cdev *dev, int ioflag)
+static struct file *
+dahdi_device_get_file(struct cdev *dev, int f_flags)
 {
-	file->dev = dev;
-	file->f_flags = ioflag;
+	void *p;
+	struct file *file;
+
+	if (devfs_get_cdevpriv(&p) || p == NULL)
+		return NULL;
+
+	file = p;
+	if (f_flags >= 0)
+		file->f_flags = f_flags;
+	return file;
+}
+
+static void
+dahdi_device_free_file(void *p)
+{
+	struct file *file = p;
+
+	seldrain(&file->selinfo);
+	kfree(file);
 }
 
 static int
 dahdi_device_open(struct cdev *dev, int oflags, int devtype, struct thread *td)
 {
 	int res;
-	struct file file;
+	struct file *file = dahdi_device_get_file(dev, -1);
 
-	init_file(&file, dev, oflags);
-	res = dahdi_open(NULL, &file);
-	if (res < 0)
+	/*
+	 * create file struct
+	 */
+	if (file != NULL)
+		return EBUSY;
+	file = kzalloc(sizeof(*file), GFP_KERNEL);
+	if (file == NULL)
+		return ENOMEM;
+	res = devfs_set_cdevpriv(file, dahdi_device_free_file);
+	if (res) {
+		kfree(file);
+		return res;
+	}
+
+	/*
+	 * open the file
+	 */
+	res = dahdi_open(NULL, file);
+	if (res < 0) {
+		devfs_clear_cdevpriv();
 		return -res;
+	}
 
-	return res;
+	return (0);
 }
 
 static int
 dahdi_device_close(struct cdev *dev, int fflag, int devtype, struct thread *td)
 {
 	int res;
-	struct file file;
+	struct file *file = dahdi_device_get_file(dev, fflag);
 
-	init_file(&file, dev, fflag);
-	res = dahdi_release(NULL, &file);
+	if (file == NULL)
+		return ENXIO;
+
+	res = file->f_op->release(NULL, file);
 	if (res < 0)
-		return -res;
-
-	if (res == 0)
-		devfs_clear_cdevpriv();
-	return res;
+		return (-res);
+	devfs_clear_cdevpriv();
+	return (0);
 }
 
 static int
 dahdi_device_read(struct cdev *dev, struct uio *uio, int ioflag)
 {
 	ssize_t res;
-	struct file file;
+	struct file *file = dahdi_device_get_file(dev, ioflag);
 
-	init_file(&file, dev, ioflag);
-	res = dahdi_read(&file, uio, uio->uio_resid);
+	if (file == NULL)
+		return ENXIO;
+
+	res = file->f_op->read(file, uio, uio->uio_resid);
 	if (res < 0)
-		return -res;
-	return 0;
+		return (-res);
+	return (0);
 }
 
 static int
 dahdi_device_write(struct cdev *dev, struct uio *uio, int ioflag)
 {
 	ssize_t res;
-	struct file file;
+	struct file *file = dahdi_device_get_file(dev, ioflag);
 
-	init_file(&file, dev, ioflag);
-	res = dahdi_write(&file, uio, uio->uio_resid);
+	if (file == NULL)
+		return ENXIO;
+
+	res = file->f_op->write(file, uio, uio->uio_resid);
 	if (res < 0)
-		return -res;
-	return 0;
+		return (-res);
+	return (0);
 }
 
 static int
 dahdi_device_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag, struct thread *td)
 {
 	int res;
-	struct file file;
+	struct file *file = dahdi_device_get_file(dev, fflag);
 
-	init_file(&file, dev, fflag);
-	res = dahdi_ioctl(NULL, &file, cmd, (unsigned long) data);
+	if (file == NULL)
+		return ENXIO;
+
+	res = file->f_op->ioctl(NULL, file, cmd, (unsigned long) data);
 	if (res < 0)
-		return -res;
-	return res;
+		return (-res);
+	return (0);
 }
 
 static int
 dahdi_device_poll(struct cdev *dev, int events, struct thread *td)
 {
 	int res;
-	struct file file;
+	struct file *file = dahdi_device_get_file(dev, -1);
 	struct poll_table_struct wait_table;
 
-	init_file(&file, dev, 0);
-	wait_table.selinfo = NULL;
-	res = dahdi_poll(&file, &wait_table);
+	if (file == NULL)
+		return ENXIO;
+
+	res = file->f_op->poll(file, &wait_table);
 	if (res < 0)
-		return 0;
+		return (0);
 
 	res &= events;
-	if (res == 0 && wait_table.selinfo != NULL)
-		selrecord(td, wait_table.selinfo);
-	return res;
-}
-
-static int
-#if D_VERSION_LINEAR >= 0x20091217
-dahdi_device_mmap(struct cdev *dev, vm_ooffset_t offset, vm_paddr_t *paddr, int nprot, vm_memattr_t *memattr)
-#else
-dahdi_device_mmap(struct cdev *dev, vm_offset_t offset, vm_paddr_t *paddr, int nprot)
-#endif
-{
-	int res;
-	struct file file;
-	struct vm_area_struct vm;
-
-	init_file(&file, dev, 0);
-	vm.offset = offset;
-	vm.paddr = paddr;
-	vm.nprot = nprot;
-	res = dahdi_mmap(&file, &vm);
-	if (res < 0)
-		return -res;
-	return res;
+	return (res);
 }
 
 static struct cdevsw dahdi_devsw = {
@@ -9146,7 +10202,6 @@ static struct cdevsw dahdi_devsw = {
 	.d_write	= dahdi_device_write,
 	.d_ioctl	= dahdi_device_ioctl,
 	.d_poll		= dahdi_device_poll,
-	.d_mmap		= dahdi_device_mmap,
 	.d_name		= "dahdi",
 #if __FreeBSD_version >= 800039
 	.d_flags	= D_PSEUDO | D_TRACKCLOSE | D_NEEDMINOR
@@ -9174,67 +10229,227 @@ dahdi_unregister_chardev(struct dahdi_chardev *dev)
 	return 0;
 }
 
+static int
+dahdi_span_register_chardev(struct dahdi_span *span)
+{
+	int x;
+
+	for (x = 0; x < span->channels; x++) {
+		struct dahdi_chan *chan = span->chans[x];
+
+		if (chan->channo >= 250)
+			continue;
+		if (chan->dev)
+			continue;
+		chan->dev = make_dev(&dahdi_devsw, chan->channo,
+		    UID_ROOT, GID_WHEEL, 0644,
+		    "dahdi/%d", chan->channo);
+	}
+	return 0;
+}
+
+static void
+dahdi_span_unregister_chardev(struct dahdi_span *span)
+{
+	int x;
+
+	for (x = 0; x < span->channels; x++) {
+		struct dahdi_chan *chan = span->chans[x];
+
+		if (!chan->dev)
+			continue;
+
+		destroy_dev(chan->dev);
+		chan->dev = NULL;
+	}
+}
 #else /* !__FreeBSD__ */
 /* DAHDI now provides timing. If anybody wants dahdi_dummy it's probably
  * for that. So make dahdi provide it for now. This alias may be removed
  * in the future, and users are encouraged not to rely on it. */
 MODULE_ALIAS("dahdi_dummy");
-MODULE_VERSION(DAHDI_VERSION);
+#endif /* !__FreeBSD__ */
 
-static struct file_operations dahdi_fops = {
+module_param(debug, int, 0644);
+MODULE_PARM_DESC(debug, "Sets debugging verbosity as a bitfield, to see"\
+		" general debugging set this to 1. To see RBS debugging set"\
+		" this to 32");
+module_param(deftaps, int, 0644);
+
+module_param(max_pseudo_channels, int, 0644);
+MODULE_PARM_DESC(max_pseudo_channels, "Maximum number of pseudo channels.");
+
+module_param(hwec_overrides_swec, int, 0644);
+MODULE_PARM_DESC(hwec_overrides_swec, "When true, a hardware echo canceller is used instead of configured SWEC.");
+
+module_param(auto_assign_spans, int, 0644);
+MODULE_PARM_DESC(auto_assign_spans,
+		 "If 1 spans will automatically have their children span and "
+		 "channel numbers assigned by the driver. If 0, user space "
+		 "will need to assign them via /sys/bus/dahdi_devices.");
+
+static const struct file_operations dahdi_fops = {
 	.owner   = THIS_MODULE,
 	.open    = dahdi_open,
 	.release = dahdi_release,
 #ifdef HAVE_UNLOCKED_IOCTL
-	.unlocked_ioctl  = dahdi_ioctl,
+	.unlocked_ioctl  = dahdi_unlocked_ioctl,
 #ifdef HAVE_COMPAT_IOCTL
 	.compat_ioctl = dahdi_ioctl_compat,
 #endif
 #else
 	.ioctl   = dahdi_ioctl,
 #endif
-	.read    = dahdi_read,
-	.write   = dahdi_write,
 	.poll    = dahdi_poll,
-	.mmap    = dahdi_mmap,
 };
-#endif /* !__FreeBSD__ */
+
+/*
+ * DAHDI stability should not depend on the calling process behaviour.
+ * In case of suprise device removal, we should be able to return
+ * sane results (-ENODEV) even after the underlying device was released.
+ *
+ * This should be OK even if the calling process (hint, hint Asterisk)
+ * ignores the system calls return value.
+ *
+ * We simply use dummy file_operations to implement this.
+ */
+
+/*
+ * Common behaviour called from all other nodev_*() file_operations
+ */
+static int nodev_common(const char msg[])
+{
+	if (printk_ratelimit()) {
+		module_printk(KERN_NOTICE,
+			"nodev: %s: process %d still calling\n",
+			msg,
+#if defined(__FreeBSD__)
+			curproc->p_pid
+#else
+			current->tgid
+#endif
+			);
+	}
+	msleep(5);
+	return -ENODEV;
+}
+
+static ssize_t nodev_chan_read(FOP_READ_ARGS_DECL)
+{
+	return nodev_common("read");
+}
+
+static ssize_t nodev_chan_write(FOP_WRITE_ARGS_DECL)
+{
+	return nodev_common("write");
+}
+
+static unsigned int
+nodev_chan_poll(struct file *file, struct poll_table_struct *wait_table)
+{
+	return nodev_common("poll");
+}
+
+static long
+nodev_unlocked_ioctl(struct file *file, unsigned int cmd, unsigned long data)
+{
+	switch (cmd) {
+	case DAHDI_GETEVENT:  /* Get event on queue */
+		/*
+		 * Hint the bugger that the channel is gone for good
+		 */
+		put_user(DAHDI_EVENT_REMOVED, (int __user *)data);
+		break;
+	}
+	return nodev_common("ioctl");
+}
+
+#ifndef HAVE_UNLOCKED_IOCTL
+static int nodev_ioctl(struct inode *inode, struct file *file,
+		unsigned int cmd, unsigned long data)
+{
+	return nodev_unlocked_ioctl(file, cmd, data);
+}
+#endif
+
+#ifdef HAVE_COMPAT_IOCTL
+static long nodev_ioctl_compat(struct file *file, unsigned int cmd,
+		unsigned long data)
+{
+	if (cmd == DAHDI_SFCONFIG)
+		return -ENOTTY; /* Not supported yet */
+
+	return nodev_unlocked_ioctl(file, cmd, data);
+}
+#endif
+
+static const struct file_operations nodev_fops = {
+	.owner   = THIS_MODULE,
+#ifdef HAVE_UNLOCKED_IOCTL
+	.unlocked_ioctl  = nodev_unlocked_ioctl,
+#ifdef HAVE_COMPAT_IOCTL
+	.compat_ioctl = nodev_ioctl_compat,
+#endif
+#else
+	.ioctl   = nodev_ioctl,
+#endif
+	.read    = nodev_chan_read,
+	.write   = nodev_chan_write,
+	.poll    = nodev_chan_poll,
+};
+
+static const struct file_operations dahdi_chan_fops = {
+	.owner   = THIS_MODULE,
+	.open    = dahdi_open,
+	.release = dahdi_release,
+#ifdef HAVE_UNLOCKED_IOCTL
+	.unlocked_ioctl  = dahdi_unlocked_ioctl,
+#ifdef HAVE_COMPAT_IOCTL
+	.compat_ioctl = dahdi_ioctl_compat,
+#endif
+#else
+	.ioctl   = dahdi_ioctl,
+#endif
+	.read    = dahdi_chan_read,
+	.write   = dahdi_chan_write,
+	.poll    = dahdi_chan_poll,
+};
 
 #ifdef CONFIG_DAHDI_WATCHDOG
 static struct timer_list watchdogtimer;
 
 static void watchdog_check(unsigned long ignored)
 {
-	int x;
 	unsigned long flags;
 	static int wdcheck=0;
+	struct dahdi_span *s;
 
-	local_irq_save(flags);
-	for (x=0;x<maxspans;x++) {
-		if (spans[x] && (spans[x]->flags & DAHDI_FLAG_RUNNING)) {
-			if (spans[x]->watchcounter == DAHDI_WATCHDOG_INIT) {
+	spin_lock_irqsave(&span_list_lock, flags);
+	list_for_each_entry(s, &span_list, spans_node) {
+		if (s->flags & DAHDI_FLAG_RUNNING) {
+			if (s->watchcounter == DAHDI_WATCHDOG_INIT) {
 				/* Whoops, dead card */
-				if ((spans[x]->watchstate == DAHDI_WATCHSTATE_OK) ||
-					(spans[x]->watchstate == DAHDI_WATCHSTATE_UNKNOWN)) {
-					spans[x]->watchstate = DAHDI_WATCHSTATE_RECOVERING;
-					if (spans[x]->watchdog) {
-						module_printk(KERN_NOTICE, "Kicking span %s\n", spans[x]->name);
-						spans[x]->watchdog(spans[x], DAHDI_WATCHDOG_NOINTS);
+				if ((s->watchstate == DAHDI_WATCHSTATE_OK) ||
+					(s->watchstate == DAHDI_WATCHSTATE_UNKNOWN)) {
+					s->watchstate = DAHDI_WATCHSTATE_RECOVERING;
+					if (s->watchdog) {
+						module_printk(KERN_NOTICE, "Kicking span %s\n", s->name);
+						s->watchdog(spans[x], DAHDI_WATCHDOG_NOINTS);
 					} else {
-						module_printk(KERN_NOTICE, "Span %s is dead with no revival\n", spans[x]->name);
-						spans[x]->watchstate = DAHDI_WATCHSTATE_FAILED;
+						module_printk(KERN_NOTICE, "Span %s is dead with no revival\n", s->name);
+						s->watchstate = DAHDI_WATCHSTATE_FAILED;
 					}
 				}
 			} else {
-				if ((spans[x]->watchstate != DAHDI_WATCHSTATE_OK) &&
-					(spans[x]->watchstate != DAHDI_WATCHSTATE_UNKNOWN))
-						module_printk(KERN_NOTICE, "Span %s is alive!\n", spans[x]->name);
-				spans[x]->watchstate = DAHDI_WATCHSTATE_OK;
+				if ((s->watchstate != DAHDI_WATCHSTATE_OK) &&
+					(s->watchstate != DAHDI_WATCHSTATE_UNKNOWN))
+						module_printk(KERN_NOTICE, "Span %s is alive!\n", s->name);
+				s->watchstate = DAHDI_WATCHSTATE_OK;
 			}
-			spans[x]->watchcounter = DAHDI_WATCHDOG_INIT;
+			s->watchcounter = DAHDI_WATCHDOG_INIT;
 		}
 	}
-	local_irq_restore(flags);
+	spin_unlock_irqrestore(&span_list_lock, flags);
 	if (!wdcheck) {
 		module_printk(KERN_NOTICE, "watchdog on duty!\n");
 		wdcheck=1;
@@ -9264,39 +10479,36 @@ static int __init dahdi_init(void)
 {
 	int res = 0;
 
+	module_printk(KERN_INFO, "Version: %s\n", dahdi_version);
 #ifdef CONFIG_PROC_FS
-	proc_entries[0] = proc_mkdir("dahdi", NULL);
+	root_proc_entry = proc_mkdir("dahdi", NULL);
+	if (!root_proc_entry) {
+		dahdi_err("dahdi init: Failed creating /proc/dahdi\n");
+		return -EEXIST;
+	}
+#endif
+#ifdef CONFIG_DAHDI_SYSFS
+	res = dahdi_sysfs_init(&dahdi_fops);
+	if (res)
+		goto failed_driver_init;
 #endif
 
 #if defined(__FreeBSD__)
 	free_pseudo_tag = EVENTHANDLER_REGISTER(
 	    thread_dtor, thread_dtor_free_pseudo, NULL, EVENTHANDLER_PRI_ANY);
 
-	dev_ctl = make_dev(&dahdi_devsw, 0, UID_ROOT, GID_WHEEL, 0644, "dahdi/ctl");
+	dev_ctl = make_dev(&dahdi_devsw, DAHDI_CTL, UID_ROOT, GID_WHEEL, 0644, "dahdi/ctl");
 	{
 		struct cdev *dev;
-		dev = make_dev(&dahdi_devsw, 253, UID_ROOT, GID_WHEEL, 0644, "dahdi/timer");
+		dev = make_dev(&dahdi_devsw, DAHDI_TIMER, UID_ROOT, GID_WHEEL, 0644, "dahdi/timer");
 		dev_depends(dev_ctl, dev);
-		dev = make_dev(&dahdi_devsw, 254, UID_ROOT, GID_WHEEL, 0644, "dahdi/channel");
+		dev = make_dev(&dahdi_devsw, DAHDI_CHANNEL, UID_ROOT, GID_WHEEL, 0644, "dahdi/channel");
 		dev_depends(dev_ctl, dev);
-		dev = make_dev(&dahdi_devsw, 255, UID_ROOT, GID_WHEEL, 0644, "dahdi/pseudo");
+		dev = make_dev(&dahdi_devsw, DAHDI_PSEUDO, UID_ROOT, GID_WHEEL, 0644, "dahdi/pseudo");
 		dev_depends(dev_ctl, dev);
 	}
-#else /* !__FreeBSD__ */
-	if ((res = register_chrdev(DAHDI_MAJOR, "dahdi", &dahdi_fops))) {
-		module_printk(KERN_ERR, "Unable to register DAHDI character device handler on %d\n", DAHDI_MAJOR);
-		return res;
-	}
+#endif /* __FreeBSD__ */
 
-	dahdi_class = class_create(THIS_MODULE, "dahdi");
-	CLASS_DEV_CREATE(dahdi_class, MKDEV(DAHDI_MAJOR, 253), NULL, "dahdi!timer");
-	CLASS_DEV_CREATE(dahdi_class, MKDEV(DAHDI_MAJOR, 254), NULL, "dahdi!channel");
-	CLASS_DEV_CREATE(dahdi_class, MKDEV(DAHDI_MAJOR, 255), NULL, "dahdi!pseudo");
-	CLASS_DEV_CREATE(dahdi_class, MKDEV(DAHDI_MAJOR, 0), NULL, "dahdi!ctl");
-#endif /* !__FreeBSD__ */
-
-	module_printk(KERN_INFO, "Telephony Interface Registered on major %d\n", DAHDI_MAJOR);
-	module_printk(KERN_INFO, "Version: %s\n", DAHDI_VERSION);
 	dahdi_conv_init();
 	fasthdlc_precalc();
 	rotate_sums();
@@ -9304,14 +10516,72 @@ static int __init dahdi_init(void)
 	watchdog_init();
 #endif
 	coretimer_init();
+
+	res = dahdi_register_echocan_factory(&hwec_factory);
+	if (res) {
+		WARN_ON(1);
+		goto failed_register_ec_factory;
+	}
+
+	return 0;
+
+failed_register_ec_factory:
+	coretimer_cleanup();
+#ifdef CONFIG_DAHDI_SYSFS
+	dahdi_sysfs_exit();
+failed_driver_init:
+#endif
+#ifdef CONFIG_PROC_FS
+	if (root_proc_entry) {
+		remove_proc_entry("dahdi", NULL);
+		root_proc_entry = NULL;
+	}
+#endif
 	return res;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 25)
+#ifdef CONFIG_PCI
+void dahdi_pci_disable_link_state(struct pci_dev *pdev, int state)
+{
+	u16 reg16;
+	int pos = pci_find_capability(pdev, PCI_CAP_ID_EXP);
+	state &= (PCIE_LINK_STATE_L0S | PCIE_LINK_STATE_L1 |
+		  PCIE_LINK_STATE_CLKPM);
+	if (!pos)
+		return;
+	pci_read_config_word(pdev, pos + PCI_EXP_LNKCTL, &reg16);
+	reg16 &= ~(state);
+	pci_write_config_word(pdev, pos + PCI_EXP_LNKCTL, reg16);
+}
+EXPORT_SYMBOL(dahdi_pci_disable_link_state);
+#endif /* CONFIG_PCI */
+#endif /* 2.6.25 */
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 22)
+static inline void flush_find_master_work(void)
+{
+	flush_scheduled_work();
+}
+#else
+static inline void flush_find_master_work(void)
+{
+	cancel_work_sync(&find_master_work);
+}
+#endif
+
 static void __exit dahdi_cleanup(void)
 {
+#if defined(__FreeBSD__)
 	int x;
+#endif
+	struct dahdi_zone *z;
 
+	dahdi_unregister_echocan_factory(&hwec_factory);
 	coretimer_cleanup();
+#ifdef CONFIG_DAHDI_SYSFS
+	dahdi_sysfs_exit();
+#endif
 
 #if defined(__FreeBSD__)
 	EVENTHANDLER_DEREGISTER(thread_dtor, free_pseudo_tag);
@@ -9330,29 +10600,33 @@ static void __exit dahdi_cleanup(void)
 		destroy_dev(dev_ctl);
 		dev_ctl = NULL;
 	}
-#else /* !__FreeBSD__ */
-	CLASS_DEV_DESTROY(dahdi_class, MKDEV(DAHDI_MAJOR, 253)); /* timer */
-	CLASS_DEV_DESTROY(dahdi_class, MKDEV(DAHDI_MAJOR, 254)); /* channel */
-	CLASS_DEV_DESTROY(dahdi_class, MKDEV(DAHDI_MAJOR, 255)); /* pseudo */
-	CLASS_DEV_DESTROY(dahdi_class, MKDEV(DAHDI_MAJOR, 0)); /* ctl */
-	class_destroy(dahdi_class);
-
-	unregister_chrdev(DAHDI_MAJOR, "dahdi");
-#endif /* !__FreeBSD__ */
+#endif /* __FreeBSD__ */
 
 #ifdef CONFIG_PROC_FS
-	remove_proc_entry("dahdi", NULL);
+	if (root_proc_entry) {
+		remove_proc_entry("dahdi", NULL);
+		root_proc_entry = NULL;
+	}
 #endif
 
 	module_printk(KERN_INFO, "Telephony Interface Unloaded\n");
-	for (x = 0; x < DAHDI_TONE_ZONE_MAX; x++) {
-		if (tone_zones[x])
-			kfree(tone_zones[x]);
+
+	spin_lock(&zone_lock);
+	while (!list_empty(&tone_zones)) {
+		z = list_entry(tone_zones.next, struct dahdi_zone, node);
+		list_del(&z->node);
+		if (!tone_zone_put(z)) {
+			module_printk(KERN_WARNING,
+				      "Potential memory leak detected in %s\n",
+				      __func__);
+		}
 	}
+	spin_unlock(&zone_lock);
 
 #ifdef CONFIG_DAHDI_WATCHDOG
 	watchdog_cleanup();
 #endif
+	flush_find_master_work();
 }
 
 #if defined(__FreeBSD__)
@@ -9379,10 +10653,6 @@ DEV_MODULE(dahdi_dummy, dahdi_dummy_modevent, NULL);
 MODULE_VERSION(dahdi_dummy, 1);
 #endif
 #endif /* __FreeBSD__ */
-
-MODULE_AUTHOR("Mark Spencer <markster@digium.com>");
-MODULE_DESCRIPTION("DAHDI Telephony Interface");
-MODULE_LICENSE("GPL v2");
 
 module_init(dahdi_init);
 module_exit(dahdi_cleanup);
