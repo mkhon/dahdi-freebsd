@@ -1578,7 +1578,13 @@ static void close_channel(struct dahdi_chan *chan)
 	if (chan->curzone) {
 		struct dahdi_zone *zone = chan->curzone;
 		chan->curzone = NULL;
+#if defined(__FreeBSD__)
+		spin_unlock_irqrestore(&chan->lock, flags);
+#endif
 		tone_zone_put(zone);
+#if defined(__FreeBSD__)
+		spin_lock_irqsave(&chan->lock, flags);
+#endif
 	}
 	chan->cadencepos = 0;
 	chan->pdialcount = 0;
@@ -1838,7 +1844,13 @@ static int set_tone_zone(struct dahdi_chan *chan, int zone)
 	if (chan->curzone) {
 		struct dahdi_zone *zone = chan->curzone;
 		chan->curzone = NULL;
+#if defined(__FreeBSD__)
+		spin_unlock_irqrestore(&chan->lock, flags);
+#endif
 		tone_zone_put(zone);
+#if defined(__FreeBSD__)
+		spin_lock_irqsave(&chan->lock, flags);
+#endif
 	}
 	chan->curzone = z;
 	memcpy(chan->ringcadence, z->ringcadence, sizeof(chan->ringcadence));
@@ -2032,7 +2044,7 @@ static int dahdi_net_open(struct net_device *dev)
 		return -EINVAL;
 	}
 
-	res = dahdi_net_chan_init(ms);
+	res = dahdi_net_chan_init(ms, DAHDI_DEFAULT_NUM_BUFS);
 	if (res)
 		return res;
 
@@ -3421,7 +3433,7 @@ static int dahdi_ioctl_loadzone(unsigned long data)
 		return -ENOMEM;
 
 #if defined(__FreeBSD__)
-	if (copy_from_user(&data, (void *) data, sizeof(data))) {
+	if (copy_from_user(&user_data, (void *) data, sizeof(data))) {
 		res = -EFAULT;
 		goto error_exit;
 	}
@@ -4701,7 +4713,9 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 	}
 #elif defined(__FreeBSD__)
 	if (dahdi_have_netdev(chan)) {
+		spin_unlock_irqrestore(&chan->lock, flags);
 		dahdi_iface_destroy(chan);
+		spin_lock_irqsave(&chan->lock, flags);
 		clear_bit(DAHDI_FLAGBIT_NETDEV, &chan->flags);
 	}
 #else
@@ -4850,9 +4864,13 @@ static int dahdi_ioctl_chanconfig(struct file *file, unsigned long data)
 #elif defined(__FreeBSD__)
 	if (!res &&
 	    (newmaster == chan) &&
-	    (chan->sig == DAHDI_SIG_HDLCNET) &&
-	    (res = dahdi_iface_create(chan)) == 0) {
-		set_bit(DAHDI_FLAGBIT_NETDEV, &chan->flags);
+	    (chan->sig == DAHDI_SIG_HDLCNET)) {
+		spin_unlock_irqrestore(&chan->lock, flags);
+		/* Briefly restore interrupts while we register the device */
+		res = dahdi_iface_create(chan);
+		if (!res)
+			set_bit(DAHDI_FLAGBIT_NETDEV, &chan->flags);
+		spin_lock_irqsave(&chan->lock, flags);
 	}
 #endif
 	if ((chan->sig == DAHDI_SIG_HDLCNET) &&
@@ -6521,7 +6539,7 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 #endif /* __FreeBSD__ */
 		if (!(chan->flags & DAHDI_FLAG_AUDIO))
 			return -EINVAL;
-		ret = copy_from_user(&ecp,
+		ret = dahdi_copy_from_user(&ecp,
 				     (struct dahdi_echocanparams __user *)data,
 				     sizeof(ecp));
 		if (ret)
@@ -10083,6 +10101,8 @@ dahdi_device_free_file(void *p)
 	kfree(file);
 }
 
+static const struct file_operations dahdi_fops;
+
 static int
 dahdi_device_open(struct cdev *dev, int oflags, int devtype, struct thread *td)
 {
@@ -10097,6 +10117,10 @@ dahdi_device_open(struct cdev *dev, int oflags, int devtype, struct thread *td)
 	file = kzalloc(sizeof(*file), GFP_KERNEL);
 	if (file == NULL)
 		return ENOMEM;
+	file->dev = dev;
+	file->f_flags = oflags;
+	file->private_data = NULL;
+	file->f_op = &dahdi_fops;
 	res = devfs_set_cdevpriv(file, dahdi_device_free_file);
 	if (res) {
 		kfree(file);
@@ -10615,11 +10639,17 @@ static void __exit dahdi_cleanup(void)
 	while (!list_empty(&tone_zones)) {
 		z = list_entry(tone_zones.next, struct dahdi_zone, node);
 		list_del(&z->node);
+#if defined(__FreeBSD__)
+		spin_unlock(&zone_lock);
+#endif
 		if (!tone_zone_put(z)) {
 			module_printk(KERN_WARNING,
 				      "Potential memory leak detected in %s\n",
 				      __func__);
 		}
+#if defined(__FreeBSD__)
+		spin_lock(&zone_lock);
+#endif
 	}
 	spin_unlock(&zone_lock);
 

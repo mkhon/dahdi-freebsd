@@ -9,7 +9,8 @@ SRCS+=		version.h
 SRCS+=		device_if.h bus_if.h pci_if.h
 CLEANFILES=	version.h dahdi
 CFLAGS+=	-I${.CURDIR}
-INCS=		user.h wctdm_user.h compat/types.h
+DAHDI_INCS=	dahdi_config.h user.h wctdm_user.h
+LINUX_INCS=	ioctl.h types.h
 
 DAHDIVERSION!=	${.CURDIR}/../../build_tools/make_version ${.CURDIR}/../.. dahdi/freebsd
 version.h::
@@ -18,12 +19,17 @@ version.h::
 	@rm -f ${.TARGET}.tmp
 	@[ -e dahdi ] || ln -sf . dahdi
 
+.if !defined(WITHOUT_HEADERS)
 afterinstall: install-headers
+.endif
 
 install-headers:
-	${MKDIR} ${PREFIX}/include/dahdi/compat
-.for _h in ${INCS}
+	${MKDIR} ${PREFIX}/include/dahdi/compat/linux
+.for _h in ${DAHDI_INCS}
 	${INSTALL_DATA} ${INCLUDEDIR}/dahdi/${_h} ${PREFIX}/include/dahdi/${_h:H}
+.endfor
+.for _h in ${LINUX_INCS}
+	${INSTALL_DATA} ${INCLUDEDIR}/linux/${_h} ${PREFIX}/include/dahdi/compat/linux/${_h:H}
 .endfor
 
 .include <bsd.kmod.mk>
