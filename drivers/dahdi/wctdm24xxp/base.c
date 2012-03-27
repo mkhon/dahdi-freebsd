@@ -54,12 +54,11 @@ Tx Gain - W/Pre-Emphasis: -23.99 to 0.00 db
 #else
 #include <asm/semaphore.h>
 #endif
+#include <linux/crc32.h>
 #if defined(__FreeBSD__)
 #define flush_scheduled_work()
 #define fatal_signal_pending(x)	0
 #else /* !__FreeBSD__ */
-#include <linux/crc32.h>
-
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 30)
 /* Define this if you would like to load the modules in parallel.  While this
  * can speed up loads when multiple cards handled by this driver are installed,
@@ -5429,11 +5428,7 @@ static int hx8_check_firmware(struct wctdm *wc)
 
 	if ((fw_size != sizeof(*ha8_fw)) ||
 	    (0 != memcmp("DIGIUM", ha8_fw->header, sizeof(ha8_fw->header))) ||
-#if defined(__FreeBSD__)
-	    (crc32(ha8_fw, sizeof(*ha8_fw) - sizeof(u32)) !=
-#else
-	    ((crc32(~0, (void *)ha8_fw, sizeof(*ha8_fw) - sizeof(u32)) ^ ~0) !=
-#endif
+	    ((crc32(~0, (const void *)ha8_fw, sizeof(*ha8_fw) - sizeof(u32)) ^ ~0) !=
 	      le32_to_cpu(ha8_fw->chksum))) {
 		dev_warn(dev, "Firmware file is invalid. Skipping load.\n");
 		ret = 0;

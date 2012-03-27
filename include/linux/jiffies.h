@@ -2,6 +2,7 @@
 #define _LINUX_JIFFIES_H_
 
 #include <sys/limits.h>
+#include <sys/time.h>
 
 #if 1
 /* emulate jiffies */

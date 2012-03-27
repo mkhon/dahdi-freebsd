@@ -2907,7 +2907,6 @@ static void __devexit te12xp_remove_one(struct pci_dev *pdev)
 	smp_mb__after_clear_bit();
 
 	del_timer_sync(&wc->timer);
-#if !defined(__FreeBSD__)
 	flush_workqueue(wc->wq);
 #ifdef VPM_SUPPORT
 	if (vpmadt) {
@@ -2917,7 +2916,6 @@ static void __devexit te12xp_remove_one(struct pci_dev *pdev)
 		while (t1_wait_for_ready(wc))
 			schedule();
 	}
-#endif
 #endif
 
 	voicebus_release(&wc->vb);

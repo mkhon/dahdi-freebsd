@@ -358,6 +358,24 @@ destroy_workqueue(struct workqueue_struct *wq)
 	free(wq, M_DAHDI);
 }
 
+static void
+_flush_workqueue_fn(void *context, int pending)
+{
+	/* nothing to do */
+}
+
+void
+flush_workqueue(struct workqueue_struct *wq)
+{
+	struct task flushtask;
+
+	PHOLD(curproc);
+	TASK_INIT(&flushtask, 0, _flush_workqueue_fn, NULL);
+	taskqueue_enqueue(wq->tq, &flushtask);
+	taskqueue_drain(wq->tq, &flushtask);
+	PRELE(curproc);
+}
+
 void
 queue_work(struct workqueue_struct *wq, struct work_struct *work)
 {

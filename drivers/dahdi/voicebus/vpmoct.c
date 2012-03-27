@@ -218,7 +218,7 @@ vpmoct_send_firmware_header(struct vpmoct *vpm, const struct firmware *fw)
 	/* Send the encrypted firmware header */
 	for (i = 0; i < VPMOCT_FIRM_HEADER_LEN; i++) {
 		vpmoct_write_byte(vpm, VPMOCT_BOOT_RAM+i,
-				  fw->data[i + sizeof(struct vpmoct_header)]);
+				  ((const char *)fw->data)[i + sizeof(struct vpmoct_header)]);
 	}
 	/* Decrypt header */
 	vpmoct_write_byte(vpm, VPMOCT_BOOT_CMD, VPMOCT_BOOT_DECRYPT);
@@ -234,12 +234,18 @@ vpmoct_send_firmware_body(struct vpmoct *vpm, const struct firmware *fw)
 	unsigned int i, ram_index, flash_index, flash_address;
 	const u8 *buf;
 	u8 chunksize;
+	size_t fw_size;
 
 	/* Load the body of the firmware */
 	ram_index = 0;
 	flash_index = 0;
 	flash_address = 0;
-	for (i = VPMOCT_FIRM_HEADER_LEN*2; i < fw->size;) {
+#if defined(__FreeBSD__)
+	fw_size = fw->datasize;
+#else
+	fw_size = fw->size;
+#endif
+	for (i = VPMOCT_FIRM_HEADER_LEN*2; i < fw->datasize;) {
 		if (ram_index >= VPMOCT_BOOT_RAM_LEN) {
 			/* Tell bootloader to load ram buffer into buffer */
 			vpmoct_write_byte(vpm, VPMOCT_BOOT_CMD,
@@ -268,7 +274,7 @@ vpmoct_send_firmware_body(struct vpmoct *vpm, const struct firmware *fw)
 		if (chunksize > VPMOCT_MAX_CHUNK)
 			chunksize = VPMOCT_MAX_CHUNK;
 
-		buf = &fw->data[i];
+		buf = (const char *) fw->data + i;
 		vpmoct_write_chunk(vpm, VPMOCT_BOOT_RAM+ram_index,
 				   buf, chunksize);
 		ram_index += chunksize;
@@ -434,7 +440,13 @@ static bool is_valid_vpmoct_firmware(const struct firmware *fw)
 {
 	const struct vpmoct_header *header =
 			(const struct vpmoct_header *)fw->data;
-	u32 crc = crc32(~0, &fw->data[10], fw->size - 10) ^ ~0;
+	size_t fw_size;
+#if defined(__FreeBSD__)
+	fw_size = fw->datasize;
+#else
+	fw_size = fw->size;
+#endif
+	u32 crc = crc32(~0, (const char *) fw->data + 10, fw_size - 10) ^ ~0;
 	return (!memcmp("DIGIUM", header->header, sizeof(header->header)) &&
 		 (le32_to_cpu(header->chksum) == crc));
 }
@@ -463,6 +475,7 @@ static void vpmoct_load_flash(struct work_struct *data)
 	int res;
 	struct vpmoct *const vpm = work->vpm;
 	const struct firmware *fw;
+	size_t fw_size;
 	const struct vpmoct_header *header;
 	char serial[VPMOCT_SERIAL_SIZE+1];
 	const char *const FIRMWARE_NAME = "dahdi-fw-vpmoct032.bin";
@@ -547,7 +560,12 @@ static void vpmoct_load_flash(struct work_struct *data)
 		goto error;
 	if (vpmoct_send_firmware_body(vpm, fw))
 		goto error;
-	if (vpmoct_check_firmware_crc(vpm, fw->size-VPMOCT_FIRM_HEADER_LEN*2,
+#if defined(__FreeBSD__)
+	fw_size = fw->datasize;
+#else
+	fw_size = fw->size;
+#endif
+	if (vpmoct_check_firmware_crc(vpm, fw_size-VPMOCT_FIRM_HEADER_LEN*2,
 					header->major, header->minor))
 		goto error;
 	release_firmware(fw);
@@ -583,7 +601,7 @@ void vpmoct_free(struct vpmoct *vpm)
 {
 	unsigned long flags;
 	struct vpmoct_cmd *cmd;
-	LIST_HEAD(list);
+	_LIST_HEAD(list);
 
 	if (!vpm)
 		return;

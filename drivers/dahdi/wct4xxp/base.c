@@ -38,13 +38,13 @@
 #include <linux/version.h>
 #include <linux/delay.h>
 #include <linux/moduleparam.h>
+#include <linux/crc32.h>
 #if defined(__FreeBSD__)
 #define cond_resched()
 #define pci_save_state(dev)	(0)
 #define pci_restore_state(dev)
 #else
 #include <asm/io.h>
-#include <linux/crc32.h>
 #endif
 
 #include <stdbool.h>
@@ -4906,6 +4906,7 @@ static void setup_spi(struct t4 *wc)
 static int t8_check_firmware(struct t4 *wc, unsigned int version)
 {
 	const struct firmware *fw;
+	size_t fw_size;
 	static const char t8_firmware[] = "dahdi-fw-te820.bin";
 	const struct t8_firm_header *header;
 	int res = 0;
@@ -4922,10 +4923,11 @@ static int t8_check_firmware(struct t4 *wc, unsigned int version)
 
 	/* Check the crc before anything else */
 #if defined(__FreeBSD__)
-	crc = crc32((char *) fw->data + 10, fw->datasize);
+	fw_size = fw->datasize;
 #else
-	crc = crc32(~0, &fw->data[10], fw->size - 10) ^ ~0;
+	fw_size = fw->size;
 #endif
+	crc = crc32(~0, (char *) fw->data + 10, fw_size - 10) ^ ~0;
 	if (memcmp("DIGIUM", header->header, sizeof(header->header)) ||
 		 (le32_to_cpu(header->chksum) != crc)) {
 		dev_info(&wc->dev->dev,
