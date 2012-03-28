@@ -521,7 +521,11 @@ struct dahdi_chan {
 	int		sigcap;			/*!< Capability for signalling */
 	__u32		chan_alarms;		/*!< alarms status */
 
+#if defined(__FreeBSD__)
+	struct selinfo	waitq;
+#else
 	wait_queue_head_t waitq;
+#endif
 
 	/* Used only by DAHDI -- NO DRIVER SERVICEABLE PARTS BELOW */
 	/* Buffer declarations */

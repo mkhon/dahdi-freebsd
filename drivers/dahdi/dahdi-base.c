@@ -38,9 +38,7 @@
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/module.h>
-#if defined(__FreeBSD__)
-#include <linux/slab.h>	/* linux/proc_fs.h */
-#else
+#ifdef CONFIG_PROC_FS
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #endif
@@ -198,6 +196,36 @@ thread_dtor_free_pseudo(void *arg, struct thread *td)
 	spin_unlock_irqrestore(&pseudo_free_list_lock, flags);
 }
 
+static void
+dahdi_poll_wait(struct file *fp, struct selinfo *sel, poll_table *p)
+{
+	poll_wait(fp, (wait_queue_head_t *)sel, p);
+}
+
+static void
+dahdi_poll_drain(struct selinfo *sel)
+{
+	seldrain(sel);
+}
+
+static void
+dahdi_init_waitqueue_head(struct selinfo *sel)
+{
+	init_waitqueue_head((wait_queue_head_t *) sel);
+}
+
+static void
+dahdi_wake_up_interruptible(struct selinfo *sel)
+{
+	wake_up_interruptible((wait_queue_head_t *) sel);
+	selwakeup(sel);
+}
+
+#ifdef wake_up_interruptible
+#undef wake_up_interruptible
+#endif
+#define wake_up_interruptible(waitq)	dahdi_wake_up_interruptible(waitq)
+
 static int dahdi_span_register_chardev(struct dahdi_span *span);
 static void dahdi_span_unregister_chardev(struct dahdi_span *span);
 #else /* !__FreeBSD__ */
@@ -225,6 +253,30 @@ static int
 dahdi_copy_from_user(void *to, const void __user *from, int n)
 {
 	return copy_from_user(to, from, n);
+}
+
+static void
+dahdi_poll_wait(struct file *fp, wait_queue_head_t *waitq, poll_table *p)
+{
+	poll_wait(fp, waitq, p);
+}
+
+static void
+dahdi_poll_drain(wait_queue_head_t *waitq)
+{
+	// nothing to do
+}
+
+static void
+dahdi_init_waitqueue_head(wait_queue_head_t *waitq)
+{
+	init_waitqueue_head(waitq);
+}
+
+static void
+dahdi_wake_up_interruptible(wait_queue_head_t *waitq)
+{
+	wake_up_interruptible(waitq);
 }
 
 EXPORT_SYMBOL(dahdi_transcode_fops);
@@ -419,9 +471,10 @@ struct dahdi_timer {
 	int ping;		/* Whether we've been ping'd */
 	int tripped;	/* Whether we're tripped */
 	struct list_head list;
-	wait_queue_head_t sel;
 #if defined(__FreeBSD__)
-	struct selinfo selinfo;
+	struct selinfo sel;
+#else
+	wait_queue_head_t sel;
 #endif
 };
 
@@ -602,16 +655,6 @@ static inline struct dahdi_chan *chan_from_file(struct file *file)
 {
 	return (file->private_data) ?
 			file->private_data : chan_from_num(UNIT(file));
-}
-
-static void
-dahdi_wake_up_chan(struct dahdi_chan *chan)
-{
-	wake_up_interruptible(&chan->waitq);
-#if defined(__FreeBSD__)
-	if (chan->file)
-		selwakeup(&chan->file->selinfo);
-#endif
 }
 
 /**
@@ -1155,7 +1198,7 @@ static void __qevent(struct dahdi_chan *chan, int event)
 		chan->eventinidx = 0;
 
 	/* wake em all up */
-	dahdi_wake_up_chan(chan);
+	wake_up_interruptible(&chan->waitq);
 
 	return;
 }
@@ -1578,13 +1621,7 @@ static void close_channel(struct dahdi_chan *chan)
 	if (chan->curzone) {
 		struct dahdi_zone *zone = chan->curzone;
 		chan->curzone = NULL;
-#if defined(__FreeBSD__)
-		spin_unlock_irqrestore(&chan->lock, flags);
-#endif
 		tone_zone_put(zone);
-#if defined(__FreeBSD__)
-		spin_lock_irqsave(&chan->lock, flags);
-#endif
 	}
 	chan->cadencepos = 0;
 	chan->pdialcount = 0;
@@ -1844,13 +1881,7 @@ static int set_tone_zone(struct dahdi_chan *chan, int zone)
 	if (chan->curzone) {
 		struct dahdi_zone *zone = chan->curzone;
 		chan->curzone = NULL;
-#if defined(__FreeBSD__)
-		spin_unlock_irqrestore(&chan->lock, flags);
-#endif
 		tone_zone_put(zone);
-#if defined(__FreeBSD__)
-		spin_lock_irqsave(&chan->lock, flags);
-#endif
 	}
 	chan->curzone = z;
 	memcpy(chan->ringcadence, z->ringcadence, sizeof(chan->ringcadence));
@@ -1895,7 +1926,7 @@ static void __dahdi_init_chan(struct dahdi_chan *chan)
 	might_sleep();
 
 	spin_lock_init(&chan->lock);
-	init_waitqueue_head(&chan->waitq);
+	dahdi_init_waitqueue_head(&chan->waitq);
 	if (!chan->master)
 		chan->master = chan;
 	if (!chan->readchunk)
@@ -2338,9 +2369,6 @@ static void dahdi_chan_unreg(struct dahdi_chan *chan)
 		 * From now on, any file_operations for this device
 		 * would call the nodev_fops methods.
 		 */
-#if defined(__FreeBSD__)
-		seldrain(&chan->file->selinfo);
-#endif
 	}
 
 	release_echocan(chan->ec_factory);
@@ -2375,6 +2403,7 @@ static void dahdi_chan_unreg(struct dahdi_chan *chan)
 
 	/* Let processeses out of their poll_wait() */
 	wake_up_interruptible(&chan->waitq);
+	dahdi_poll_drain(&chan->waitq);
 
 	/* release tone_zone */
 	close_channel(chan);
@@ -2406,6 +2435,7 @@ static void dahdi_chan_unreg(struct dahdi_chan *chan)
 		if (chan->span)
 			put_span(chan->span);
 	}
+	spin_lock_destroy(&chan->lock);
 }
 
 static ssize_t dahdi_chan_read(FOP_READ_ARGS_DECL)
@@ -3068,7 +3098,7 @@ static int dahdi_timing_open(struct file *file)
 	if (!(t = kzalloc(sizeof(*t), GFP_KERNEL)))
 		return -ENOMEM;
 
-	init_waitqueue_head(&t->sel);
+	dahdi_init_waitqueue_head(&t->sel);
 	INIT_LIST_HEAD(&t->list);
 	file->private_data = t;
 
@@ -3103,9 +3133,7 @@ static int dahdi_timer_release(struct file *file)
 		return 0;
 	}
 
-#if defined(__FreeBSD__)
-	seldrain(&cur->selinfo);
-#endif
+	dahdi_poll_drain(&cur->sel);
 	kfree(cur);
 
 	return 0;
@@ -4043,9 +4071,6 @@ static int dahdi_timer_ioctl(struct file *file, unsigned int cmd, unsigned long 
 		spin_lock_irqsave(&dahdi_timer_lock, flags);
 		timer->ping = 1;
 		wake_up_interruptible(&timer->sel);
-#if defined(__FreeBSD__)
-		selwakeup(&timer->selinfo);
-#endif
 		spin_unlock_irqrestore(&dahdi_timer_lock, flags);
 		break;
 	case DAHDI_TIMERPONG:
@@ -5950,7 +5975,7 @@ dahdi_chanandpseudo_ioctl(struct file *file, unsigned int cmd,
 				chan->readn[j] = 0;
 				chan->readidx[j] = 0;
 			}
-			dahdi_wake_up_chan(chan);  /* wake_up_interruptible waiting on read */
+			wake_up_interruptible(&chan->waitq);  /* wake_up_interruptible waiting on read */
 		   }
 		if (i & DAHDI_FLUSH_WRITE) /* if for write (output) */
 		   {
@@ -5962,7 +5987,7 @@ dahdi_chanandpseudo_ioctl(struct file *file, unsigned int cmd,
 				chan->writen[j] = 0;
 				chan->writeidx[j] = 0;
 			}
-			dahdi_wake_up_chan(chan); /* wake_up_interruptible waiting on write */
+			wake_up_interruptible(&chan->waitq); /* wake_up_interruptible waiting on write */
 		   }
 		if (i & DAHDI_FLUSH_EVENT) /* if for events */
 		   {
@@ -7935,7 +7960,7 @@ static inline void __dahdi_getbuf_chunk(struct dahdi_chan *ss, unsigned char *tx
 						there is something to write */
 						ms->outwritebuf = -1;
 						if (ms->iomask & (DAHDI_IOMUX_WRITE | DAHDI_IOMUX_WRITEEMPTY))
-							dahdi_wake_up_chan(ms);
+							wake_up_interruptible(&ms->waitq);
 						/* If we're only supposed to start when full, disable the transmitter */
 						if ((ms->txbufpolicy == DAHDI_POLICY_WHEN_FULL) ||
 							(ms->txbufpolicy == DAHDI_POLICY_HALF_FULL))
@@ -7945,7 +7970,7 @@ static inline void __dahdi_getbuf_chunk(struct dahdi_chan *ss, unsigned char *tx
 					if (ms->outwritebuf == ms->inwritebuf) {
 						ms->outwritebuf = oldbuf;
 						if (ms->iomask & (DAHDI_IOMUX_WRITE | DAHDI_IOMUX_WRITEEMPTY))
-							dahdi_wake_up_chan(ms);
+							wake_up_interruptible(&ms->waitq);
 						/* If we're only supposed to start when full, disable the transmitter */
 						if ((ms->txbufpolicy == DAHDI_POLICY_WHEN_FULL) ||
 							(ms->txbufpolicy == DAHDI_POLICY_HALF_FULL))
@@ -7969,7 +7994,7 @@ otherwise keeps sleeping and looking. The part in this code got "optimized"
 out in the later versions, and is put back now. */
 				if (!(ms->flags & DAHDI_FLAG_PPP) ||
 				    !dahdi_have_netdev(ms)) {
-					dahdi_wake_up_chan(ms);
+					wake_up_interruptible(&ms->waitq);
 				}
 				/* Transmit a flag if this is an HDLC channel */
 				if (ms->flags & DAHDI_FLAG_HDLC)
@@ -8144,7 +8169,7 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 	case DAHDI_TXSTATE_START:
 		/* If we were starting, go off hook now ready to debounce */
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_AFTERSTART, DAHDI_AFTERSTART_TIME);
-		dahdi_wake_up_chan(chan);
+		wake_up_interruptible(&chan->waitq);
 		break;
 
 	case DAHDI_TXSTATE_PREWINK:
@@ -8157,7 +8182,7 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_ONHOOK, DAHDI_TXSTATE_ONHOOK, 0);
 		if (chan->file && (chan->file->f_flags & O_NONBLOCK))
 			__qevent(chan, DAHDI_EVENT_HOOKCOMPLETE);
-		dahdi_wake_up_chan(chan);
+		wake_up_interruptible(&chan->waitq);
 		break;
 
 	case DAHDI_TXSTATE_PREFLASH:
@@ -8169,7 +8194,7 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_OFFHOOK, 0);
 		if (chan->file && (chan->file->f_flags & O_NONBLOCK))
 			__qevent(chan, DAHDI_EVENT_HOOKCOMPLETE);
-		dahdi_wake_up_chan(chan);
+		wake_up_interruptible(&chan->waitq);
 		break;
 
 	case DAHDI_TXSTATE_DEBOUNCE:
@@ -8177,21 +8202,21 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 		/* See if we've gone back on hook */
 		if ((chan->rxhooksig == DAHDI_RXSIG_ONHOOK) && (chan->rxflashtime > 2))
 			chan->itimerset = chan->itimer = chan->rxflashtime * DAHDI_CHUNKSIZE;
-		dahdi_wake_up_chan(chan);
+		wake_up_interruptible(&chan->waitq);
 		break;
 
 	case DAHDI_TXSTATE_AFTERSTART:
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_OFFHOOK, 0);
 		if (chan->file && (chan->file->f_flags & O_NONBLOCK))
 			__qevent(chan, DAHDI_EVENT_HOOKCOMPLETE);
-		dahdi_wake_up_chan(chan);
+		wake_up_interruptible(&chan->waitq);
 		break;
 
 	case DAHDI_TXSTATE_KEWL:
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_ONHOOK, DAHDI_TXSTATE_AFTERKEWL, DAHDI_AFTERKEWLTIME);
 		if (chan->file && (chan->file->f_flags & O_NONBLOCK))
 			__qevent(chan, DAHDI_EVENT_HOOKCOMPLETE);
-		dahdi_wake_up_chan(chan);
+		wake_up_interruptible(&chan->waitq);
 		break;
 
 	case DAHDI_TXSTATE_AFTERKEWL:
@@ -8205,7 +8230,7 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 	case DAHDI_TXSTATE_PULSEBREAK:
 		dahdi_rbs_sethook(chan, DAHDI_TXSIG_OFFHOOK, DAHDI_TXSTATE_PULSEMAKE,
 			chan->pulsemaketime);
-		dahdi_wake_up_chan(chan);
+		wake_up_interruptible(&chan->waitq);
 		break;
 
 	case DAHDI_TXSTATE_PULSEMAKE:
@@ -8219,13 +8244,13 @@ static inline void __rbs_otimer_expire(struct dahdi_chan *chan)
 		}
 		chan->txstate = DAHDI_TXSTATE_PULSEAFTER;
 		chan->otimer = chan->pulseaftertime * DAHDI_CHUNKSIZE;
-		dahdi_wake_up_chan(chan);
+		wake_up_interruptible(&chan->waitq);
 		break;
 
 	case DAHDI_TXSTATE_PULSEAFTER:
 		chan->txstate = DAHDI_TXSTATE_OFFHOOK;
 		__do_dtmf(chan);
-		dahdi_wake_up_chan(chan);
+		wake_up_interruptible(&chan->waitq);
 		break;
 
 	default:
@@ -9137,7 +9162,7 @@ static void __putbuf_chunk(struct dahdi_chan *ss, unsigned char *rxb, int bytes)
 							/* if there are processes waiting in poll() on this channel,
 							   wake them up */
 							if (!ms->rxdisable) {
-								dahdi_wake_up_chan(ms);
+								wake_up_interruptible(&ms->waitq);
 							}
 						}
 /* In the very orignal driver, it was quite well known to me (Jim) that there
@@ -9159,7 +9184,7 @@ that the waitqueue is empty. */
 #ifdef CONFIG_DAHDI_DEBUG
 							module_printk(KERN_NOTICE, "Notifying reader data in block %d\n", oldbuf);
 #endif
-							dahdi_wake_up_chan(ms);
+							wake_up_interruptible(&ms->waitq);
 						}
 					}
 				}
@@ -9345,7 +9370,7 @@ void dahdi_hdlc_finish(struct dahdi_chan *ss)
 	}
 
 	if (!ss->rxdisable)
-		dahdi_wake_up_chan(ss);
+		wake_up_interruptible(&ss->waitq);
 	spin_unlock_irqrestore(&ss->lock, flags);
 }
 
@@ -9382,7 +9407,7 @@ int dahdi_hdlc_getbuf(struct dahdi_chan *ss, unsigned char *bufptr, unsigned int
 			if (ss->outwritebuf == ss->inwritebuf) {
 				ss->outwritebuf = -1;
 				if (ss->iomask & (DAHDI_IOMUX_WRITE | DAHDI_IOMUX_WRITEEMPTY))
-					dahdi_wake_up_chan(ss);
+					wake_up_interruptible(&ss->waitq);
 				/* If we're only supposed to start when full, disable the transmitter */
 				if ((ss->txbufpolicy == DAHDI_POLICY_WHEN_FULL) || (ss->txbufpolicy == DAHDI_POLICY_HALF_FULL))
 					ss->txdisable = 1;
@@ -9394,7 +9419,7 @@ int dahdi_hdlc_getbuf(struct dahdi_chan *ss, unsigned char *bufptr, unsigned int
 
 			if (!(ss->flags & DAHDI_FLAG_PPP) ||
 			    !dahdi_have_netdev(ss)) {
-				dahdi_wake_up_chan(ss);
+				wake_up_interruptible(&ss->waitq);
 			}
 		}
 	} else {
@@ -9422,9 +9447,6 @@ static void process_timers(void)
 				cur->tripped++;
 				cur->pos = cur->ms;
 				wake_up_interruptible(&cur->sel);
-#if defined(__FreeBSD__)
-				selwakeup(&cur->selinfo);
-#endif
 			}
 		}
 	}
@@ -9437,7 +9459,7 @@ static unsigned int dahdi_timer_poll(struct file *file, struct poll_table_struct
 	unsigned long flags;
 	int ret = 0;
 	if (timer) {
-		poll_wait(file, &timer->sel, wait_table);
+		dahdi_poll_wait(file, &timer->sel, wait_table);
 		spin_lock_irqsave(&dahdi_timer_lock, flags);
 		if (timer->tripped || timer->ping)
 			ret |= POLLPRI;
@@ -9472,7 +9494,7 @@ dahdi_chan_poll(struct file *file, struct poll_table_struct *wait_table)
 		return POLLERR | POLLHUP | POLLRDHUP | POLLNVAL | POLLPRI;
 	}
 
-	poll_wait(file, &c->waitq, wait_table);
+	dahdi_poll_wait(file, &c->waitq, wait_table);
 
 	spin_lock_irqsave(&c->lock, flags);
 	ret |= (c->inwritebuf > -1) ? POLLOUT|POLLWRNORM : 0;
@@ -10639,17 +10661,11 @@ static void __exit dahdi_cleanup(void)
 	while (!list_empty(&tone_zones)) {
 		z = list_entry(tone_zones.next, struct dahdi_zone, node);
 		list_del(&z->node);
-#if defined(__FreeBSD__)
-		spin_unlock(&zone_lock);
-#endif
 		if (!tone_zone_put(z)) {
 			module_printk(KERN_WARNING,
 				      "Potential memory leak detected in %s\n",
 				      __func__);
 		}
-#if defined(__FreeBSD__)
-		spin_lock(&zone_lock);
-#endif
 	}
 	spin_unlock(&zone_lock);
 
