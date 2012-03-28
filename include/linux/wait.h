@@ -3,11 +3,35 @@
 
 #include <linux/spinlock.h>
 
-typedef void *wait_queue_head_t;
-#define init_waitqueue_head(q)
-#define wake_up(q)			wakeup_one(q)
-#define wake_up_interruptible(q)	wakeup_one(q)
-#define wake_up_interruptible_all(q)	wakeup(q)
+struct __wait_queue_head {
+	void *dummy;
+};
+typedef struct __wait_queue_head wait_queue_head_t;
+
+static inline void
+init_waitqueue_head(wait_queue_head_t *q)
+{
+	// nothing to do
+}
+
+static inline void
+wake_up(wait_queue_head_t *q)
+{
+	wakeup_one(q);
+}
+
+static inline void
+wake_up_interruptible(wait_queue_head_t *q)
+{
+	wakeup_one(q);
+}
+
+static inline void
+wake_up_interruptible_all(wait_queue_head_t *q)
+{
+	wakeup(q);
+}
+
 #define wait_event_timeout(q, condition, timeout)			\
 ({									\
 	int __ret = timeout;						\

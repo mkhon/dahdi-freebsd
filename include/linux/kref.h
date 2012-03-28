@@ -2,8 +2,10 @@
 #define _LINUX_KREF_H_
 
 #include <linux/types.h>
+#include <linux/workqueue.h>
 
 struct kref {
+	struct work_struct release_work;	/* should be the first elem */
 	volatile u_int refcount;
 };
 

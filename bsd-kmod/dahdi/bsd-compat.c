@@ -76,7 +76,7 @@ tasklet_init(struct tasklet_struct *t, void (*func)(unsigned long), unsigned lon
 void
 tasklet_hi_schedule(struct tasklet_struct *t)
 {
-	taskqueue_enqueue(taskqueue_fast, &t->task);
+	taskqueue_enqueue_fast(taskqueue_fast, &t->task);
 }
 
 void
@@ -311,7 +311,7 @@ void
 schedule_work(struct work_struct *work)
 {
 	work->tq = taskqueue_fast;
-	taskqueue_enqueue(taskqueue_fast, &work->task);
+	taskqueue_enqueue_fast(taskqueue_fast, &work->task);
 }
 
 void
@@ -364,16 +364,22 @@ _flush_workqueue_fn(void *context, int pending)
 	/* nothing to do */
 }
 
-void
-flush_workqueue(struct workqueue_struct *wq)
+static void
+_flush_taskqueue(struct taskqueue **tq)
 {
 	struct task flushtask;
 
 	PHOLD(curproc);
 	TASK_INIT(&flushtask, 0, _flush_workqueue_fn, NULL);
-	taskqueue_enqueue(wq->tq, &flushtask);
-	taskqueue_drain(wq->tq, &flushtask);
+	taskqueue_enqueue_fast(*tq, &flushtask);
+	taskqueue_drain(*tq, &flushtask);
 	PRELE(curproc);
+}
+
+void
+flush_workqueue(struct workqueue_struct *wq)
+{
+	_flush_taskqueue(&wq->tq);
 }
 
 void
@@ -382,6 +388,12 @@ queue_work(struct workqueue_struct *wq, struct work_struct *work)
 	work->tq = wq->tq;
 	taskqueue_enqueue(wq->tq, &work->task);
 }
+
+/*
+ * Drain taskqueue_fast (schedule_work() requests, including kref release requests)
+ */
+SYSUNINIT(dahdi_bsd_compat_sysuninit, SI_SUB_KLD, SI_ORDER_ANY,
+    _flush_taskqueue, &taskqueue_fast);
 
 /*
  * kref API
@@ -408,7 +420,8 @@ int
 kref_put(struct kref *kref, void (*release) (struct kref *kref))
 {
 	if (refcount_release(&kref->refcount)) {
-		release(kref);
+		INIT_WORK(&kref->release_work, (work_func_t) release);
+		schedule_work(&kref->release_work);
 		return 1;
 	}
 
@@ -615,4 +628,3 @@ u_short fcstab[256] = {
 	0xf78f,	0xe606,	0xd49d,	0xc514,	0xb1ab,	0xa022,	0x92b9,	0x8330,
 	0x7bc7,	0x6a4e,	0x58d5,	0x495c,	0x3de3,	0x2c6a,	0x1ef1,	0x0f78
 };
-
