@@ -2,6 +2,7 @@
 #define _LINUX_VERSION_H_
 
 #include <sys/types.h>
+#include <sys/param.h>
 #include <sys/conf.h>		/* D_VERSION */
 
 #define D_VERSION_LINEAR	(((D_VERSION & 0xffff) << 16) | (((D_VERSION >> 16) & 0xff) << 8) | ((D_VERSION >> 24) & 0xff))
