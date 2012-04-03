@@ -436,16 +436,23 @@ kvasprintf(gfp_t gfp, const char *fmt, va_list ap)
 {
 	struct sbuf *sb = sbuf_new_auto();
 	char *res;
+	int len;
 
 	sbuf_vprintf(sb, fmt, ap);
+#if __FreeBSD_version >= 802508
 	if (sbuf_finish(sb)) {
 		res = NULL;
 	} else {
-		int len = sbuf_len(sb);
+#else
+	sbuf_finish(sb);
+#endif
+		len = sbuf_len(sb);
 		res = kmalloc(len + 1, gfp);
 		if (res != NULL)
 			bcopy(sbuf_data(sb), res, len + 1);
+#if __FreeBSD_version >= 802508
 	}
+#endif
 	sbuf_delete(sb);
 	return res;
 }
