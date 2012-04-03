@@ -196,10 +196,18 @@ thread_dtor_free_pseudo(void *arg, struct thread *td)
 	spin_unlock_irqrestore(&pseudo_free_list_lock, flags);
 }
 
+#if __FreeBSD_version < 802514
+static void
+seldrain(struct selinfo *sel)
+{
+	selwakeup(sel);
+}
+#endif
+
 static void
 dahdi_poll_wait(struct file *fp, struct selinfo *sel, poll_table *p)
 {
-	poll_wait(fp, (wait_queue_head_t *)sel, p);
+	poll_wait(fp, (wait_queue_head_t *) sel, p);
 }
 
 static void
