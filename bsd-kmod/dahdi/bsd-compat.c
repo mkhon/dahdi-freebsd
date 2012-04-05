@@ -568,6 +568,9 @@ request_firmware(const struct firmware **firmware_p, const char *name, struct de
 void
 release_firmware(const struct firmware *firmware)
 {
+	if (firmware == NULL)
+		return;
+
 	firmware_put(firmware, FIRMWARE_UNLOAD);
 }
 
