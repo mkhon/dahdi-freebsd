@@ -35,8 +35,16 @@
 #ifndef _DAHDI_USER_H
 #define _DAHDI_USER_H
 
+#if defined(__FreeBSD__) && !defined(_KERNEL)
+#include <sys/ioccom.h>
+#include <sys/types.h>
+
+typedef uint32_t __u32;
+typedef int32_t __s32;
+#else
 #include <linux/types.h>
 #include <linux/ioctl.h>
+#endif
 #include <dahdi/dahdi_config.h>
 
 #if !defined(__FreeBSD__) && !defined(ELAST)
