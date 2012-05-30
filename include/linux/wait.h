@@ -32,12 +32,12 @@ wake_up_interruptible_all(wait_queue_head_t *q)
 	wakeup(q);
 }
 
-#define wait_event_timeout(q, condition, timeout)			\
+#define _wait_event(q, condition, prio, timeout)			\
 ({									\
-	int __ret = timeout;						\
+	int __ret = (timeout);						\
 	if (!(condition)) {						\
 		for (;;) {						\
-			if (tsleep(&q, 0, "wait_event", (timeout))) {	\
+			if (tsleep(&(q), (prio), "lxwait", (timeout))) { \
 				__ret = 0;				\
 				break;					\
 			}						\
@@ -47,7 +47,8 @@ wake_up_interruptible_all(wait_queue_head_t *q)
 	}								\
 	__ret;								\
 })
-#define wait_event_interruptible(q, condition) wait_event_timeout(q, condition, 0)
-#define wait_event_interruptible_timeout(q, condition, timeout) wait_event_timeout(q, condition, timeout)
+#define wait_event_timeout(q, condition, timeout) _wait_event(q, condition, 0, timeout)
+#define wait_event_interruptible(q, condition) _wait_event(q, condition, PCATCH, 0)
+#define wait_event_interruptible_timeout(q, condition, timeout) _wait_event(q, condition, PCATCH, timeout)
 
 #endif /* _LINUX_WAIT_H_ */

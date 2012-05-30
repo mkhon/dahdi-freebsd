@@ -214,6 +214,8 @@ dahdi_init_waitqueue_head(struct selinfo *sel)
 	init_waitqueue_head((wait_queue_head_t *) sel);
 }
 
+#define init_waitqueue_head(waitq)	dahdi_init_waitqueue_head(waitq)
+
 static void
 dahdi_wake_up_interruptible(struct selinfo *sel)
 {
@@ -265,18 +267,6 @@ static void
 dahdi_poll_drain(wait_queue_head_t *waitq)
 {
 	// nothing to do
-}
-
-static void
-dahdi_init_waitqueue_head(wait_queue_head_t *waitq)
-{
-	init_waitqueue_head(waitq);
-}
-
-static void
-dahdi_wake_up_interruptible(wait_queue_head_t *waitq)
-{
-	wake_up_interruptible(waitq);
 }
 
 EXPORT_SYMBOL(dahdi_transcode_fops);
@@ -5774,7 +5764,9 @@ static int dahdi_ioctl_iomux(struct file *file, unsigned long data)
 		}
 
 #if defined(__FreeBSD__)
-		wait_event_interruptible(chan->waitq, 1);
+		ret = tsleep(&chan->waitq, PCATCH, "dahdimx", 0);
+		if (ret == ERESTART || ret == EINTR)
+			return -ERESTARTSYS;
 #else /* !__FreeBSD__ */
 		if (signal_pending(current)) {
 			finish_wait(&chan->waitq, &wait);
