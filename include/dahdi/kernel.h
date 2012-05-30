@@ -66,6 +66,17 @@
 #define local_irq_restore(f)
 
 #define DAHDI_IRQ_HANDLER(a) static int a(void *dev_id)
+
+/*
+ * ioctl argument is in kernel space in FreeBSD
+ */
+#ifndef __copy_from_user
+#error "__copy_from_user is not defined"
+#endif
+#undef __copy_from_user
+#undef __copy_to_user
+#define __copy_from_user(to, from, n)	(bcopy((from), (to), (n)), 0)
+#define __copy_to_user(to, from, n)	(bcopy((from), (to), (n)), 0)
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
 #define DAHDI_IRQ_HANDLER(a) static irqreturn_t a(int irq, void *dev_id)
 #else

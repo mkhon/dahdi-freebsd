@@ -109,14 +109,6 @@
 
 #include "ng_dahdi_iface.h"
 
-/*
- * ioctl argument is in kernel space in FreeBSD
- */
-#undef __copy_from_user
-#undef __copy_to_user
-#define __copy_from_user(to, from, n)	(bcopy((from), (to), (n)), 0)
-#define __copy_to_user(to, from, n)	(bcopy((from), (to), (n)), 0)
-
 #define signal_pending(current)	(0)
 
 #define POLLRDHUP 0
