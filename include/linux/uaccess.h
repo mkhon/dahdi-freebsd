@@ -11,8 +11,8 @@
 #define get_user(v, p)	copy_from_user(&(v), (void *) (p), sizeof(v))
 #define put_user(v, p)						\
 	do {							\
-		int j = (v);					\
-		copy_to_user((void *) (p), &j, sizeof(j));	\
+		int _j = (v);					\
+		copy_to_user((void *) (p), &_j, sizeof(_j));	\
 	} while (0)
 
 #endif /* _LINUX_UACCESS_H_ */

@@ -8,12 +8,9 @@
 #include <linux/uaccess.h>
 
 typedef struct poll_table_struct {
-	/* intentionally left empty */
+	struct selinfo *selinfo;
 } poll_table;
 
-static inline void poll_wait(struct file *fp, wait_queue_head_t *wait_address, poll_table *p)
-{
-	selrecord(curthread, &fp->selinfo);
-}
+#define poll_wait(fp, wait_address, poll_table) selrecord(curthread, &fp->selinfo)
 
 #endif /* _LINUX_POLL_H_ */

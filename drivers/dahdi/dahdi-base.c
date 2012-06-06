@@ -199,8 +199,11 @@ seldrain(struct selinfo *sel)
 static void
 dahdi_poll_wait(struct file *fp, struct selinfo *sel, poll_table *p)
 {
-	poll_wait(fp, (wait_queue_head_t *) sel, p);
+	p->selinfo = sel;
 }
+
+#undef poll_wait
+#define poll_wait(fp, sel, p)	dahdi_poll_wait(fp, sel, p)
 
 static void
 dahdi_poll_drain(struct selinfo *sel)
@@ -214,6 +217,7 @@ dahdi_init_waitqueue_head(struct selinfo *sel)
 	init_waitqueue_head((wait_queue_head_t *) sel);
 }
 
+#undef init_waitqueue_head
 #define init_waitqueue_head(waitq)	dahdi_init_waitqueue_head(waitq)
 
 static void
@@ -223,9 +227,7 @@ dahdi_wake_up_interruptible(struct selinfo *sel)
 	selwakeup(sel);
 }
 
-#ifdef wake_up_interruptible
 #undef wake_up_interruptible
-#endif
 #define wake_up_interruptible(waitq)	dahdi_wake_up_interruptible(waitq)
 
 static int dahdi_span_register_chardev(struct dahdi_span *span);
@@ -255,12 +257,6 @@ static int
 dahdi_copy_from_user(void *to, const void __user *from, int n)
 {
 	return copy_from_user(to, from, n);
-}
-
-static void
-dahdi_poll_wait(struct file *fp, wait_queue_head_t *waitq, poll_table *p)
-{
-	poll_wait(fp, waitq, p);
 }
 
 static void
@@ -6357,21 +6353,6 @@ static int dahdi_chan_ioctl(struct file *file, unsigned int cmd, unsigned long d
 	WARN_ON(!chan->master);
 
 	switch(cmd) {
-#if defined(__FreeBSD__)
-	case FIONBIO:
-		get_user(j, data);
-		spin_lock_irqsave(&chan->lock, flags);
-		if (chan->file) {
-			if (j)
-				chan->file->f_flags |= O_NONBLOCK;
-			else
-				chan->file->f_flags &= ~O_NONBLOCK;
-		}
-		spin_unlock_irqrestore(&chan->lock, flags);
-		break;
-	case FIOASYNC:
-		break;
-#endif /* __FreeBSD__ */
 	case DAHDI_SETSIGFREEZE:
 		get_user(j, (int __user *)data);
 		spin_lock_irqsave(&chan->lock, flags);
@@ -9451,7 +9432,7 @@ static unsigned int dahdi_timer_poll(struct file *file, struct poll_table_struct
 	unsigned long flags;
 	int ret = 0;
 	if (timer) {
-		dahdi_poll_wait(file, &timer->sel, wait_table);
+		poll_wait(file, &timer->sel, wait_table);
 		spin_lock_irqsave(&dahdi_timer_lock, flags);
 		if (timer->tripped || timer->ping)
 			ret |= POLLPRI;
@@ -9486,7 +9467,7 @@ dahdi_chan_poll(struct file *file, struct poll_table_struct *wait_table)
 		return POLLERR | POLLHUP | POLLRDHUP | POLLNVAL | POLLPRI;
 	}
 
-	dahdi_poll_wait(file, &c->waitq, wait_table);
+	poll_wait(file, &c->waitq, wait_table);
 
 	spin_lock_irqsave(&c->lock, flags);
 	ret |= (c->inwritebuf > -1) ? POLLOUT|POLLWRNORM : 0;
@@ -10121,13 +10102,11 @@ static int
 dahdi_device_open(struct cdev *dev, int oflags, int devtype, struct thread *td)
 {
 	int res;
-	struct file *file = dahdi_device_get_file(dev, -1);
+	struct file *file;
 
 	/*
 	 * create file struct
 	 */
-	if (file != NULL)
-		return EBUSY;
 	file = kzalloc(sizeof(*file), GFP_KERNEL);
 	if (file == NULL)
 		return ENOMEM;
@@ -10224,11 +10203,14 @@ dahdi_device_poll(struct cdev *dev, int events, struct thread *td)
 	if (file == NULL)
 		return ENXIO;
 
+	wait_table.selinfo = NULL;
 	res = file->f_op->poll(file, &wait_table);
 	if (res < 0)
 		return (0);
 
 	res &= events;
+	if (res == 0 && wait_table.selinfo != NULL)
+		selrecord(td, wait_table.selinfo);
 	return (res);
 }
 
