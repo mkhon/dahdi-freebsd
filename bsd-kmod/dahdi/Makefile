@@ -28,5 +28,10 @@ install-headers:
 	${INSTALL_DATA} ${INCLUDEDIR}/dahdi/${_h} ${PREFIX}/include/dahdi/${_h:H}
 .endfor
 
+print-headers:
+	@${ECHO} ${DAHDI_INCS}
+
+.if !make(print-headers)
 .include <bsd.kmod.mk>
+.endif
 .include <bsd.own.mk>
