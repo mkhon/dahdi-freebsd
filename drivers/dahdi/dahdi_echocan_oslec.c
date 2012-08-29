@@ -159,7 +159,7 @@ static void __exit mod_exit(void)
 }
 
 #if defined(__FreeBSD__)
-DAHDI_DEV_MODULE(dahdi_echocan_oslec);
+LINUX_DEV_MODULE(dahdi_echocan_oslec);
 MODULE_VERSION(dahdi_echocan_oslec, 1);
 MODULE_DEPEND(dahdi_echocan_oslec, dahdi, 1, 1, 1);
 #endif /* __FreeBSD__ */
