@@ -10123,7 +10123,7 @@ dahdi_device_open(struct cdev *dev, int oflags, int devtype, struct thread *td)
 	/*
 	 * open the file
 	 */
-	res = dahdi_open(NULL, file);
+	res = file->f_op->open(NULL, file);
 	if (res < 0) {
 		devfs_clear_cdevpriv();
 		return -res;
