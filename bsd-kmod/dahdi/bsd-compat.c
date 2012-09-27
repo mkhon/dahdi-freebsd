@@ -29,12 +29,12 @@
  * $Id$
  */
 
-#include <dahdi/kernel.h>
 #include <asm/atomic.h>
 #include <linux/firmware.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/kmod.h>
+#include <linux/kref.h>
 #include <linux/module.h>
 #include <linux/ppp_defs.h>
 #include <linux/sched.h>
@@ -47,9 +47,6 @@
 #include <sys/syscallsubr.h>	/* kern_kldload() */
 #include <sys/refcount.h>
 #include <sys/sbuf.h>
-
-SYSCTL_NODE(, OID_AUTO, dahdi, CTLFLAG_RW, 0, "DAHDI");
-SYSCTL_NODE(_dahdi, OID_AUTO, echocan, CTLFLAG_RW, 0, "DAHDI Echo Cancelers");
 
 /*
  * Tasklet API
@@ -195,8 +192,8 @@ del_timer(struct timer_list *t)
 void
 init_completion(struct completion *c)
 {
-	cv_init(&c->cv, "DAHDI completion cv");
-	mtx_init(&c->lock, "DAHDI completion lock", "condvar", MTX_DEF);
+	cv_init(&c->cv, "linux completion cv");
+	mtx_init(&c->lock, "linux completion lock", "condvar", MTX_DEF);
 	c->done = 0;
 }
 
@@ -249,7 +246,7 @@ complete(struct completion *c)
 void
 _linux_sema_init(struct semaphore *s, int value)
 {
-	sema_init(&s->sema, value, "DAHDI semaphore");
+	sema_init(&s->sema, value, "linux semaphore");
 }
 
 void
@@ -332,13 +329,13 @@ create_singlethread_workqueue(const char *name)
 	int res;
 	struct workqueue_struct *wq;
 
-	wq = malloc(sizeof(*wq), M_DAHDI, M_NOWAIT);
+	wq = malloc(sizeof(*wq), M_LINUX, M_NOWAIT);
 	if (wq == NULL)
 		return NULL;
 
 	wq->tq = taskqueue_create_fast(name, M_NOWAIT, taskqueue_thread_enqueue, &wq->tq);
 	if (wq->tq == NULL) {
-		free(wq, M_DAHDI);
+		free(wq, M_LINUX);
 		return NULL;
 	}
 
@@ -355,7 +352,7 @@ void
 destroy_workqueue(struct workqueue_struct *wq)
 {
 	taskqueue_free(wq->tq);
-	free(wq, M_DAHDI);
+	free(wq, M_LINUX);
 }
 
 static void

@@ -38,6 +38,9 @@
 
 MALLOC_DEFINE(M_DAHDI, "dahdi", "DAHDI interface data structures");
 
+SYSCTL_NODE(, OID_AUTO, dahdi, CTLFLAG_RW, 0, "DAHDI");
+SYSCTL_NODE(_dahdi, OID_AUTO, echocan, CTLFLAG_RW, 0, "DAHDI Echo Cancelers");
+
 void
 rlprintf(int pps, const char *fmt, ...)
 {
