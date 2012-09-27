@@ -1,6 +1,7 @@
 #ifndef _LINUX_FIRMWARE_H_
 #define _LINUX_FIRMWARE_H_
 
+#include <sys/types.h>
 #include <sys/firmware.h>
 
 struct device;

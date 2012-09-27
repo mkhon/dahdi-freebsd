@@ -1,6 +1,7 @@
 #ifndef _LINUX_INTERRUPT_H_
 #define _LINUX_INTERRUPT_H_
 
+#include <sys/types.h>
 #include <sys/taskqueue.h>
 #include <linux/kernel.h>
 #include <linux/irqreturn.h>

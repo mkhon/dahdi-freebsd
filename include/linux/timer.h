@@ -1,6 +1,7 @@
 #ifndef _LINUX_TIMER_H_
 #define _LINUX_TIMER_H_
 
+#include <sys/param.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
 #include <linux/ktime.h>
