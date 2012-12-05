@@ -2772,7 +2772,9 @@ static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_devi
 	wc->ddev = dahdi_create_device(wc->vb.pdev);
 	if (!wc->ddev) {
 		ifaces[index] = NULL;
+#if !defined(__FreeBSD__)
 		kfree(wc);
+#endif
 		return -ENOMEM;
 	}
 	wc->ddev->manufacturer = "Digium";
@@ -2781,7 +2783,9 @@ static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_devi
 				      dahdi_pci_get_slot(wc->vb.pdev));
 	if (!wc->ddev->location) {
 		ifaces[index] = NULL;
+#if !defined(__FreeBSD__)
 		kfree(wc);
+#endif
 		return -ENOMEM;
 	}
 
@@ -2817,7 +2821,9 @@ static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_devi
 	
 	wc->wq = create_singlethread_workqueue(wc->name);
 	if (!wc->wq) {
+#if !defined(__FreeBSD__)
 		kfree(wc);
+#endif
 		ifaces[index] = NULL;
 		return -ENOMEM;
 	}

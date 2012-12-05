@@ -2095,7 +2095,9 @@ static void free_wc(struct t4 *wc)
 	kfree(wc->ddev->location);
 	kfree(wc->ddev->hardware_id);
 	dahdi_free_device(wc->ddev);
+#if !defined(__FreeBSD__)
 	kfree(wc);
+#endif
 }
 
 /**
@@ -5233,7 +5235,9 @@ t4_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	wc->ddev = dahdi_create_device(wc->dev);
 	if (!wc->ddev) {
+#if !defined(__FreeBSD__)
 		kfree(wc);
+#endif
 		return -ENOMEM;
 	}
 
