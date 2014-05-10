@@ -494,13 +494,13 @@ static void ztdethmf_transmit(struct dahdi_dynamic *dyn, u8 *msg, size_t msglen)
 		}
 
 #if defined(__FreeBSD__)
-		MGETHDR(m, M_DONTWAIT, MT_DATA);
+		MGETHDR(m, M_NOWAIT, MT_DATA);
 		if (m == NULL) {
 			rcu_read_unlock();
 			ethmf_errors_inc();
 			return;
 		}
-		MCLGET(m, M_DONTWAIT);
+		MCLGET(m, M_NOWAIT);
 
 		/* copy ethernet header and reserve space for ztdeth header */
 		bcopy(dev->dev_addr, &eh.ether_shost, sizeof(eh.ether_shost));

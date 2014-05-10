@@ -191,10 +191,10 @@ static void ztdeth_transmit(struct dahdi_dynamic *dyn, u8 *msg, size_t msglen)
 		dev = z->dev;
 		spin_unlock_irqrestore(&zlock, flags);
 #if defined(__FreeBSD__)
-		MGETHDR(m, M_DONTWAIT, MT_DATA);
+		MGETHDR(m, M_NOWAIT, MT_DATA);
 		if (m != NULL) {
 			if (sizeof(eh) + sizeof(zh) + msglen >= MINCLSIZE) {
-				MCLGET(m, M_DONTWAIT);
+				MCLGET(m, M_NOWAIT);
 			}
 
 			/* copy ethernet header */
