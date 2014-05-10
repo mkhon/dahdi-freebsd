@@ -10223,7 +10223,9 @@ static struct cdevsw dahdi_devsw = {
 	.d_ioctl	= dahdi_device_ioctl,
 	.d_poll		= dahdi_device_poll,
 	.d_name		= "dahdi",
-#if __FreeBSD_version >= 800039
+#if __FreeBSD_version >= 1000000
+	.d_flags	= D_TRACKCLOSE | D_NEEDMINOR
+#elif __FreeBSD_version >= 800039
 	.d_flags	= D_PSEUDO | D_TRACKCLOSE | D_NEEDMINOR
 #else
 	.d_flags	= D_PSEUDO | D_TRACKCLOSE
