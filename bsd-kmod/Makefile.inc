@@ -19,4 +19,4 @@ TAR?=		tar
 TOUCH?=		touch
 
 beforeinstall:
-	${MKDIR} ${KMODDIR}
+	${MKDIR} ${DESTDIR}${KMODDIR}
