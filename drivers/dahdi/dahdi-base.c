@@ -104,6 +104,7 @@
 #define chan_to_netdev(h) ((h)->hdlcnetdev->netdev)
 
 #if defined(__FreeBSD__)
+#include <sys/eventhandler.h>
 #include <sys/filio.h>
 #include <sys/proc.h>
 
